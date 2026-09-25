@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 """
-media-auto / sync_jf_scanner —— Seerr Jellyfin 扫描器(1:1 移植)
+media-auto / sync_jf_scanner —— Jellyfin 扫描器
 ================================================================
-把 Seerr 的「Jellyfin 扫描 → 推导可用性 → 写 Media/Season」引擎一比一移植到本地,
+「Jellyfin 扫描 → 推导可用性 → 写 Media/Season」引擎,
 写本地 SQLite 的 `media` / `season` 表(可用性镜像, 见 db/models.py)。
 
-与 Seerr 源码的逐段对应(便于审计):
-  extract_ids()        ← server/lib/scanners/jellyfin/index.ts  extractMovieIds()
-  process_movie()      ← server/lib/scanners/baseScanner.ts     processMovie()
-  process_show()       ← server/lib/scanners/baseScanner.ts     processShow()
-  run_scan()           ← server/lib/scanners/jellyfin/index.ts  run()
-
-核心不变量(与 Seerr 一致, 这是"一个作品只有一行"的根本保证):
+核心不变量(这是"一个作品只有一行"的根本保证):
   1. **必须有 TMDB ID 才写库** —— 取 ProviderIds.Tmdb, 没有就 IMDb→TMDB 反查,
-     再没有就 **跳过(等价 Seerr throw 'Unable to find TMDb ID')**。绝不为
+     再没有就 **跳过(抛 NoTmdbIdError)**。绝不为
      无 TMDB ID 的条目写空壳(这正是 MediaAuto 当年 /pull 幽灵 bug 的反面)。
   2. **按 (tmdb_id, media_type) 找行** —— getExisting(); 有则更新状态, 无则新建。
-     并发写同一 ID 用 per-id 锁(等价 Seerr asyncLock.dispatch(tmdbId))。
+     并发写同一 ID 用 per-id 锁。
   3. **只在扫描时写, 从不在用户查看时写**。
   4. 季状态由「Jellyfin 实有集(jf_episode) vs TMDB 应有集(all_seasons)」逐季推导,
-     作品状态由季状态 rollup —— 逻辑照抄 Seerr processShow。
+     作品状态由季状态 rollup。
 
-状态枚举 MediaStatus 数字值与 Seerr constants/media.ts 完全一致。
+状态枚举 MediaStatus 数字值见 db/models.py。
 4K 分支: MediaAuto 无 4K 库拆分, status_4k 镜像 status(单库假设, 已注明)。
 
-⚠️ **写入模型(2026-09-22 照 Seerr 重做)** —— 本模块**从不删除任何行**:
+⚠️ **写入模型(2026-09-22 定稿)** —— 本模块**从不删除任何行**:
   · 分集(jf_episode)只做**按剧替换**: 刷新"这份快照覆盖到的剧", 未覆盖的原样保留,
     **不再有"清空整表再重建"**(旧写法一次能把所有剧的分集一起踩少);
   · 增量(recent)是**窗口式重读**(最新 N 条), **没有游标** —— 写入幂等, 重复处理
@@ -52,7 +46,7 @@ from db.database import SessionLocal, init_db
 from db import repositories as repo
 from db.models import JellyfinItem, JfEpisode, Media, MediaStatus, MediaType, Season
 
-# 增量窗口大小: 每轮重读"最新 N 条"(对应 Seerr `/Items/Latest?Limit=12`)。
+# 增量窗口大小: 每轮重读"最新 N 条"(/Items/Latest?Limit=12)。
 # 没有游标 —— 见模块 docstring 的写入模型说明。
 RECENT_ITEM_WINDOW = 300   # 最新 N 条条目(Movie/Series)
 RECENT_EP_WINDOW = 300     # 最新 N 条分集 → 反推涉及的剧(发现"分集后补齐"的半成品)
@@ -63,12 +57,12 @@ TMDB_CONCURRENCY = 5
 REPAIR_FRESH_DAYS = 1
 # 兜底重算每轮上限(防御: 万一本地 media 被清空, 也不至于一轮里全量重推)
 REPAIR_MAX = 50
-# 4K 开关(MediaAuto 无 4K 拆分, 恒 False; 保留位以便日后对齐 Seerr 4K 分支)
+# 4K 开关(MediaAuto 无 4K 拆分, 恒 False; 保留位以备日后 4K 分支)
 ENABLE_4K = False
 
 
 # ---------------------------------------------------------------------------
-# 并发锁(等价 Seerr asyncLock.dispatch(tmdbId)): 同一 tmdb_id 串行处理
+# 并发锁(per-id): 同一 tmdb_id 串行处理
 # ---------------------------------------------------------------------------
 class _IdLock:
     def __init__(self):
@@ -84,7 +78,7 @@ class _IdLock:
 
 
 # ---------------------------------------------------------------------------
-# extract_ids() ← Seerr extractMovieIds
+# extract_ids() —— 从条目里提取 TMDB/IMDb ID
 # ---------------------------------------------------------------------------
 def _correction_tmdb_id(session, item):
     """查本地 TMDB ID 校准映射(scripts/calibrate_jf_ids --audit 写入)。
@@ -102,7 +96,7 @@ async def extract_ids(cfg, item, id_lock, sem, session=None):
     """从 Jellyfin 条目解析权威 TMDB ID。
 
     顺序: 本地校准映射(最高优先) → ProviderIds.Tmdb → (IMDb → TMDB /find 反查)
-    → 都没有则抛 NoTmdbIdError(调用方捕获后跳过, 等价 Seerr throw 'Unable to find TMDb ID')。
+    → 都没有则抛 NoTmdbIdError(调用方捕获后跳过)。
     返回 (tmdb_id:int, imdb_id:str)。
     """
     # 本地校准映射优先(修 Jellyfin 挂错且 IMDb 反查无效的情况)
@@ -114,7 +108,7 @@ async def extract_ids(cfg, item, id_lock, sem, session=None):
     imdb_id = str(item.get("imdb_id") or "").strip()
 
     if not tmdb_id.isdigit():
-        # Seerr: imdbId && !tmdbId → resolveImdbIdForScan
+        # 有 IMDb 但没有 TMDB → 走 IMDb→TMDB 反查
         if imdb_id.startswith("tt"):
             from scripts.calibrate_jf_ids import _find_by_imdb
             found, found_type = await _find_by_imdb(cfg, imdb_id, sem)
@@ -125,7 +119,7 @@ async def extract_ids(cfg, item, id_lock, sem, session=None):
 
 
 class NoTmdbIdError(Exception):
-    """等价 Seerr `throw new Error('Unable to find TMDb ID')`。"""
+    """拿不到 TMDB ID 时抛出(调用方捕获后跳过该条目)。"""
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +224,7 @@ def _items_from_db(session, item_ids):
 
 
 # ---------------------------------------------------------------------------
-# process_movie() ← Seerr processMovie
+# process_movie() —— 电影可用性写入
 # ---------------------------------------------------------------------------
 def _process_movie(session, tmdb_id, *, imdb_id="", jf_media_id="",
                    media_added_at=None, title="", year=""):
@@ -248,7 +242,7 @@ def _process_movie(session, tmdb_id, *, imdb_id="", jf_media_id="",
         repo.save_media(session, media)
     else:
         changed = False
-        # Seerr: 已有行 status 非 AVAILABLE → 置 AVAILABLE(在库即得)
+        # 已有行 status 非 AVAILABLE → 置 AVAILABLE(在库即得)
         if media.status != MediaStatus.AVAILABLE:
             media.status = MediaStatus.AVAILABLE
             changed = True
@@ -276,10 +270,10 @@ def _process_movie(session, tmdb_id, *, imdb_id="", jf_media_id="",
 
 
 # ---------------------------------------------------------------------------
-# 季状态推导(= Seerr processShow 的季循环 + rollup, 非 4K 分支)
+# 季状态推导(季循环 + rollup, 非 4K 分支)
 # ---------------------------------------------------------------------------
 def _season_status(total_episodes, episodes, existing_status, processing=False):
-    """Seerr 单季状态: 全齐=AVAILABLE; 部分=PARTIALLY_AVAILABLE; 否则保持/UNKNOWN。"""
+    """单季状态: 全齐=AVAILABLE; 部分=PARTIALLY_AVAILABLE; 否则保持/UNKNOWN。"""
     complete = total_episodes > 0 and total_episodes == episodes
     if complete or (existing_status == MediaStatus.AVAILABLE):
         return MediaStatus.AVAILABLE
@@ -293,7 +287,7 @@ def _season_status(total_episodes, episodes, existing_status, processing=False):
 
 
 def _show_rollup(seasons, prev_status):
-    """Seerr processShow 的作品级 rollup(非 4K, nonSpecial, countsTowardsRollup)。
+    """作品级 rollup(非 4K, nonSpecial, countsTowardsRollup)。
     seasons: [(season_number, status, total_episodes)](含 Specials)。"""
     non_special = [s for s in seasons if s[0] != 0]
     # countsTowardsRollup: 该季被扫描到(total_episodes>0) 或 状态非 UNKNOWN
@@ -319,7 +313,7 @@ def _show_rollup(seasons, prev_status):
 def _process_show(session, tmdb_id, *, tvdb_id=None, imdb_id="", jf_media_id="",
                   media_added_at=None, seasons=None, eps_by_series=None,
                   series_ids=None, title="", year=""):
-    """写/更新一部剧的可用性(= Seerr processShow, 非 4K)。
+    """写/更新一部剧的可用性(非 4K)。
 
     seasons: TMDB 应有季 [{number, episodes(=episode_count)}]。
     eps_by_series / series_ids: 用来算每季 Jellyfin 实有集数。
@@ -348,11 +342,11 @@ def _process_show(session, tmdb_id, *, tvdb_id=None, imdb_id="", jf_media_id="",
             media.year = year
     prev_status = media.status
 
-    # 季循环(Seerr): 逐季定状态
+    # 季循环: 逐季定状态
     for tseason in seasons:
         num = tseason["number"]
         total = tseason.get("episodes") or tseason.get("episode_count") or 0
-        # Seerr: totalEpisodes>0 才算; 否则季不可用(0 集)
+        # totalEpisodes>0 才算; 否则季不可用(0 集)
         episodes = len(actual.get(num, set())) if total > 0 else 0
         existing_season = next((x for x in media.seasons
                                 if x.season_number == num), None)
@@ -369,7 +363,7 @@ def _process_show(session, tmdb_id, *, tvdb_id=None, imdb_id="", jf_media_id="",
                 status_4k=(_season_status(total, episodes, MediaStatus.UNKNOWN)
                            if ENABLE_4K else MediaStatus.UNKNOWN),
             ))
-    # Seerr: 只有有实有集的季才把 jellyfinMediaId 记上
+    # 只有有实有集的季才把 jellyfinMediaId 记上
     if jf_media_id and any(
             (t.get("episodes") or t.get("episode_count") or 0) > 0 and
             len(actual.get(t["number"], set())) > 0 for t in seasons):
@@ -377,7 +371,7 @@ def _process_show(session, tmdb_id, *, tvdb_id=None, imdb_id="", jf_media_id="",
     if media_added_at and not media.media_added_at:
         media.media_added_at = media_added_at
 
-    # rollup(Seerr)
+    # rollup(作品级)
     all_seasons_now = [(s.season_number, s.status,
                         next((t.get("episodes") or t.get("episode_count") or 0
                               for t in seasons if t["number"] == s.season_number), 0))
@@ -416,7 +410,7 @@ def _process_show(session, tmdb_id, *, tvdb_id=None, imdb_id="", jf_media_id="",
 
 
 # ---------------------------------------------------------------------------
-# run_scan() ← Seerr jellyfin run()
+# run_scan() —— 扫描主流程
 # ---------------------------------------------------------------------------
 async def _process_item(session, cfg, item, sem, id_lock, eps_index):
     """处理一个 Jellyfin 条目(Movie→process_movie / Series→process_show)。"""
@@ -497,7 +491,7 @@ async def _refresh_episodes_for_series(cfg, session, series_ids):
     **逐系列容错(重要)**: 单个系列拉取失败只跳过该系列并记数, 绝不让它中断整轮
     扫描 —— 典型失败:`/Shows/{id}/Episodes` 对**已从 Jellyfin 移除**的剧返回 404
     (A 层镜像里的陈旧行会走到这里)。一个 404 不该把整轮 5 分钟增量废掉。
-    (这与 Seerr 一致: 它也是逐条目 try/catch。)
+    (逐条目 try/catch。)
 
     ⚠️ 这里**不再**判断"这份分集列表是不是残缺"(旧的五道防线 + 可疑队列已删除):
     既然写入是"只替换这一部剧"、不含任何整表清空, 一份残缺列表的最坏后果是
@@ -620,7 +614,7 @@ def run(mode="full", limit=0):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Seerr 式 Jellyfin 可用性扫描(1:1 移植)")
+    ap = argparse.ArgumentParser(description="Jellyfin 可用性扫描")
     ap.add_argument("--mode", choices=["full", "recent"], default="full")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()

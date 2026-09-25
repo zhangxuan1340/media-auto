@@ -259,7 +259,7 @@
     border:1px solid var(--glass-brd);box-shadow:inset 0 1px 0 var(--header-inset)}
   .badge{display:inline-block;background:rgba(10,132,255,.12);color:var(--brand-d);border-radius:999px;padding:2px 9px;font-size:11px;margin-right:4px;font-weight:600}
   .badge.warn{background:rgba(255,159,10,.16);color:var(--warn-fg)} .badge.err{background:rgba(255,55,95,.14);color:var(--err-fg)} .badge.ok{background:rgba(48,209,88,.16);color:var(--ok-fg)} .badge.run{background:rgba(10,132,255,.14);color:var(--brand-d)}
-  /* ===== 作业与缓存页(对齐 Seerr: Settings → Jobs & Cache) ===== */
+  /* ===== 作业与缓存页 ===== */
   /* 分区标题: 内联 SVG + 文字(前端禁 emoji) */
   .sec-title{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:var(--text);margin:22px 0 10px}
   .sec-title:first-of-type{margin-top:4px}
@@ -565,7 +565,7 @@
   .about-row b{color:var(--text);font-weight:600;text-align:right}
   /* 卡片状态徽章 */
   .card .flags{margin-top:6px;display:flex;gap:4px;flex-wrap:wrap}
-  /* ===== 分集状态 · Seerr 式逐季折叠(完整=绿勾, 不完整=进度横条, 展开看逐集打勾) ===== */
+  /* ===== 分集状态 · 逐季折叠(完整=绿勾, 不完整=进度横条, 展开看逐集打勾) ===== */
   .seas-summary{font-size:12px;color:var(--muted);margin:0 0 10px}
   .seas{background:var(--glass);border:1px solid var(--glass-brd);border-radius:var(--r-s);margin-bottom:8px;
     overflow:hidden;box-shadow:var(--shadow-s);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}

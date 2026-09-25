@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-media-auto / sync_tmdb —— 把 TMDB 元数据同步到本地 SQLite(替代 Seerr 的媒体缓存)
+media-auto / sync_tmdb —— 把 TMDB 元数据同步到本地 SQLite
 ================================================================================
 种子来源 = 本地 Jellyfin 库(jellyfin_item 表, 已由增量同步维护)。
 对每个 tmdb_id 调 TMDB 官方 API 拉 详情(+演员/类型/剧情) 写入 tmdb_media;

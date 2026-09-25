@@ -1,7 +1,7 @@
-"""MediaAuto 进程内调度器 —— Seerr `server/job/schedule.ts` 的移植
+"""MediaAuto 进程内调度器
 ==============================================================
 不再是"每个任务一段硬编码的到期判断", 而是**遍历统一的作业注册表**(`lib/jobs.py`),
-与 Seerr 的 `scheduledJobs` 一一对应:
+已登记的作业:
 
     作业名                 类型      默认周期        映射
     Jellyfin 最近新增扫描   process   每 5 分钟       A 层条目同步 + 分集增量 + 可用性推导
@@ -11,7 +11,7 @@
     追踪检查                process   每 6 小时       演员新作/新季 → 推磁力
     清理图片缓存            process   每日 04:00      清空本地图片缓存
 
-三条关键语义(对齐 Seerr):
+三条关键语义:
   1. **周期可编辑**: cron 存 config.json 的 `jobs.<id>.schedule`, 页面改完立即重排。
   2. **手动运行不改变时间表**: 手动只触发一次, 已排好的"下一次执行"保持不动。
   3. **下一次执行时间可查询**: 由 `next_run(cron, last_run)` 实时推导。
@@ -206,7 +206,7 @@ def _compute_next(job_id, last_run, cfg=None):
 
 
 def _snapshot(job_id, cfg=None):
-    """作业对外快照(字段名对齐 Seerr 的 GET /jobs)。"""
+    """作业对外快照(字段名见 GET /jobs)。"""
     from server.config import get_config
     cfg = cfg if cfg is not None else get_config()
     meta = reg.JOBS_BY_ID[job_id]
@@ -283,7 +283,7 @@ def _log_end(log_id, status, total, err=""):
 
 
 def _execute(job_id, manual=False):
-    """真正跑一个作业。manual=True 时不推进时间表(Seerr: 手动运行不改变计划)。"""
+    """真正跑一个作业。manual=True 时不推进时间表(手动运行不改变计划)。"""
     with _rt_lock:
         rt = _runtime.setdefault(job_id, {})
         if rt.get("running"):
@@ -318,9 +318,9 @@ def _execute(job_id, manual=False):
 
 
 def start_job(job_id, manual=True):
-    """按需触发一次(Seerr `POST /jobs/:id/run`)。返回 (True, 快照) / (False, 原因)。
+    """按需触发一次(POST /jobs/:id/run)。返回 (True, 快照) / (False, 原因)。
 
-    立即返回, 作业在后台线程里跑 —— 与 Seerr 的 `job.invoke()` 一致。
+    立即返回, 作业在后台线程里跑。
     """
     if job_id not in reg.JOBS_BY_ID:
         return False, "作业不存在"
@@ -333,7 +333,7 @@ def start_job(job_id, manual=True):
 
 
 def reschedule_job(job_id, expr):
-    """改周期(Seerr `POST /jobs/:id/schedule`)。非法 cron 抛 ValueError。"""
+    """改周期(POST /jobs/:id/schedule)。非法 cron 抛 ValueError。"""
     if job_id not in reg.JOBS_BY_ID:
         raise KeyError(job_id)
     reg.set_schedule(job_id, expr)          # 非法则 ValueError

@@ -1,8 +1,8 @@
 """TMDB 官方 API 客户端(异步 + 同步, 基于 httpx)
 
-架构转向(2026-09): Web 浏览/缺失/屏蔽/隐藏 全部走本地 TMDB 缓存, 不再依赖 Seerr。
-本客户端是 TMDB 的**主数据源**;organize/NFO 阶段仍以它为第一选择, Seerr 作兜底
-(detail 形状与 clients/seerr/client.py 的 detail_sync/_norm_detail 完全一致, 可互换)。
+架构(2026-09 定稿): Web 浏览/缺失/屏蔽/隐藏 全部走本地 TMDB 缓存。
+本客户端是 TMDB 的**唯一数据源**;organize/NFO 阶段同样以它为准
+(detail 形状即 NFO/organize 所需的规整结构)。
 
 ⚠️ 网络事实(本机实测 2026-09):
   - api.themoviedb.org 直连 000(被墙/DNS 污染, 解析到被阻断 IP)
@@ -206,7 +206,7 @@ def _run_async(coro):
 
 
 def _pick_card(cards, year=None, kind=None):
-    """从 search_cards 结果里挑最合适的(与 seerr._pick_result 同策略):
+    """从 search_cards 结果里挑最合适的:
     类型匹配 > 年份完全匹配 > 年份最接近 > 越靠前越优先。"""
     best, best_key = None, None
     for i, x in enumerate(cards):
@@ -223,9 +223,9 @@ def _pick_card(cards, year=None, kind=None):
 
 
 def resolve_meta_sync(cfg, queries, year=None, kind=None):
-    """organize 反查(替代 seerr.resolve_meta, 走 TMDB 直连)。
+    """organize 反查(走 TMDB 直连)。
 
-    queries: 候选片名列表(或单个字符串)。返回与 seerr.resolve_meta 同形状:
+    queries: 候选片名列表(或单个字符串)。返回:
       {tmdb_id, imdb_id, tvdb_id, title, year, kind, matched_query} 或 None。
     """
     if isinstance(queries, str):
@@ -382,14 +382,14 @@ def genre_map_sync(cfg, kind):
 
 
 # ---------------------------------------------------------------------------
-# 详情(形状与 seerr.client._norm_detail 完全一致 → NFO/organize 可互换)
+# 详情(规整后的形状 → NFO/organize 直接可用)
 # ---------------------------------------------------------------------------
 def _year_of(d):
     return (d.get("release_date") or d.get("first_air_date") or "")[:4]
 
 
 def _certification_tmdb(release_dates):
-    """TMDB /release_dates → 'US:PG-13 / CN:IIA' 风格(与 Seerr/TMM 输出一致)。"""
+    """TMDB /release_dates → 'US:PG-13 / CN:IIA' 风格(与 TMM 输出一致)。"""
     by_cc = {}
     for r in (release_dates or []):
         cc = r.get("iso_3166_1") or ""
@@ -549,10 +549,10 @@ def _trailer(videos):
 
 
 async def detail(cfg, kind, tmdb_id):
-    """详情(与 seerr.client.detail / _norm_detail 同形状)。kind=movie|tv。
+    """详情。kind=movie|tv。
 
     额外多带一个 `seasons` 字段(剧集每季 {number, name, episodes, air_date, in_production}),
-    供本地「分集级缺失」精确对比 —— Seerr 版也有 seasons 但无 in_production。
+    供本地「分集级缺失」精确对比。
     """
     try:
         media = await _tmdb_get(cfg, f"/3/{kind}/{tmdb_id}",
@@ -671,7 +671,7 @@ def detail_sync(cfg, kind, tmdb_id):
 
 
 def english_title_sync(cfg, kind, tmdb_id):
-    """英文名(?language=en 的 title/name), 与 seerr.english_title_sync 同义。"""
+    """英文名(?language=en 的 title/name)。"""
     try:
         media = _tmdb_get_sync(cfg, f"/3/{kind}/{tmdb_id}", {"language": "en"})
     except Exception:  # noqa: BLE001

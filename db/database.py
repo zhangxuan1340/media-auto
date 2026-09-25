@@ -1,6 +1,6 @@
 """SQLite 存储基础设施
 
-本地 SQLite 作为 Seerr / Jellyfin 同步数据的落地库,以及同步日志。
+本地 SQLite 作为 Jellyfin/TMDB 同步数据的落地库,以及同步日志。
 数据库文件默认位于 <项目根>/data/media_auto.db,可用环境变量 MEDIA_AUTO_DB 覆盖。
 """
 import os

@@ -12,11 +12,6 @@
     "base": "https://your-site.example.com",
     "limit": 10
   },
-  "seerr": {
-    "_comment": "仅作 organize/NFO 阶段的元数据【兜底源】(TMDB 主源失败时回退)。Web 浏览/缺失/屏蔽已不依赖它。",
-    "url": "http://localhost:5055",
-    "api_key": "YOUR_SEERR_API_KEY"
-  },
   "search": {
     "_comment": "磁力搜索行为。primary: 双源都启用时优先用哪个(next_web/native)。golden_groups: 这些发布组的种子【默认金标】(自压片源必然带中文字幕+国语, 但文件名不一定写明)。",
     "primary": "next_web",

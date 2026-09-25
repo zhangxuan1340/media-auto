@@ -5,7 +5,7 @@
   - 业务 API(/api/browse, /api/search, /api/push, /api/organize/*, /api/sync/*, /api/local/*, 均需登录)
 
 直接复用项目根的 lib/、clients/、scripts/ 与 db/: classify / cd2 / state / jellyfin / sync。
-(2026-09 起 Seerr 彻底断开: 浏览/搜索/缺失/详情全走本地 TMDB 缓存, 不再依赖 Seerr。)
+(浏览/搜索/缺失/详情全走本地 TMDB 缓存。)
 """
 from pathlib import Path
 
@@ -27,13 +27,12 @@ from server import imgproxy as imgproxy_router
 
 app = FastAPI(title="MediaAuto Web", version="1.2")
 
-# 2026-09: Seerr 彻底断开 —— 浏览/搜索/缺失/详情全走本地 TMDB 缓存(缓存→TMDB API 现拉写库)。
-# 原 seerr 路由已删, 其 /search 迁到 browse.search, /detail 走 browse.detail(+pull)。
+# 浏览/搜索/缺失/详情全走本地 TMDB 缓存(缓存→TMDB API 现拉写库)。
 app.include_router(search_router.router)
 app.include_router(cd2_router.router)
 app.include_router(qbit_router.router)
 app.include_router(sync_router.router)
-app.include_router(jobs_router.router)   # 作业与缓存(Seerr 式 /api/jobs、/api/cache)
+app.include_router(jobs_router.router)   # 作业与缓存(/api/jobs、/api/cache)
 app.include_router(browse_router.router)
 app.include_router(nfo_router.router)    # NFO 更新: 读取上次更新时间 + 手动重新生成
 app.include_router(track_router.router)
@@ -42,7 +41,7 @@ app.include_router(imgproxy_router.router)  # 图片本地缓存代理 /api/img/
 
 @app.on_event("startup")
 def _startup_scheduler():
-    """启动进程内调度器(Seerr 式定时: 近增 5 分钟 / 全量每日 3 点 / 可用性对账每日 5 点)。"""
+    """启动进程内调度器(定时: 近增 5 分钟 / 全量每日 3 点 / 可用性对账每日 5 点)。"""
     try:
         from server import scheduler
         scheduler.start()

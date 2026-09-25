@@ -165,7 +165,7 @@ async def api_organize_files(limit: int = 50, only: str = "", cfg: dict = Depend
       - GetSubFiles 的字段是 fullPathName / isDirectory,不是 path / isFolder(旧代码取错字段,
         导致 path 恒为 None、移动操作必然失败)。
       - 判定目录用 isDirectory(bool);protojson 输出的是枚举名,不能比 fileType 的数值。
-      - 每个条目要反查一次元数据(拿 IMDB/TMDB 号; 本地 TMDB 缓存 → TMDB 直连, Seerr 已断开),故用 limit 控住单次条目数。
+      - 每个条目要反查一次元数据(拿 IMDB/TMDB 号; 本地 TMDB 缓存 → TMDB 直连),故用 limit 控住单次条目数。
     """
     try:
         from clients.clouddrive import client as cd2
@@ -184,7 +184,7 @@ async def api_organize_files(limit: int = 50, only: str = "", cfg: dict = Depend
             (only or None), max(1, min(int(limit or 50), 200)),
         )
     except Exception as e:  # noqa: BLE001
-        # 元数据主源是 TMDB(Seerr 仅 TMDB 不可达时的兜底), 文案不再把 Seerr 摆到台前
+        # 元数据主源是 TMDB, 文案里就以 TMDB 为准
         raise HTTPException(502, f"读取 CD2 / TMDB 失败: {e}")
 
     # 精简字段给前端(体积控制)

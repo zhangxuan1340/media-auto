@@ -1,0 +1,24 @@
+# 体积 / 无关
+.git/
+.gitignore
+.venv/
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+doc/
+.workbuddy/
+*.zip
+
+# 私密:配置绝不能进镜像(由 docker-compose 挂载)
+config.json
+config.json.bak-*
+
+# 运行时数据 / 队列状态(一律用卷挂载)
+data/
+state/
+
+# 文档与截图类(README 保留)
+*.md
+!README.md

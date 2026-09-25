@@ -11,7 +11,7 @@ media-auto / organize —— 离线目录整理: 清广告 → 改名 → 归位
          这类文件多为 289KB 左右,扩展名五花八门,同一出处的域名有很多变体
        - 杂项 = 非视频非字幕(.txt/.url/.nfo/.jpg/.png/.exe/.doc…)
   3. 用「目录名 + 主媒体文件名」反查元数据(中文名/年份/IMDB/TMDB)
-     —— 本地 TMDB 缓存优先(零网络), 未命中走 TMDB 直连(多语言搜索); Seerr 已于 2026-09 断开
+     —— 本地 TMDB 缓存优先(零网络), 未命中走 TMDB 直连(多语言搜索)
   4. 生成规范目录名:  <标题>.<年份>.ttXXXXXXX
                      无 IMDB 时 → <标题>.<年份>.tmdbXXXXXXX
   5. [--apply] 执行: 删广告 → RenameFile 改名 → MoveFile 归位到 /Cloud/<分类>
@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from clients.clouddrive import client as cd2  # noqa: E402
 from clients.tmdb import client as tmdb  # noqa: E402  (元数据主源: 反查/详情/英文名)
 from lib import naming  # noqa: E402
-# 2026-09: Seerr 彻底断开 —— 元数据只走 本地 TMDB 缓存 → TMDB 直连(无 Seerr 兜底)。
+# 元数据只走 本地 TMDB 缓存 → TMDB 直连两级。
 
 # ---- 阈值默认值(可在 config.organize 里覆盖; 读取一律走下方统一入口, 非法值回退默认) ----
 DEFAULT_MIN_MATCH_SCORE = 0.9
@@ -157,7 +157,7 @@ def root_for_kind(config, kind):
 
 
 def build_classify_media(meta, name, media_files):
-    """把 Seerr 元数据 + 原始目录/文件名拼成 lib/classify.py 需要的 media dict。
+    """把元数据 + 原始目录/文件名拼成 lib/classify.py 需要的 media dict。
 
     classify 的级联是: 动画(Dm) > 纪录片(Jl) > 综艺(Xr) > 体育(Sp) >
     音乐(Mu) > 地区(Cn/En/JpKr/Hk/Sea/Ot),而地区判定依赖 original_language +
@@ -350,7 +350,7 @@ def resolve_from_local_cache(config, dir_name, cands, year, hint):
 
     本地缓存以 Jellyfin 库为种子 + 用户浏览时现拉的作品。命中即返回与 resolve_meta_sync
     同形状的 meta —— 含 original_language + countries, 供分类判地区。未命中返回 None,
-    由调用方回退 TMDB 直连(Seerr 已于 2026-09 断开, 无后续兜底)。
+    由调用方回退 TMDB 直连(无后续兜底)。
 
     评分口径: 用【目录名】(反查最可靠的信号) 对本地 title/original_title 做 title_match,
     与下游 best_title_match(meta, names) 同口径(目录名也在 names 里), 保证本地命中的条目
@@ -535,7 +535,7 @@ def resolve_metadata(config, dir_name, media_files, base_dir=None):
     元数据源优先级(命中即停):
       1. 本地 TMDB 缓存(零网络, 已同步的作品) —— resolve_from_local_cache
       2. TMDB 直连搜索(多语言, 覆盖库里没有的) —— tmdb.resolve_meta_sync
-    (2026-09 起 Seerr 彻底断开, 不再有第三级兜底; 都未命中返回 None=未匹配)
+    (只有这两级; 都未命中返回 None=未匹配)
 
     会做两道校验(见 naming.title_match):
       - 匹配度 < organize.min_match_score → 视为错配,返回 {"rejected": ...}
@@ -572,7 +572,7 @@ def resolve_metadata(config, dir_name, media_files, base_dir=None):
     min_score = min_match_score(config)
     # 1) 本地 TMDB 缓存优先(零网络, 已同步的作品秒回, 且带 original_language 供分类)
     meta = resolve_from_local_cache(config, dir_name, cands, year, pref_kind)
-    # 2) TMDB 直连搜索(本地没有时); Seerr 已断开, 都未命中 → 返回 None(未匹配)
+    # 2) TMDB 直连搜索(本地没有时); 都未命中 → 返回 None(未匹配)
     if not meta and (config.get("tmdb", {}) or {}).get("api_key"):
         try:
             meta = tmdb.resolve_meta_sync(config, cands, year=match_year, kind=pref_kind)
@@ -1516,7 +1516,7 @@ _FULL_META_CACHE = {}
 def resolve_full_meta(config, plan):
     """取 NFO 所需的完整元数据(plan 里只存了摘要,避免预览响应臃肿)。
 
-    主源 TMDB 直连(Seerr 已于 2026-09 断开, 无兜底)。
+    主源 TMDB 直连(唯一源)。
     已含 NFO / 目录名已规范的条目(plan["meta"] 为空)返回 None —— 此时不重写 NFO。
     """
     summary = plan.get("meta") or {}
@@ -1528,7 +1528,7 @@ def resolve_full_meta(config, plan):
     if key in _FULL_META_CACHE:
         return _FULL_META_CACHE[key]
     meta = None
-    # 主源: TMDB 直连(唯一源, Seerr 已断开)
+    # 主源: TMDB 直连(唯一源)
     if (config.get("tmdb", {}) or {}).get("api_key"):
         try:
             meta = tmdb.detail_sync(config, kind, tmdb_id)

@@ -13,9 +13,9 @@
 返回规整后的字段,便于写入本地 SQLite。
 
 ────────────────────────────────────────────────────────────────────────────
-同步模型(2026-09-22 照 Seerr 重做, 见 .workbuddy/docs/Seerr同步模型研究.md)
+同步模型(2026-09-22 定稿)
 ────────────────────────────────────────────────────────────────────────────
-本模块的取数接口设计遵循 Seerr 的两条铁律:
+本模块的取数接口设计遵循两条铁律:
 
   1. **写入永远可加**: 拉到的数据只用于 upsert(新增/更新), 调用方**从不**以
      "远端列表里没有它"为理由删本地行。所以取数接口**不需要**"快照是否完整"
@@ -36,7 +36,7 @@ from lib.config import load_config
 
 JF_IMAGE = "https://image.tmdb.org/t/p/w300"
 
-# 增量窗口大小: 每轮重读"最新 N 条"(对应 Seerr `/Items/Latest?Limit=12`)。
+# 增量窗口大小: 每轮重读"最新 N 条"(/Items/Latest?Limit=12)。
 # 没有游标 ⇒ 重复处理是幂等的、零代价; 少读到的条目由下一轮或每日全量扫到。
 RECENT_WINDOW = 300
 
@@ -86,18 +86,16 @@ async def update_provider_ids(cfg, item_id, provider_ids):
 async def item_exists(cfg, item_id):
     """按 ID 单查一个条目是否还在 Jellyfin 库里 —— 三态返回。
 
-    这是 Seerr `availabilitySync.mediaExistsInJellyfin()` 里 `getItemData(ratingKey)`
-    的等价物, 是「fail-safe 消失检测」的地基:
+    这是「fail-safe 消失检测」的地基:
 
       True  = 明确查到 → 还在库
       False = 明确查不到 → 库里确实没有它(**只有这一种情况才允许判"消失"**)
       None  = 无法判断(请求失败/超时/服务端错误/响应形状异常)
               → 调用方**必须当作"还在"**, 绝不据此判删
-              (对应 Seerr: `catch` 里 `existsInJellyfin = true`)
 
     ⚠️ 为什么用 `/Items?ids=` 而不是 `/Items/{id}`: 本机 Jellyfin 12.x 对单条 GET
     一律 400(实测), 而 `ids` 过滤参数工作正常 —— 实测: 真实 ID → TotalRecordCount=1,
-    不存在的 ID → 0。这个差异在 Seerr 里不存在(它用单条 GET), 是我们适配本机的唯一偏离。
+    不存在的 ID → 0。
     """
     if not item_id:
         return None
@@ -282,7 +280,7 @@ async def list_seasons(cfg, series_id):
 
     用途: 判断"某季是否还存在于库里"(Jellyfin 只在某季真有文件时才建那个 Season 项)。
     ⚠️ 调用方要把**异常**当成"无法判断"处理, 绝不能在请求失败时认定"季没了"
-    (Seerr `seasonExistsInJellyfin` 的 catch 就是 `seasonExistsInJellyfin = true`)。
+    (请求失败时一律视为"季还在")。
     """
     out = []
     data = await _jf_get(cfg, f"/Shows/{series_id}/Seasons",
@@ -301,7 +299,7 @@ async def list_seasons(cfg, series_id):
 async def list_recent_items(cfg, limit=RECENT_WINDOW, types="Movie,Series"):
     """增量窗口: 按 DateCreated 倒序取**最新 N 条**条目(**没有时间下界**)。
 
-    这是 Seerr `getRecentlyAdded()`(`GET /Items/Latest?Limit=12&ParentId=`)的等价物。
+    这是"最近新增"窗口读取(`GET /Items/Latest?Limit=12&ParentId=`)的等价物。
 
     为什么不要游标(旧设计用 DateCreated 游标 + `next_cursor` 推进):
       · Jellyfin 的 DateCreated 取自文件/扫描时间, **不保证单调** —— 后入库的条目
@@ -310,7 +308,7 @@ async def list_recent_items(cfg, limit=RECENT_WINDOW, types="Movie,Series"):
         完全不需要用游标来"避免重复"。
 
     也就是说: 宁可每轮多读几十条重复的, 也不要为了省这点流量去冒"永久漏"的风险。
-    少读到的(窗口之外的)由每日全量扫描兜底 —— 与 Seerr 的行为一致。
+    少读到的(窗口之外的)由每日全量扫描兜底。
     """
     data = await _jf_get(cfg, "/Items", {
         "Recursive": "true",
@@ -364,6 +362,6 @@ def _norm_items(raw, library_id):
             "tmdb_id": str(providers.get("Tmdb") or providers.get("Tvdb") or ""),
             "imdb_id": str(providers.get("Imdb") or ""),
             "overview": (it.get("Overview") or "")[:500],
-            "date_created": parse_jf_time(it.get("DateCreated")),  # 作品入库时间(Seerr mediaAddedAt 等价)
+            "date_created": parse_jf_time(it.get("DateCreated")),  # 作品入库时间
         })
     return out

@@ -176,7 +176,7 @@ def _clean_env():
     踩坑记录: 本机/某些 NAS 环境配了 http(s)_proxy。纯 Python gRPC(grpcio)
     实测: TLS 主地址(nas.example.com, 透明代理可正常 CONNECT 转发)与
     明文内网地址(172.16.x)在"有代理变量"的进程里都能连通 —— 所以本模块
-    【不再全局清掉】os.environ 的代理变量(清掉会连带影响 Seerr/Jellyfin 等
+    【不再全局清掉】os.environ 的代理变量(清掉会连带影响 Jellyfin/TMDB 等
     依赖系统代理的 httpx 客户端)。仅保留此函数给确需无代理子进程的场景。
     """
     env = dict(os.environ)

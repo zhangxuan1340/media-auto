@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 """
-media-auto / availability_sync —— Seerr 可用性对账(1:1 移植, 适配本机 Jellyfin)
+media-auto / availability_sync —— 可用性对账(适配本机 Jellyfin)
 ==============================================================================
-对应 Seerr `server/lib/availabilitySync.ts` 的 Jellyfin 分支:
   - 逐条检查"本地标记为 AVAILABLE / PARTIALLY_AVAILABLE 的作品是否还在媒体库"。
-  - 不在 → 作品级 status = DELETED(Seerr mediaUpdater), 并清 jellyfin_media_id
-    (Seerr resetServiceData), 等下次入库时 scanner 重新置 AVAILABLE。
-  - 剧集: 作品还在, 但某季在 Jellyfin 里没有实有集了 → 该季 status = DELETED
-    (Seerr seasonUpdater), 若有非 Specials 季被删则作品 AVAILABLE → PARTIALLY_AVAILABLE,
+  - 不在 → 作品级 status = DELETED, 并清 jellyfin_media_id,
+    等下次入库时 scanner 重新置 AVAILABLE。
+  - 剧集: 作品还在, 但某季在 Jellyfin 里没有实有集了 → 该季 status = DELETED,
+    若有非 Specials 季被删则作品 AVAILABLE → PARTIALLY_AVAILABLE,
     并更新 last_season_change。
 
 ★★★ 本模块是**全项目唯一**能把状态改成 DELETED 的地方 ★★★
     (scripts/sync_jellyfin 与 scripts/sync_jf_scanner 都不产生 DELETED, 只递增可用性;
-     它们的写入一律是纯 upsert / 按剧替换, 从不删除任何行。) 参见
-     .workbuddy/docs/Seerr同步模型研究.md 的「写入可加、删除收敛」原则。
+     它们的写入一律是纯 upsert / 按剧替换, 从不删除任何行。) 原则是
+     「写入可加、删除收敛」。
 
-判定方式(**fail-safe**, 与 Seerr 逐行对齐):
+判定方式(**fail-safe**):
   - 遍历的是**本地** media(**不是**远端列表);
   - 拿本地存的 id **单查**该条目(`GET /Items?ids=` —— 本机 Jellyfin 12.x 对
-    `GET /Items/{id}` 一律 400, 实测; 这是与 Seerr 唯一的适配偏离);
-  - **只有"明确查不到"才算消失**; 请求失败/超时/5xx/响应形状异常一律**当作"还在"**
-    (Seerr: `catch` 里 `existsInJellyfin = true`);
-  - 季级同理: 分集列表**取不到** → 当作"季还在", 不动季级状态
-    (Seerr: `assume the season exists to avoid false removal`)。
+    `GET /Items/{id}` 一律 400, 实测);
+  - **只有"明确查不到"才算消失**; 请求失败/超时/5xx/响应形状异常一律**当作"还在"**;
+  - 季级同理: 分集列表**取不到** → 当作"季还在", 不动季级状态。
   - 远端**列表**只用来开快路(命中即"还在"), 但**绝不**用"列表里没有"直接判删。
 
 ⚠️ 旧版本在这里加过三道闸(works_ok / a_layer_healthy / seasons_ok), 现已删除:
-   闸门是给"拿列表形状判删"打的补丁; 换成 Seerr 的"逐个单查 + 失败倒向保留"之后,
+   闸门是给"拿列表形状判删"打的补丁; 换成"逐个单查 + 失败倒向保留"之后,
    判据本身就安全了, 不再需要闸门(用户 2026-09-22 明确要求不要再叠闸)。
 
 用法:
@@ -76,8 +73,8 @@ class _SeasonProbe:
 
     ⚠️ 刻意**不用**"全量分集列表"当依据: 那份列表在 Jellyfin 扫库期会残缺,
     拿它的形状判"某季没了"会把实际存在的季误标成已删除, 再去 rollup 把作品降级
-    —— 这正是"完整变缺失"的一条路。改为每部剧单独查一次(Seerr 也是逐剧
-    `getSeasons`/`getEpisodes`), 用缓存保证每部剧一轮只查一次。
+    —— 这正是"完整变缺失"的一条路。改为每部剧单独查一次(逐剧取季/分集),
+    用缓存保证每部剧一轮只查一次。
     """
 
     def __init__(self, cfg):
@@ -138,7 +135,7 @@ async def _run_async(cfg, dry=False):
 
     session = SessionLocal()
     try:
-        # Seerr loadAvailableMediaPaginated: 只处理 AVAILABLE / PARTIALLY / 库内·完整性未知 的作品
+        # 只处理 AVAILABLE / PARTIALLY / 库内·完整性未知 的作品
         medias = (session.query(Media)
                   .options(repo.joinedload(Media.seasons))
                   .filter(Media.status.in_((MediaStatus.AVAILABLE,
@@ -206,11 +203,11 @@ async def _run_async(cfg, dry=False):
                         _mark(f"单查确认已不在库(id {jfid[:12]}…)")
                         if not dry:
                             m.status = MediaStatus.DELETED
-                            m.jellyfin_media_id = None  # Seerr resetServiceData
+                            m.jellyfin_media_id = None  # 清库内 id, 等下次入库重写
                     continue
                 # 剧集
                 if not exists:
-                    # 作品不在库 → 整部 DELETED(Seerr mediaUpdater)
+                    # 作品不在库 → 整部 DELETED
                     if m.status in (MediaStatus.AVAILABLE, MediaStatus.PARTIALLY_AVAILABLE,
                                     MediaStatus.OWNED_UNVERIFIED):
                         stats["show_deleted"] += 1
@@ -223,7 +220,7 @@ async def _run_async(cfg, dry=False):
                 # _recompute_show_status 对空季误判成 PROCESSING 把 8 洗掉)
                 if m.status == MediaStatus.OWNED_UNVERIFIED:
                     continue
-                # 作品在库 → 逐季对账(Seerr seasonUpdater)
+                # 作品在库 → 逐季对账
                 # ⚠️ 分集列表**取不到**(known() 返回 None)时不动季级状态: 拿残缺数据
                 #    判"某季没了", 会把实际存在的季误标成已删除, 再去 rollup 把作品降级
                 #    (AVAILABLE → PARTIALLY_AVAILABLE), 这也是"完整变缺失"的一条路。
@@ -240,12 +237,11 @@ async def _run_async(cfg, dry=False):
                             s.status = MediaStatus.DELETED
                             changed = True
                 if not dry and changed:
-                    # Seerr seasonUpdater: 有季被移除 → 完整作品降为"部分可用"。
+                    # 有季被移除 → 完整作品降为"部分可用"。
                     # ⚠️ 刻意**不**做作品级 rollup: rollup 在"所有季都没了"时会得出
                     #    UNKNOWN(1), 而 UNKNOWN 在 UI 上等于"未拥有 / 缺失" —— 那就把
                     #    一部**还在库里**的剧显示成缺失了(正是"完整变缺失"的另一种形态)。
-                    #    Seerr 在这里只做"降级"这一个动作, 作品级的移除判定归 mediaUpdater
-                    #    (即上面"作品不在库"那条路径)。
+                    #    这里只做"降级"这一个动作, 作品级的移除判定归"作品不在库"那条路径。
                     if m.status == MediaStatus.AVAILABLE:
                         m.status = MediaStatus.PARTIALLY_AVAILABLE
                         stats["show_demoted"] += 1
@@ -281,7 +277,7 @@ def run(dry=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Seerr 式可用性对账(1:1 移植)")
+    ap = argparse.ArgumentParser(description="可用性对账")
     ap.add_argument("--dry", action="store_true", help="只报告, 不写库")
     args = ap.parse_args()
     try:

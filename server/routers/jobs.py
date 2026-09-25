@@ -1,6 +1,6 @@
-"""作业与缓存路由 —— Seerr `Settings → Jobs & Cache` 的后端契约
+"""作业与缓存路由 —— 管理页「作业与缓存」的后端契约
 
-对齐 Seerr `server/routes/settings/index.ts`:
+设计约定:
   GET  /api/jobs                    列出全部作业(id/name/type/interval/cronSchedule/
                                     nextExecutionTime/running …)
   POST /api/jobs/{jobId}/run        手动执行一次(不改变已排好的时间表)
@@ -42,8 +42,8 @@ async def api_jobs(cfg: dict = Depends(get_config)):
 
 @router.post("/jobs/{job_id}/run")
 async def api_job_run(job_id: str, cfg: dict = Depends(get_config)):
-    """手动执行一次。**不改变时间表** —— 这是 Seerr 的明确语义
-    (手动运行任务不会改变它的时间表), 所以这里不推进 nextExecutionTime。
+    """手动执行一次。**不改变时间表** —— 手动运行任务不会改变它的时间表,
+    所以这里不推进 nextExecutionTime。
     """
     from server import scheduler
     if job_id not in reg.JOBS_BY_ID:
@@ -85,7 +85,7 @@ async def api_job_reset(job_id: str, cfg: dict = Depends(get_config)):
 # ---------------------------------------------------------------------------
 @router.get("/cache")
 async def api_cache():
-    """API 缓存统计 + 图片缓存(形状对齐 Seerr: apiCaches[] / imageCache.tmdb)。"""
+    """API 缓存统计 + 图片缓存(apiCaches[] / imageCache.tmdb)。"""
     rows = await run_in_threadpool(cache_stats.snapshot)
     api_caches = [r for r in rows if r["id"] == "tmdb"]
     img = next((r for r in rows if r["id"] == "image"), None)
@@ -97,7 +97,7 @@ async def api_cache():
 
 @router.post("/cache/{cache_id}/flush")
 async def api_cache_flush(cache_id: str):
-    """清空指定缓存。返回删除条目数(Seerr 返回 204, 这里回数量便于前端提示)。"""
+    """清空指定缓存。返回删除条目数(便于前端提示)。"""
     n = await run_in_threadpool(cache_stats.flush, cache_id)
     if n is None:
         raise HTTPException(404, "缓存不存在")

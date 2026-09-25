@@ -4,16 +4,16 @@
 目标: 自己产出完整 NFO, 让 tinyMediaManager / Jellyfin **不需要再刮削**。
 
 数据来源:
-  - 元数据(标题/年份/剧情/演职员/关键词/分级...): Seerr 详情接口
-    (clients/seerr/client.py -> detail_sync, 已规整出 NFO 所需全部字段)
+  - 元数据(标题/年份/剧情/演职员/关键词/分级...): TMDB 详情接口
+    (clients/tmdb/client.py -> detail_sync, 已规整出 NFO 所需全部字段)
   - 媒体技术信息(编码/分辨率/音轨/字幕): MediaInfo CLI
     (lib/mediainfo.py -> probe_file / streamdetails_xml)
-  - wikidata id: Wikidata SPARQL(按 IMDb id 反查;Seerr 不给这个)
+  - wikidata id: Wikidata SPARQL(按 IMDb id 反查;TMDB 不给这个)
 
 ⚠️ 两个"拿不到"的字段(已知缺口, 不编造):
   1. **IMDb 评分**: imdb.com 页面/GraphQL 在本环境返回空,所以 <ratings> 只写 themoviedb
      (并把 default="true" 给它)。TMM 后续若联网会自己补上 IMDb 那一条。
-  2. **belongsToCollection**: Seerr 实测恒为 null,所以 <set> 一般为自闭合空标签。
+  2. **belongsToCollection**: 通常拿不到合集,所以 <set> 一般为自闭合空标签。
   其他如 tvdb id(剧集)、english_title(非中文原名时) 都能正常给出。
 
 格式基准(直接从用户库里 TMM 5.2.12 产出的 NFO 反推, 逐字段对齐):
@@ -218,7 +218,7 @@ def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
                     streamdetails=None):
     """生成 TMM 5.2.12 兼容的电影 NFO(XML 字符串)。
 
-    meta : tmdb.detail_sync() 的返回(形状与原 seerr.detail_sync 一致)
+    meta : tmdb.detail_sync() 的返回
     info : mediainfo.probe_file() 的返回(可为 None,则不写 <fileinfo>)
     streamdetails : 也可直接传现成的 <streamdetails> XML 片段
     """
@@ -252,7 +252,7 @@ def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
         L.append(_el("ratings"))
     L.append(_el("userrating", "0"))
 
-    # --- set(合集): Seerr 一般不给,此时留空标签 ---
+    # --- set(合集): 拿不到时留空标签 ---
     if coll and coll.get("name"):
         L.append("  <set>")
         L.append(_el("name", coll.get("name"), 2))
@@ -307,7 +307,7 @@ def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
 
     _append_producers(L, meta)
 
-    # --- trailer: Seerr 的 relatedVideos 给 YouTube 链接;拿不到就自闭合(与 TMM 一致) ---
+    # --- trailer: 有 YouTube 链接就写;拿不到就自闭合(与 TMM 一致) ---
     L.append(_el("trailer", meta.get("trailer") or ""))
 
     langs = [lang_zh(x) for x in (meta.get("languages") or [])]

@@ -282,12 +282,12 @@ def extract_title_year(name):
 
 
 def title_query_candidates(name, title=None, year=None):
-    """给出若干"喂给 Seerr 搜索"的候选查询,按可信度从高到低。
+    """给出若干"喂给搜索接口"的候选查询,按可信度从高到低。
 
     经验(实测):
       - **不要给查询强行加年份**。"Fireflies in the Sun 2021" 搜不到,而裸的
         "Fireflies in the Sun" 能精准命中《误杀2》。年份交给 resolve 阶段做排序打分。
-      - 中文名优先(Seerr 对中文命中很准);再是去掉结尾数字的形态
+      - 中文名优先(中文命中很准);再是去掉结尾数字的形态
         (《隋唐英雄3》搜不到,但《隋唐英雄》能命中);最后才是英文部分。
     """
     if title is None or year is None:
@@ -532,7 +532,7 @@ def tv_episode_filename(title, season, episode, quality="", template=TV_FILE_TEM
 
 
 # ---------------------------------------------------------------------------
-# 反查结果的置信度校验(防止 Seerr 模糊匹配错条目)
+# 反查结果的置信度校验(防止模糊匹配错条目)
 # ---------------------------------------------------------------------------
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 _LATIN_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9']{1,}")

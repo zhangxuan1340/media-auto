@@ -162,7 +162,7 @@ async function openDetailLocal(kind, tmdbId, pushHist){
     d = await api(`/api/browse/detail/${kind}/${tmdbId}`);
   }catch(e){
     // 本地缓存没有(热门/搜索命中的片未必在 Jellyfin 库, 不在同步种子范围)
-    // → 现拉 TMDB 并写入本地缓存, 不再回退 Seerr
+    // → 现拉 TMDB 并写入本地缓存
     if(e.message && e.message.includes('本地缓存无')){
       _hero('本地没有, 现拉 TMDB…');
       $('#mBody').innerHTML='<div class="empty"><span class="spin"></span>本地缓存没有, 正在从 TMDB 实时拉取…</div>';
@@ -200,7 +200,7 @@ function renderDetailLocal(d, kind, tmdbId){
           <div id="epSyncNote" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
         </div>`;
     } else if(d.seasons){
-    // Seerr 式逐季折叠: 每季一条(完整=绿勾, 不完整=进度横条), 点开看逐集(拥有打勾/缺失空圈)
+    // 逐季折叠: 每季一条(完整=绿勾, 不完整=进度横条), 点开看逐集(拥有打勾/缺失空圈)
     const seasonBlocks = d.seasons.map(s=>{
       const S = String(s.number).padStart(2,'0');
       const complete = s.missing===0 && s.expected>0;
@@ -705,7 +705,7 @@ function _seasonSeedQueries(season, d){
   push(enSrc, false);  // 英文+Sxx
   return [...new Set(combos)];
 }
-// ---- 分集折叠(Seerr 式): 点开某季才拉逐集明细(1 次 TMDB 按季查询, 后端 1h 缓存) ----
+// ---- 分集折叠: 点开某季才拉逐集明细(1 次 TMDB 按季查询, 后端 1h 缓存) ----
 function toggleSeason(tmdbId, season, head){
   const block = head.closest('.seas'); if(!block) return;
   const open = block.classList.toggle('open');

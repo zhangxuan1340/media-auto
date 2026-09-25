@@ -1,0 +1,20 @@
+# MediaAuto — Web 控制台 + 同步作业
+# 用法: cp config.example.json config.json && $EDITOR config.json
+#       docker compose up -d --build
+# 本地未做 docker build/compose 验证(本机无 Docker)。
+services:
+  media-auto:
+    build: .
+    image: media-auto:latest
+    container_name: media-auto
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    # 仅这两个会覆盖 config.web.auth(留空会把账号清空, 故默认注释掉)
+    # environment:
+    #   WEB_USER: admin
+    #   WEB_PASS: change_me
+    volumes:
+      - ./config.json:/app/config.json:ro   # 配置:宿主机维护, 容器内只读
+      - ./data:/app/data                    # SQLite + 图片缓存(WAL, 必须本地盘)
+      - ./state:/app/state                  # 队列状态 state/queue.json

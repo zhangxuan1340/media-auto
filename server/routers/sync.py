@@ -3,11 +3,11 @@
 触发同步(后台线程):
   POST /api/sync/tmdb?scope=all&full=
   POST /api/sync/jellyfin?scope=all|libraries|items|episodes
+  POST /api/sync/jf-scanner?mode=full|recent
+  POST /api/sync/availability
 
 读取本地 SQLite 已同步数据:
   GET /api/sync/logs?source=
-  GET /api/local/requests?q=&limit=
-  GET /api/local/popular?kind=&limit=
   GET /api/local/libraries
   GET /api/local/items?library_id=&q=&limit=
 """
@@ -120,7 +120,7 @@ async def sync_jellyfin(scope: str = Query("all"), full: bool = Query(False),
 @router.post("/sync/jf-scanner")
 async def sync_jf_scanner(mode: str = Query("full"), limit: int = Query(0),
                           cfg: dict = Depends(get_config)):
-    """Seerr 式 Jellyfin 可用性扫描(写 media/season)。mode=full|recent。"""
+    """Jellyfin 可用性扫描(写 media/season)。mode=full|recent。"""
     if mode not in ("full", "recent"):
         raise HTTPException(400, "mode 仅支持 full / recent")
     init_db()
@@ -140,7 +140,7 @@ async def sync_jf_scanner(mode: str = Query("full"), limit: int = Query(0),
 
 @router.post("/sync/availability")
 async def sync_availability(cfg: dict = Depends(get_config)):
-    """Seerr 式可用性对账(标记已从 Jellyfin 删除的作品/季为 DELETED)。"""
+    """可用性对账(标记已从 Jellyfin 删除的作品/季为 DELETED)。"""
     init_db()
     log_id = await run_in_threadpool(_create_log, "jellyfin", "availability")
 
@@ -161,28 +161,6 @@ async def sync_logs(source: str = Query(""), limit: int = 50):
         s = SessionLocal()
         try:
             return _serialize(repo.get_sync_logs(s, source, limit))
-        finally:
-            s.close()
-    return await run_in_threadpool(_q)
-
-
-@router.get("/local/requests")
-async def local_requests(q: str = Query(""), limit: int = 200):
-    def _q():
-        s = SessionLocal()
-        try:
-            return _serialize(repo.get_requests(s, q, limit))
-        finally:
-            s.close()
-    return await run_in_threadpool(_q)
-
-
-@router.get("/local/popular")
-async def local_popular(kind: str = Query(""), limit: int = 200):
-    def _q():
-        s = SessionLocal()
-        try:
-            return _serialize(repo.get_popular(s, kind, limit))
         finally:
             s.close()
     return await run_in_threadpool(_q)

@@ -1,8 +1,8 @@
 // MediaAuto 前端 — jobs.js
-// 管理页「作业」子页签: 作业表 + 缓存表(对齐 Seerr 的 Settings → Jobs & Cache)
+// 管理页「作业」子页签: 作业表 + 缓存表
 //   作业表: 作业名 | 作业类型 | 下一次执行时间 | 编辑 | 执行
 //   缓存表: 缓存名 | 击中数 | 失误数 | 键数 | 键储存大小 | 值储存大小 | 清除缓存
-// 关键语义(与 Seerr 一致): **手动运行任务不会改变它的时间表**。
+// 关键语义: **手动运行任务不会改变它的时间表**。
 // 全局作用域(classic script), 依赖 common.js 工具函数, 由 index.html 按序加载
 
 let _jobsTimer = null;
@@ -80,7 +80,7 @@ function _cacheTable(c){
     + `</tbody></table>`;
 }
 
-// ---- 相对时间(Seerr 显示"3分钟后"这类) ----
+// ---- 相对时间("3分钟后"这类) ----
 function _relTime(iso){
   if(!iso) return '—';
   const t = new Date(iso).getTime();

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""缓存统计 —— Seerr `Settings → Jobs & Cache` 下半张表(`GET /cache`)的移植
+"""缓存统计 —— 管理页「作业与缓存」下半张表的后端
 
-Seerr 里每个缓存(Keyv 实例)都暴露 `getStats()` = {hits, misses, keys, ksize, vsize},
+每个缓存都暴露 {hits, misses, keys, ksize, vsize},
 页面上就是「缓存名 | 击中数 | 失误数 | 键数 | 键储存大小 | 值储存大小」+「清除缓存」。
 
-**统计是进程内的**(重启归零), 这一点与 Seerr 一致 —— 它的 hits/misses 也来自内存计数器。
+**统计是进程内的**(重启归零) —— hits/misses 来自内存计数器。
 键数与体积则取自真实存储, 所以重启后仍然准。
 
 MediaAuto 实际存在的两处缓存:
@@ -60,7 +60,7 @@ def _counters(cache_id):
 def _tmdb_store():
     """TMDB 元数据缓存 = `tmdb_media`(作品) + `tmdb_season`(季/分集结构)。
 
-    键数取两者行数之和; 值体积 ≈ 各文本列的字节总和(与 Seerr 的 vsize 同义)。
+    键数取两者行数之和; 值体积 ≈ 各文本列的字节总和。
     """
     from db.database import SessionLocal
     from sqlalchemy import func, select, cast, String
@@ -80,7 +80,7 @@ def _tmdb_store():
                     + func.length(func.coalesce(TmdbSeason.episode_numbers, "")))
         s_keys, s_vsize = s.execute(
             select(func.count(TmdbSeason.id), func.coalesce(func.sum(sea_expr), 0))).one()
-        # 键长: tmdb_id 数字位数 + kind 长度(近似, 与 Seerr 记"键储存大小"同义)
+        # 键长: tmdb_id 数字位数 + kind 长度(近似)
         ksize = s.execute(select(func.coalesce(func.sum(
             func.length(cast(TmdbMedia.tmdb_id, String)) + func.length(TmdbMedia.kind)), 0))).one()[0]
         return (int(m_keys or 0) + int(s_keys or 0),
@@ -115,7 +115,7 @@ def _img_store():
                 keys += 1
     except OSError:
         return 0, 0, 0
-    return keys, 0, total          # 图片无独立"键体积", 与 Seerr 一样记 0
+    return keys, 0, total          # 图片无独立"键体积", 记 0
 
 
 def _flush_tmdb():
@@ -167,7 +167,7 @@ def flush(cache_id):
 
 
 def snapshot():
-    """对齐 Seerr `GET /cache` 的返回形状。"""
+    """返回 {apiCaches, imageCache} 快照(前端缓存表的数据源)。"""
     rows = []
     store = {"tmdb": _tmdb_store, "image": _img_store}
     for cid, name in CACHES.items():

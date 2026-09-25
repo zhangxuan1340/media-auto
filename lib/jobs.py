@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""作业注册表 + cron 引擎 —— Seerr `server/job/schedule.ts` / `server/lib/settings.ts` 的移植
+"""作业注册表 + cron 引擎
 
-Seerr 的做法(本模块对齐它):
-  · **一张统一的作业表**: 每个维护任务都在 `scheduledJobs` 里登记一条
+设计要点:
+  · **一张统一的作业表**: 每个维护任务都在作业表里登记一条
     {id, name, type, interval, cronSchedule, running, cancelFn}, 而不是散落的定时器。
     媒体服务器相关只占两条 —— `jellyfin-recently-added-scan`(最近新增) 与
     `jellyfin-full-scan`(全库); 可用性对账是独立的 `availability-sync`。
@@ -13,7 +13,7 @@ Seerr 的做法(本模块对齐它):
 本模块只放"元数据 + cron 计算 + 周期持久化", 保持无重依赖(不 import server/scripts),
 这样 CLI 与 server 都能复用; 真正的执行函数在 `server/scheduler.py` 里按 id 映射。
 
-cron 形式: 与 Seerr 一致用 6 段 `秒 分 时 日 月 周`(node-schedule 风格), 例如
+cron 形式: 用 6 段 `秒 分 时 日 月 周`(node-schedule 风格), 例如
 `0 */5 * * * *` = 每 5 分钟、`0 0 3 * * *` = 每日 03:00。也接受标准 5 段(分 时 日 月 周)。
 ⚠️ 调度器按分钟粒度跑, 所以秒段只接受 `0`(或省略) —— 其它值视为非法, 免得出现
 "写了却永远不触发"的假象。
@@ -24,10 +24,10 @@ import os
 from lib.config import config_path, load_config
 
 # ---------------------------------------------------------------------------
-# 作业类型 / 周期单位(对齐 Seerr 的 ScheduledJob.type / interval)
+# 作业类型 / 周期单位
 # ---------------------------------------------------------------------------
 TYPE_PROCESS = "process"      # 程序: 进程内跑的业务逻辑
-TYPE_COMMAND = "command"      # 命令: 轻量例行命令(Seerr 用于下载同步)
+TYPE_COMMAND = "command"      # 命令: 轻量例行命令
 
 UNIT_SECONDS = "seconds"
 UNIT_MINUTES = "minutes"
@@ -37,7 +37,7 @@ UNIT_DAYS = "days"
 # ---------------------------------------------------------------------------
 # 作业注册表
 # ---------------------------------------------------------------------------
-# schedule 为 Seerr 默认 cron; 用户可在管理页「作业」里改, 改后写进 config.json 的
+# schedule 为默认 cron; 用户可在管理页「作业」里改, 改后写进 config.json 的
 # jobs.<id>.schedule 覆盖默认值(删掉该键即回落默认)。
 JOBS = [
     {
@@ -207,7 +207,7 @@ def next_run(expr, after):
 
 
 # ---------------------------------------------------------------------------
-# 周期持久化(config.json 的 jobs.<id>.schedule, 与 Seerr settings.json 同构)
+# 周期持久化(config.json 的 jobs.<id>.schedule)
 # ---------------------------------------------------------------------------
 def default_schedule(job_id):
     j = JOBS_BY_ID.get(job_id)

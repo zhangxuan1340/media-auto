@@ -1,11 +1,11 @@
-"""浏览/筛选/缺失/屏蔽/设置 路由 —— 基于本地 TMDB 缓存(替代 Seerr 的 Web 功能)
+"""浏览/筛选/缺失/屏蔽/设置 路由 —— 基于本地 TMDB 缓存
 
 数据全部来自本地 SQLite:
   - tmdb_media / tmdb_season : TMDB 元数据缓存(scripts/sync_tmdb.py 填充)
   - jellyfin_item + jf_episode : 本地媒体库 + 分集明细(增量/全量同步)
   - tmdb_blocklist / tmdb_setting : 屏蔽列表 / 设置
 
-缺失逻辑(比 Seerr 精确):
+缺失逻辑(精确到集):
   - 电影: 不在 Jellyfin 库 = 缺失(未拥有)
   - 剧集: 逐季对比 Jellyfin 实有集(jf_episode) vs TMDB 应有集(tmdb_season)
           → 精确到 SxxExx;实有 > 应有 标记"集数偏多(版本问题)"
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api", tags=["browse"], dependencies=[Depends(require
 # 工具
 # ---------------------------------------------------------------------------
 def _media_table_ready(session, kind):
-    """Seerr 可用性表(media)是否已有该类型数据(扫描跑过)。空表时回退旧算法,
+    """可用性表(media)是否已有该类型数据(扫描跑过)。空表时回退旧算法,
     保证首次部署/扫描未完成前页面不是一片"缺失"。"""
     from db.models import Media, MediaType
     mt = MediaType.MOVIE if kind == "movie" else MediaType.TV
@@ -39,7 +39,7 @@ def _media_table_ready(session, kind):
 
 
 def _jf_in_library_ids(session, kind):
-    """该类型在库的 tmdb_id 集合 —— **以 Seerr 可用性表(media)为准**:
+    """该类型在库的 tmdb_id 集合 —— **以可用性表(media)为准**:
     状态 AVAILABLE / PARTIALLY_AVAILABLE = 在库(有真实文件)。严格只认 TMDB ID。
 
     media 表为空(扫描未跑)时回退旧口径(jellyfin_item 镜像), 保证可用性连续。
@@ -64,7 +64,7 @@ def _jf_in_library_ids(session, kind):
 
 
 def _media_complete_ids(session, kind):
-    """作品级"完整" —— 以 Seerr 可用性表为准:
+    """作品级"完整" —— 以可用性表为准:
     电影: 在库即完整; 剧集: **所有非特别篇季** 都 AVAILABLE 才算完整
     (用户规则: 特别篇 S00 不算缺失, 不参与完整判定)。
     media 表为空时返回 None(调用方回退旧逻辑)。"""
@@ -91,7 +91,7 @@ def _media_complete_ids(session, kind):
 def _jf_item_id(session, kind, tmdb_id):
     """该作品在 Jellyfin 里的项 Id(详情页跳转 Jellyfin 用)。
 
-    取自 Seerr 可用性表 media.jellyfin_media_id(扫描时写入)。未同步/不在库返回空串,
+    取自可用性表 media.jellyfin_media_id(扫描时写入)。未同步/不在库返回空串,
     前端据此不显示"在 Jellyfin 打开"按钮。"""
     from db.models import Media, MediaType
     mt = MediaType.MOVIE if kind == "movie" else MediaType.TV
@@ -367,10 +367,10 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
                  status: str = Query("all"),  # all | missing | inlibrary | complete
                  page: int = Query(1, ge=1), size: int = Query(24, ge=1, le=96),
                  cfg: dict = Depends(get_config)):
-    """浏览/筛选(Seerr 口径: 作品清单来自 Seerr 可用性表 media, 展示元数据按需)。
+    """浏览/筛选(作品清单来自可用性表 media, 展示元数据按需)。
 
-    数据源(彻底照搬 Seerr 后):
-      - 可用性(inLibrary/complete/缺失): 只认 Seerr media/season 表(全量权威, 含
+    数据源:
+      - 可用性(inLibrary/complete/缺失): 只认 media/season 表(全量权威, 含
         Jellyfin 里所有在库作品 —— 不再受"元数据缓存没同步到"的影响)。
       - 展示元数据(标题/海报/年份): tmdb_media 快速路径 → TMDB 实时(进程内缓存)。
         库里作品若在 tmdb_media 没缓存, 现从 TMDB 拉(只拉当前页), 绝不漏掉在库作品。
@@ -384,7 +384,7 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
             complete_ids = _media_complete_ids(s, kind)
             from db.models import Media, MediaType
             mt = MediaType.MOVIE if kind == "movie" else MediaType.TV
-            # 权威在库清单: Seerr media 表 —— 全量覆盖 Jellyfin 里所有在库作品,
+            # 权威在库清单: media 表 —— 全量覆盖 Jellyfin 里所有在库作品,
             # 不再受"元数据缓存没同步到"影响。title/year 扫描时从 Jellyfin 带入, 0 API。
             media_rows = {str(r.tmdb_id): (r.title or "", r.year or "")
                           for r in s.query(Media.tmdb_id, Media.title, Media.year)
@@ -437,7 +437,7 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
         if tid in block_ids:
             continue
         in_lib = tid in in_lib_ids
-        # Seerr 口径 complete: media 表空(回退)时"在库即完整"; 否则按季 rollup
+        # complete 口径: media 表空(回退)时"在库即完整"; 否则按季 rollup
         if in_lib and complete_ids is not None:
             complete = tid in complete_ids
         else:
@@ -540,7 +540,7 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
         # 严格只认 TMDB ID —— 用户规定不允许按剧名兜底; Jellyfin 侧挂错 ID 的
         # 条目由 scripts/calibrate_jf_ids.py 用 TMDB 接口校准修正
         "inLibrary": str(m.tmdb_id) in _jf_in_library_ids(s, m.kind),
-        # Jellyfin 项 Id + 跳转链接(库内作品): 从 Seerr 可用性表 media 取, 无则空串
+        # Jellyfin 项 Id + 跳转链接(库内作品): 从可用性表 media 取, 无则空串
         "jfItemId": jf_item,
         "jfUrl": _jf_detail_url(cfg, jf_item),
     }
@@ -609,7 +609,7 @@ _SEASON_EP_TTL = 3600
 @router.get("/browse/tv/{tmdb_id}/season/{season_number}/episodes")
 async def browse_season_episodes(tmdb_id: int, season_number: int,
                                  cfg: dict = Depends(get_config)):
-    """某季逐集明细(Seerr 式折叠列表用): [{episode, name, air_date, overview, have}]。
+    """某季逐集明细(折叠列表用): [{episode, name, air_date, overview, have}]。
 
     - TMDB 每集(名/播出时间/简介)按季现拉(1 次 /tv/{id}/season/{n}, 3600s TTL 进程内缓存);
     - have = 本地 Jellyfin 实有(jf_episode); jf 未同步时 have 全 false(与缺失口径一致);
@@ -671,8 +671,8 @@ async def browse_season_episodes(tmdb_id: int, season_number: int,
     return {"tmdbId": tmdb_id, "season": season_number, "episodes": out}
 
 
-# 现拉 TMDB 详情的进程内 TTL 缓存(= Seerr 的 TheMovieDb 进程内缓存做法)。
-# ⚠️ Seerr 不变量: **查看绝不写库** —— /pull 只现拉返回, 不落任何本地表;
+# 现拉 TMDB 详情的进程内 TTL 缓存。
+# ⚠️ 不变量: **查看绝不写库** —— /pull 只现拉返回, 不落任何本地表;
 # 本地库只由 Jellyfin 扫描(scripts/sync_jf_scanner.py)在扫描时写入。
 _pull_detail_cache: dict = {}   # {(kind, tmdb_id): (ts, payload_or_None)}
 _PULL_TTL = 3600
@@ -707,7 +707,7 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
             english_title = await tmdb.english_title(cfg, kind, tmdb_id)
         except Exception:  # noqa: BLE001
             english_title = ""
-    # 可用性判定走 Seerr 表(不在库 = UNKNOWN/DELETED)
+    # 可用性判定走 media 表(不在库 = UNKNOWN/DELETED)
     s = SessionLocal()
     in_lib = False
     jf_item = ""
@@ -778,7 +778,7 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
 async def browse_detail_pull(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
     """本地缓存没有时**现拉 TMDB 并返回**(与 GET 同形状)。
 
-    ⚠️ Seerr 式(2026-09-17 起):**不落库** —— 查看不产生任何本地写入, 本地
+    ⚠️ **不落库** —— 查看不产生任何本地写入, 本地
     media/season 可用性只由 Jellyfin 扫描维护(根治"查看即污染"一类问题)。
     热门/搜索命中的库外作品靠这个接口点开也能看, 进程内缓存 1 小时省 API。"""
     if kind not in ("movie", "tv"):
@@ -798,7 +798,6 @@ async def browse_search(q: str = Query(..., min_length=1), cfg: dict = Depends(g
     """按片名搜具体影片/剧集(主源 TMDB 直连), 结果叠加 库内/屏蔽 标注。
 
     前端两段式搜索第一步: 先确认是哪部影片, 点卡片进详情, 再在详情里看磁力。
-    2026-09 起 Seerr 彻底断开, 此端点从 seerr 路由迁入(不再有任何 Seerr 回退)。
     """
     if not q.strip():
         raise HTTPException(400, "查询词不能为空")
@@ -868,7 +867,7 @@ async def person_detail_api(person_id: int, cfg: dict = Depends(get_config)):
         raise HTTPException(404, "演员不存在")
     credits = await tmdb_client.person_credits(cfg, person_id)
     # 作品卡标"库内"(2026-09-19 用户要求: 演员页看作品, 库内已有的标"库内", 库外不标)。
-    # 口径与 浏览/搜索 一致: 以 Seerr 可用性表(media) AVAILABLE/PARTIALLY 为准。
+    # 口径与 浏览/搜索 一致: 以可用性表(media) AVAILABLE/PARTIALLY 为准。
     def _mark_library():
         s = SessionLocal()
         try:

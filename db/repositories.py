@@ -13,9 +13,6 @@ from db.models import (
     JellyfinLibrary,
     JfEpisode,
     Media,
-    SeerrEpisode,
-    SeerrPopular,
-    SeerrRequest,
     Season,
     OrganizeLog,
     SyncLog,
@@ -64,10 +61,10 @@ def drop_tmdb_id_correction(session, item_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Seerr 式 Media/Season 可用性(1:1 移植; 写逻辑在 scripts/sync_jf_scanner.py)
+# Media/Season 可用性(写逻辑在 scripts/sync_jf_scanner.py)
 # ---------------------------------------------------------------------------
 def get_media(session, tmdb_id, media_type):
-    """按 (tmdb_id, media_type) 找一行(= Seerr getExisting)。带季级联加载。"""
+    """按 (tmdb_id, media_type) 找一行。带季级联加载。"""
     return (
         session.query(Media)
         .options(joinedload(Media.seasons))
@@ -121,69 +118,6 @@ def get_media_ids_available(session, media_type=""):
     if media_type:
         q = q.filter_by(media_type=media_type)
     return q.all()
-
-
-# ---------------------------------------------------------------------------
-# Seerr
-# ---------------------------------------------------------------------------
-def upsert_seerr_request(session, data: dict):
-    obj = session.query(SeerrRequest).filter_by(request_id=data["request_id"]).one_or_none()
-    if obj is None:
-        obj = SeerrRequest(request_id=data["request_id"])
-        session.add(obj)
-    obj.tmdb_id = data.get("tmdb_id", 0)
-    obj.media_type = data.get("media_type", "tv")
-    obj.title = data.get("title", "")
-    obj.year = data.get("year", "")
-    obj.status = data.get("status", 0)
-    obj.status_text = data.get("status_text", "")
-    obj.requested_by = data.get("requested_by", "")
-    session.flush()
-    return obj
-
-
-def upsert_seerr_episode(session, data: dict):
-    obj = (
-        session.query(SeerrEpisode)
-        .filter_by(
-            request_id=data["request_id"],
-            season=data.get("season", 0),
-            episode=data.get("episode", 0),
-        )
-        .one_or_none()
-    )
-    if obj is None:
-        obj = SeerrEpisode(
-            request_id=data["request_id"],
-            season=data.get("season", 0),
-            episode=data.get("episode", 0),
-        )
-        session.add(obj)
-    obj.tmdb_id = data.get("tmdb_id", 0)
-    obj.series_title = data.get("series_title", "")
-    obj.episode_code = data.get("episode_code", "")
-    obj.status = data.get("status", 0)
-    session.flush()
-    return obj
-
-
-def upsert_seerr_popular(session, data: dict):
-    obj = (
-        session.query(SeerrPopular)
-        .filter_by(tmdb_id=data["tmdb_id"], kind=data["kind"])
-        .one_or_none()
-    )
-    if obj is None:
-        obj = SeerrPopular(tmdb_id=data["tmdb_id"], kind=data["kind"])
-        session.add(obj)
-    obj.title = data.get("title", "")
-    obj.year = data.get("year", "")
-    obj.overview = data.get("overview", "")
-    obj.poster = data.get("poster", "")
-    obj.vote = data.get("vote", 0.0)
-    obj.popularity = data.get("popularity", 0.0)
-    session.flush()
-    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +306,7 @@ def upsert_jellyfin_item(session, data: dict):
 # ⚠️ 刻意**不提供** wipe_jf_episodes / count_jf_episodes 这类"整表清空 + 体积校验"接口:
 #    它们是 2026-09-22 之前"先清空再重建"模型的产物, 也正是"完整数据被洗成缺失数据"
 #    的根源(一份残缺快照就能把所有剧的分集一起踩少)。分集批量写入一律走下面的
-#    `replace_jf_episodes_grouped`(按剧替换, 不碰其他剧)。详见
-#    .workbuddy/docs/Seerr同步模型研究.md。
+#    `replace_jf_episodes_grouped`(按剧替换, 不碰其他剧)。
 def add_jf_episode(session, series_id: str, season: int, episode: int, name: str = ""):
     session.add(JfEpisode(series_id=series_id, season=season,
                           episode=episode, name=name))
@@ -452,15 +385,8 @@ def set_sync_state(session, key: str, value: str):
 #    根源: Jellyfin 扫库期返回的**残缺列表**会被当成权威, 把 6000+ 条镜像洗成几百条,
 #    下游可用性对账随之把在库作品判成"未拥有"。现在 A 层同步是**纯 upsert**
 #    (scripts/sync_jellyfin._sync_items), 从不删行。刻意不再提供这个接口,
-#    以免有人重新引入。详见 .workbuddy/docs/Seerr同步模型研究.md。
+#    以免有人重新引入。
 # ---------------------------------------------------------------------------
-
-
-def wipe_seerr_data(session):
-    """清空 Seerr 表(全量同步前调用)。"""
-    session.query(SeerrEpisode).delete()
-    session.query(SeerrRequest).delete()
-    session.query(SeerrPopular).delete()
 
 
 # ---------------------------------------------------------------------------
@@ -545,21 +471,6 @@ def list_organize_logs(session, limit: int = 20):
 # ---------------------------------------------------------------------------
 # 查询(供前端 / API)
 # ---------------------------------------------------------------------------
-def get_requests(session, q: str = "", limit: int = 200):
-    qry = session.query(SeerrRequest)
-    if q:
-        like = f"%{q}%"
-        qry = qry.filter(or_(SeerrRequest.title.like(like), SeerrRequest.year.like(like)))
-    return qry.order_by(SeerrRequest.synced_at.desc()).limit(limit).all()
-
-
-def get_popular(session, kind: str = "", limit: int = 200):
-    qry = session.query(SeerrPopular)
-    if kind:
-        qry = qry.filter_by(kind=kind)
-    return qry.order_by(SeerrPopular.popularity.desc()).limit(limit).all()
-
-
 def get_libraries(session):
     return session.query(JellyfinLibrary).order_by(JellyfinLibrary.name).all()
 
@@ -588,7 +499,7 @@ def get_sync_logs(session, source: str = "", limit: int = 50):
 
 
 # ---------------------------------------------------------------------------
-# 热门榜标注用: 已有库 / 已有请求 的 tmdb id 集合
+# 热门榜标注用: 已有库 的 tmdb id 集合
 # ---------------------------------------------------------------------------
 _KIND_TO_JF_TYPE = {"movie": "Movie", "tv": "Series"}
 
@@ -600,20 +511,6 @@ def get_tmdb_ids_in_library(session, kind: str):
         return set()
     rows = session.query(JellyfinItem.tmdb_id).filter(
         JellyfinItem.type == jf_type, JellyfinItem.tmdb_id != "").distinct().all()
-    return {str(r[0]) for r in rows if r[0]}
-
-
-def get_pending_request_tmdb_ids(session, kind: str):
-    """Seerr 请求队列里还没下完的 tmdb id 集合(kind='movie'|'tv')。
-
-    status 4=已就绪 / 3=已拒绝 不算"请求中"。
-    """
-    mt = kind if kind in ("movie", "tv") else ""
-    rows = session.query(SeerrRequest.tmdb_id).filter(
-        SeerrRequest.media_type == mt,
-        SeerrRequest.status.notin_((4, 3)),
-        SeerrRequest.tmdb_id != 0,
-    ).distinct().all()
     return {str(r[0]) for r in rows if r[0]}
 
 

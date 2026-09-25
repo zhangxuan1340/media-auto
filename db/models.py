@@ -1,9 +1,9 @@
 """SQLAlchemy ORM 模型
 
 本地 SQLite 落地以下数据:
-  - Seerr: 同步过来的请求(缺失剧集/请求队列) + 缺失分集 + 热门榜
-  - Jellyfin: 媒体库(VirtualFolders) + 媒体项(电影/剧集)
-  - Media/Season: Seerr 式【可用性】镜像(1:1 移植, 见下)
+  - Jellyfin: 媒体库(VirtualFolders) + 媒体项(电影/剧集) + 分集明细
+  - Media/Season: 【可用性】镜像(Jellyfin 扫描写入, 见下)
+  - TmdbMedia/TmdbSeason: TMDB 元数据本地缓存(浏览/缺失/整理反查的主源)
   - SyncLog: 每次同步的运行记录(便于前端展示最近同步状态)
 """
 from datetime import datetime
@@ -24,8 +24,7 @@ from db.database import Base
 
 
 # ---------------------------------------------------------------------------
-# Seerr 媒体状态 / 类型 —— 1:1 移植自 Seerr `server/constants/media.ts`
-# 数字值与 Seerr 完全一致, 便于对照源码核对同步逻辑。
+# 媒体状态 / 类型 —— 数字状态码贯穿 media/season/sync 全链路
 # ---------------------------------------------------------------------------
 class MediaStatus:
     UNKNOWN = 1
@@ -45,76 +44,19 @@ class MediaType:
     TV = "tv"
 
 
-class SeerrRequest(Base):
-    """Seerr 请求队列中的一条请求(电影或剧集)。"""
-    __tablename__ = "seerr_request"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    request_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
-    tmdb_id: Mapped[int] = mapped_column(Integer, index=True, default=0)
-    media_type: Mapped[str] = mapped_column(String(16), default="tv")  # movie | tv
-    title: Mapped[str] = mapped_column(String(512), default="")
-    year: Mapped[str] = mapped_column(String(16), default="")
-    status: Mapped[int] = mapped_column(Integer, default=0)
-    status_text: Mapped[str] = mapped_column(String(32), default="")
-    requested_by: Mapped[str] = mapped_column(String(128), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
-    synced_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
-
-    episodes: Mapped[list["SeerrEpisode"]] = relationship(
-        back_populates="request", cascade="all, delete-orphan"
-    )
-
-
-class SeerrEpisode(Base):
-    """Seerr 剧集的缺失分集(每季每集一行)。"""
-    __tablename__ = "seerr_episode"
-    __table_args__ = (UniqueConstraint("request_id", "season", "episode", name="uq_seerr_ep"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    request_id: Mapped[int] = mapped_column(ForeignKey("seerr_request.request_id"), index=True)
-    tmdb_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
-    series_title: Mapped[str] = mapped_column(String(512), default="")
-    season: Mapped[int] = mapped_column(Integer, default=0)
-    episode: Mapped[int] = mapped_column(Integer, default=0)
-    episode_code: Mapped[str] = mapped_column(String(16), default="")  # S01E02
-    status: Mapped[int] = mapped_column(Integer, default=0)
-    synced_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
-
-    request: Mapped["SeerrRequest"] = relationship(back_populates="episodes")
-
-
-class SeerrPopular(Base):
-    """Seerr(TMDB)热门榜缓存。"""
-    __tablename__ = "seerr_popular"
-    __table_args__ = (UniqueConstraint("tmdb_id", "kind", name="uq_seerr_pop"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tmdb_id: Mapped[int] = mapped_column(Integer, index=True, default=0)
-    kind: Mapped[str] = mapped_column(String(16), default="movie")  # movie | tv
-    title: Mapped[str] = mapped_column(String(512), default="")
-    year: Mapped[str] = mapped_column(String(16), default="")
-    overview: Mapped[str] = mapped_column(Text, default="")
-    poster: Mapped[str] = mapped_column(String(512), default="")
-    vote: Mapped[float] = mapped_column(default=0.0)
-    popularity: Mapped[float] = mapped_column(default=0.0)
-    synced_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
-
-
 class Media(Base):
-    """Seerr 式【可用性】镜像 —— 1:1 移植自 Seerr `server/entity/Media.ts`。
+    """【可用性】镜像 —— 这个作品在媒体库里是否可得。
 
     与 tmdb_media(元数据缓存)不同, 这张表只记录"这个作品在媒体库里是否可得",
     由 Jellyfin 扫描写入, **从不在用户查看时写**。一个作品(tmdb_id, media_type)
-    只有一行 —— 去重靠 scanner 的 asyncLock + getExisting, 不是唯一约束(与 Seerr 一致)。
+    只有一行 —— 去重靠扫描侧"先查再写", 不是唯一约束。
 
-    字段对齐 Seerr Media 的可用性列(裁掉 Seerr 专有的 Radarr/Sonarr/Plex 服务列,
-    MediaAuto 没有这些服务, 等价于留空):
+    可用性列说明:
       - status / status4k        : MediaStatus(作品级可用性)
-      - jellyfin_media_id        : Jellyfin 项 Id(= Seerr ratingKey 的 Jellyfin 等价物)
+      - jellyfin_media_id        : Jellyfin 项 Id
       - media_added_at           : Jellyfin DateCreated(作品入库时间)
       - last_season_change       : 最后一次季可用性变化(触发通知/对账用)
-      - service_id               : 预留(Seerr 放 Radarr/Sonarr 服务 id, 这里暂空)
+      - service_id               : 预留(暂空)
     """
     __tablename__ = "media"
     __table_args__ = (UniqueConstraint("tmdb_id", "media_type", name="uq_media_tmdb_type"),)
@@ -127,8 +69,8 @@ class Media(Base):
     status: Mapped[int] = mapped_column(Integer, default=MediaStatus.UNKNOWN, index=True)
     status_4k: Mapped[int] = mapped_column(Integer, default=MediaStatus.UNKNOWN, index=True)
     # 展示信息(扫描时从 Jellyfin 条目带过来, 免 API): Jellyfin 的 name 就是干净标题,
-    # ProductionYear 是年份。Seerr 的 Media 不存标题(按需查 TMDB), MediaAuto 保留这两列
-    # 是为了浏览列表 0 API 出标题/年份; 海报/演员等重字段仍按需实时查 TMDB。
+    # ProductionYear 是年份。本表保留 title/year 两列是为了浏览列表 0 API 出标题/年份;
+    # 海报/演员等重字段仍按需实时查 TMDB。
     title: Mapped[str] = mapped_column(String(512), default="", index=True)
     year: Mapped[str] = mapped_column(String(16), default="")
     jellyfin_media_id: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
@@ -144,11 +86,11 @@ class Media(Base):
 
 
 class Season(Base):
-    """Seerr 式【季可用性】—— 1:1 移植自 Seerr `server/entity/Season.ts`。
+    """【季可用性】—— 每季一行, 记录该季在媒体库里的可得状态。
 
-    每季一行, 记录该季在媒体库里的可得状态(AVAILABLE/PARTIALLY_AVAILABLE/DELETED/...)。
+    (AVAILABLE/PARTIALLY_AVAILABLE/DELETED/...)。
     分集级精确缺失(缺哪一集)仍由 jf_episode vs tmdb_season 计算; 这里的 status
-    是 Seerr 口径的"季整体是否可得", 由 availability-sync 对账维护。
+    是"季整体是否可得", 由 availability-sync 对账维护。
     """
     __tablename__ = "season"
     __table_args__ = (UniqueConstraint("media_id", "season_number", name="uq_season_media_no"),)
@@ -167,7 +109,7 @@ class Season(Base):
 class TmdbMedia(Base):
     """TMDB 作品本地缓存(详情/演员/类型/剧情)。
 
-    架构转向(2026-09): Web 浏览/缺失/屏蔽/隐藏 全部基于本地 TMDB 缓存, 不再依赖 Seerr。
+    架构(2026-09): Web 浏览/缺失/屏蔽/隐藏 全部基于本地 TMDB 缓存。
     缓存以 Jellyfin 库里的 tmdb_id 为种子增量填充(organize 反查也会顺带补)。
     """
     __tablename__ = "tmdb_media"
@@ -305,7 +247,7 @@ class JellyfinItem(Base):
     tmdb_id: Mapped[str] = mapped_column(String(32), default="")
     imdb_id: Mapped[str] = mapped_column(String(32), default="")
     overview: Mapped[str] = mapped_column(Text, default="")
-    date_created: Mapped[datetime] = mapped_column(DateTime, nullable=True)  # Jellyfin DateCreated(Seerr mediaAddedAt)
+    date_created: Mapped[datetime] = mapped_column(DateTime, nullable=True)  # Jellyfin DateCreated
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
 
 
@@ -343,8 +285,8 @@ class SyncLog(Base):
     __tablename__ = "sync_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source: Mapped[str] = mapped_column(String(16), index=True)  # seerr | jellyfin
-    scope: Mapped[str] = mapped_column(String(32), default="")  # missing | popular | libraries | items
+    source: Mapped[str] = mapped_column(String(16), index=True)  # tmdb | jellyfin
+    scope: Mapped[str] = mapped_column(String(32), default="")  # all | libraries | items | episodes | jf-scan:* | availability
     status: Mapped[str] = mapped_column(String(16), default="running")  # running | success | error
     items_synced: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
