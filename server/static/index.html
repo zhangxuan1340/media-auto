@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<!-- user-scalable=no + maximum-scale=1: 禁双击/捏合缩放(2026-09-19 用户要求,
+     输入点按会放大页面、完成后还要手动缩回, 操作不便) -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>MediaAuto · 影音自动化</title>
+<!-- PWA: iOS 全屏独立应用(对齐 iOS 26/27 standalone 标准) + manifest + SW -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MediaAuto">
+<meta name="theme-color" content="#eef2f9">
+<meta name="description" content="MediaAuto 影音自动化控制台">
+<!-- 夜间模式首屏应用(防闪烁): 在 CSS 解析前就把 data-theme 打到 <html> 上。
+     规则: 跟随系统(auto, 默认) 19:00–07:00 = 夜间; 也可手动 浅色/深色(存 localStorage)。
+     完整管理(定时自动切换 + 手动切换)在 common.js 的 initTheme()。 -->
+<script>
+(function(){
+  try{
+    var pref = localStorage.getItem('media_theme') || 'auto';
+    var h = new Date().getHours();
+    var dark = (pref === 'dark') || (pref === 'auto' && (h >= 19 || h < 7));
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var m = document.querySelector('meta[name="theme-color"]');
+    if(m) m.setAttribute('content', dark ? '#0b0e14' : '#eef2f9');
+  }catch(e){}
+})();
+</script>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <form class="login-card" id="loginForm">
+    <h1>MediaAuto</h1>
+    <p>影音自动化控制台 · 请登录</p>
+    <div class="err" id="loginErr"></div>
+    <input id="lu" type="text" placeholder="用户名" autocomplete="username" />
+    <input id="lp" type="password" placeholder="密码" autocomplete="current-password" />
+    <button type="submit">登 录</button>
+  </form>
+</div>
+
+<!-- 主应用 -->
+<div id="app" style="display:none">
+  <header>
+    <span class="logo">MediaAuto</span>
+    <span class="grow"></span>
+    <input id="globSearch" type="text" placeholder="直接搜片名/剧集(回车)" onkeydown="if(event.key==='Enter')freeSearch()" />
+    <button onclick="freeSearch()"><svg class="icn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>搜索</button>
+    <button onclick="logout()">退出</button>
+  </header>
+  <!-- 4 个页签(2026-09 二版): 电影 · 剧集 · 整理 · 管理
+       电影/剧集 = TMDB 热门榜(各自独立页签, 不再用分段切换)
+       管理页内子页签: 缺失 / 通用 / 追踪 / 本地库 / 浏览 / 屏蔽
+       深链: ?tab=manage:missing 直达管理-缺失 -->
+  <nav class="tabs">
+    <span class="tab-pill"></span>
+    <button data-tab="movie" class="active" onclick="switchTab('movie')"><svg class="icn tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></svg>电影</button>
+    <button data-tab="tv" onclick="switchTab('tv')"><svg class="icn tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>剧集</button>
+    <button data-tab="organize" onclick="switchTab('organize')"><svg class="icn tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>整理</button>
+    <button data-tab="manage" onclick="switchTab('manage')"><svg class="icn tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="4" x2="14" y1="4"/><line x1="10" y1="4" x2="3" y1="4"/><line x1="21" y1="12" x2="12" y1="12"/><line x1="8" y1="12" x2="3" y1="12"/><line x1="21" y1="20" x2="14" y1="20"/><line x1="12" y1="20" x2="3" y1="20"/><line x1="14" y1="2" x2="14" y1="6"/><line x1="8" y1="10" x2="8" y1="14"/><line x1="16" y1="18" x2="16" y1="22"/></svg>管理</button>
+  </nav>
+  <main>
+    <div id="tab-movie" class="tabpane"></div>
+    <div id="tab-tv" class="tabpane" style="display:none"></div>
+    <div id="tab-organize" class="tabpane" style="display:none"></div>
+    <div id="tab-manage" class="tabpane" style="display:none"></div>
+  </main>
+</div>
+
+<!-- 详情页(移动端 = 独立全屏页; 桌面 = 居中弹窗)。
+     2026-09: 移除顶部 hero 背景横条(占篇幅无意义), 标题/年份/类型全部由正文 .dtitle 承载(桌面+移动统一)。 -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal" id="modal">
+    <div class="mnav">
+      <button class="back" onclick="_navBack()" aria-label="返回"><svg class="icn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
+      <span class="navtitle" id="mNavTitle">详情</span>
+    </div>
+    <!-- 上下文按钮(2026-09-19 桌面返回需求): 有上级视图(搜索页/演员页/上级作品)时 = 返回箭头, 逐级回退;
+         最底层视图时 = X 直接关闭。由 detail.js _syncCloseBtn() 按 _navStack 切换 .has-nav。 -->
+    <button class="close" id="mClose" onclick="_navBack()" aria-label="关闭" title="关闭详情">
+      <svg class="icn icn-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      <svg class="icn icn-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <div class="body" id="mBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 前端按功能拆分: common=公共/工具, 其余每页签一个文件, app=入口。
+     全部 classic script(全局作用域), 顺序: common 先, 各页签任意, app 最后(调 boot)。
+     settings.js = 管理页(缺失/通用/追踪/本地库/浏览/屏蔽 六个子页签, 统一入口)。 -->
+<script src="/js/common.js"></script>
+<script src="/js/trending.js"></script>
+<script src="/js/missing.js"></script>
+<script src="/js/browse.js"></script>
+<script src="/js/track.js"></script>
+<script src="/js/detail.js"></script>
+<script src="/js/organize.js"></script>
+<script src="/js/local.js"></script>
+<script src="/js/jobs.js"></script>
+<script src="/js/block.js"></script>
+<script src="/js/downloads.js"></script>
+<script src="/js/settings.js"></script>
+<script src="/js/app.js"></script>
+<script>
+// PWA: 注册 Service Worker(离线可用 + 静态资源缓存; 网络优先, 更新即时生效)
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>

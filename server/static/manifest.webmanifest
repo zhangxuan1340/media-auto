@@ -1,0 +1,21 @@
+{
+  "name": "MediaAuto 影音自动化",
+  "short_name": "MediaAuto",
+  "description": "影音自动化控制台 · 热门/缺失/整理/设置",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#eef2f9",
+  "theme_color": "#eef2f9",
+  "categories": ["utilities", "multimedia"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "缺失列表", "url": "/?tab=manage:missing", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "文件整理", "url": "/?tab=organize", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

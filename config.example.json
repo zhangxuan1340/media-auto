@@ -1,0 +1,170 @@
+{
+  "_comment": "复制本文件为 config.json 并填入你的真实地址/令牌。所有目录名都可直接改名，分类引擎按 categories 的 key 取用。",
+  "bitmagnet": {
+    "_comment": "原生 Bitmagnet(GraphQL): 带 seeders/leechers 与 TMDB 分类元数据。enabled=false 可禁用。两个源同时启用时, Web 搜索(/api/search)优先用更快的 bitmagnet_next_web。",
+    "enabled": true,
+    "url": "http://localhost:3333/graphql",
+    "limit": 20
+  },
+  "bitmagnet_next_web": {
+    "_comment": "Bitmagnet-Next-Web 改版站点(如 https://your-site.example.com)的 REST 搜索源。与上面的原生 bitmagnet(GraphQL) 是两套东西,分开配置;供 scripts/diao_search.py 使用。通常更快, 但无 seeders/leechers 与 TMDB 元数据。enabled=false 可禁用,base 可换任意同类站点。",
+    "enabled": true,
+    "base": "https://your-site.example.com",
+    "limit": 10
+  },
+  "seerr": {
+    "_comment": "仅作 organize/NFO 阶段的元数据【兜底源】(TMDB 主源失败时回退)。Web 浏览/缺失/屏蔽已不依赖它。",
+    "url": "http://localhost:5055",
+    "api_key": "YOUR_SEERR_API_KEY"
+  },
+  "search": {
+    "_comment": "磁力搜索行为。primary: 双源都启用时优先用哪个(next_web/native)。golden_groups: 这些发布组的种子【默认金标】(自压片源必然带中文字幕+国语, 但文件名不一定写明)。",
+    "primary": "next_web",
+    "golden_groups": []
+  },
+  "tmdb": {
+    "_comment": "TMDB 官方 API(本地元数据主源)。api_key 留空=未配置, 所有 TMDB 接口优雅降级(返回空)。免费注册: themoviedb.org → 头像 → Settings → API。",
+    "api_key": "YOUR_TMDB_API_KEY",
+    "_hosts_comment": "host 候选(不带协议), 按顺序尝试。主用 api.tmdb.org(国内可达), 回退 api.themoviedb.org。",
+    "hosts": ["api.tmdb.org", "api.themoviedb.org"],
+    "language": "zh-CN"
+  },
+  "clouddrive2": {
+    "_comment": "hosts 是候选地址列表,按顺序尝试,连不上自动换下一个。每条可带协议头: https:// 走 TLS,http:// 走明文(协议头优先,不会被全局 use_tls 覆盖,所以外网 https + 内网 http 可以混用)。也可只写一个 host。本机若配了 HTTP 代理,客户端会自动清掉代理变量保证直连(踩过坑: 代理会把内网地址拨号搞超时)。",
+    "hosts": [
+      "https://nas.example.com:5002",
+      "http://192.168.1.200:19798",
+      "http://localhost:19798"
+    ],
+    "host": "http://localhost:19798",
+    "_use_tls": "仅在 host 没写协议头时生效。原生 gRPC 默认 19798 明文 -> false;经 TCP/L4 转发到 TLS 时 true;自签证书再加 \"insecure\": true。",
+    "use_tls": false,
+    "insecure": false,
+    "token": "YOUR_CD2_API_TOKEN_OR_JWT",
+    "grpc_package": "clouddrive",
+    "grpc_service": "CloudDriveFileSrv",
+    "_offline_root": "离线下载目录。CD2 的 \"/\" 就是云盘根(例如 115 根目录),离线目录常在 /Temp/Offline。",
+    "offline_root": "/Temp/Offline",
+  "_no_delete_comment": "这些路径下【一律禁止删除】,只允许往里移动(媒体最终存放区)。",
+  "no_delete_paths": [
+    "/Cloud"
+  ],
+  "_staging_comment": "写文件到受保护路径时的中转目录(先写这里,再 MoveFile 覆盖搬进去,全程不删库内文件)。必须在可删区(如 /Temp 下)。",
+  "staging_dir": "/Temp/.media_auto_stage",
+    "_account_comment": "离线任务接口必须带云盘名+账号ID(缺任一报 cloud account not found)。留空则自动从 GetSubFiles(\"/\") 的 CloudAPI.name / userName 发现。",
+    "cloud_name": "115open",
+    "cloud_account_id": "",
+    "timeout": 30,
+    "offline_by_path_timeout": 180,
+    "offline_max_pages": 5,
+    "_local_comment": "可选: CD2 根 \"/\" 对应的本地路径(本地盘/已挂载的 SMB 等),仅用于 mediainfo 探测媒体信息以写 NFO 的 <fileinfo>。支持数组(按顺序取第一个存在的)。程序【不会】自动挂载;都不存在时退回用文件名推断质量标记,NFO 不含 <fileinfo>。",
+    "local_root": []
+  },
+  "webdav": {
+    "_comment": "CD2 自带 WebDAV(默认入口 /dav),在没有本地挂载时用来读文件探测媒体信息(<fileinfo>)。用 ffprobe 走 HTTP + Range,只取需要的片段,不会整文件下载。",
+    "enabled": true,
+    "base": "https://your-cd2-host:5002/dav",
+    "_account_root": "该 WebDAV 账号的根对应 CD2 上的哪个路径。例如账号开给 Temp,就填 /Temp;填 \"/\" 表示整个根。只有落在这个前缀下的 CD2 路径才会尝试用它。",
+    "account_root": "/Temp",
+    "user": "",
+    "password": "",
+    "_authorization": "也可直接写整条认证头(如 \"Basic xxx\"),优先级高于 user/password。",
+    "authorization": "",
+    "_timeout": "单次探测超时(秒)。ffprobe 走 Range,通常几秒内完成。",
+    "timeout": 180
+  },
+  "jellyfin": {
+    "url": "http://localhost:8096",
+    "token": "YOUR_JELLYFIN_API_KEY",
+    "library_id": ""
+  },
+  "qbit": {
+    "_comment": "qBittorrent WebAPI 下载器。url 填 WebUI 地址(如 http://host:8080), username/password 是 WebUI 账号。save_path/category 可选, 推送任务的默认保存路径与分类。留空 = 未启用(详情页「推送 Qbit」与管理页「下载」会提示先配置)。",
+    "url": "http://localhost:8080",
+    "username": "",
+    "password": "",
+    "save_path": "",
+    "category": ""
+  },
+  "tinymediamanager": {
+    "movie_cmd": "movie -u -n -r",
+    "tv_cmd": "tvshow -u -n -r",
+    "docker_exec": "docker exec -i tinymediamanager /app/tinyMediaManager"
+  },
+  "library_root": "/Cloud",
+  "organize": {
+    "_comment": "离线目录整理: 清广告 → 改名 → 按分类归位到 cloud_root/<分类> → 写 NFO(自带刮削, 让 TMM/Jellyfin 不用再刮)。",
+    "enabled": true,
+    "_cloud_root": "媒体最终存放位置。/Cloud 下只允许往里移动,禁止删除(保护规则见 clouddrive2.no_delete_paths)。目标 = cloud_root/<categories 里的实际目录名>。",
+    "cloud_root": "/Cloud",
+    "_templates": "占位符: {title} {year} {imdb} {tmdb} {quality} {original} {kind}。目录名默认 TMM 风格『标题 (年份)』;想回到『标题.年份.ttID』改成 {title}.{year}.{imdb}。缺失字段会自动清掉空括号。",
+    "folder_template": "{title} ({year})",
+    "_movie_file_template": "电影视频文件名(不含扩展名)。默认复刻 TMM:『标题 (年份) 1080p h265 AC3』。剧集不动季目录/集文件名。",
+    "movie_file_template": "{title} ({year}) {quality}",
+    "_write_nfo": "写 tinyMediaManager 5.2.12(JELLYFIN)兼容 NFO: 电影 <视频名>.nfo, 剧集 tvshow.nfo。",
+    "write_nfo": true,
+    "_rename_media_file": "电影视频文件是否改名(仅单个视频文件时生效,多个不动,避免误伤)。",
+    "rename_media_file": true,
+    "_probe_media": "用 MediaInfo 探测编码/分辨率/音轨,写进 NFO 的 <fileinfo> 并生成质量标记。需要 clouddrive2.local_root 指向一个已存在的本地路径(程序不会自动挂载)。",
+    "probe_media": true,
+    "_tmm_locked": "NFO 末尾写 <tmm_locked/>, 让 tinyMediaManager 不再改写我们自己生成的 NFO。",
+    "tmm_locked": true,
+    "_wikidata": "按 IMDb id 反查 wikidata Q-id 写进 uniqueid(走 Wikidata SPARQL, 失败自动跳过)。",
+    "wikidata": true,
+    "_on_conflict": "目标目录已存在时: skip(默认,跳过并报告) | merge(把内容并入已有目录,适合同剧补季)。",
+    "on_conflict": "skip",
+    "_clean_media_names": "是否剥掉媒体/字幕文件名里的推广块(只删含域名的括号块,不动分辨率/编码/发布组)。",
+    "clean_media_names": true,
+    "keep_subtitles": true,
+    "_clean_unresolved": "反查不到/分类不出的条目,是否仍就地删掉广告与杂项(不改名、不移动,避免放错库)。",
+    "clean_unresolved": true,
+    "_ad_disable": "可关闭某条广告规则: promo_only(纯推广名) | domain_no_year(带域名且无年份)。",
+    "ad_disable": [],
+    "_min_video_bytes": "小于该体积的\"视频\"也当广告删(默认 0 = 关闭,避免误伤预告/样片)。",
+    "min_video_bytes": 0,
+    "_junk_ext": "额外视为杂项(要删)的扩展名,会与内置清单合并。",
+    "junk_ext": [],
+    "_min_match_score": "反查结果与文件名的最低匹配度(0~1)。低于它判错配、跳过不改名(防『国安』被搜成《国土安全》、短名套长名错配)。改完立即生效(热加载),无需重启。留空/非法值回退 0.9。",
+    "min_match_score": 0.9,
+    "_scan_depth": "扫描离线条目的递归层数(剧集 Show/Season 01/xxx.mkv 三层足够)。改完立即生效。留空/非法值回退 3。",
+    "scan_depth": 3,
+    "_ignore_prefix": "整理时跳过的一级条目前缀(临时/隐藏/探测产物目录)。改完立即生效。留空/非法值回退默认。",
+    "ignore_prefix": ["_", ".", "[Search]"]
+  },
+  "state_dir": "state",
+  "web": {
+    "_comment": "Web 界面配置。host/port 为启动地址；auth 为登录账号(也可用环境变量 WEB_USER/WEB_PASS 覆盖)。",
+    "host": "0.0.0.0",
+    "port": 8787,
+    "auth": {
+      "username": "admin",
+      "password": "change_me"
+    }
+  },
+  "db": {
+    "_comment": "本地 SQLite 存储。默认 data/media_auto.db,可用环境变量 MEDIA_AUTO_DB 覆盖。",
+    "path": "data/media_auto.db"
+  },
+  "categories": {
+    "_comment": "左边是分类引擎的分类键(不可改),右边是 /Cloud 下的真实目录名(可改)。注意 Jp&Kr* 带 & 号 —— gRPC 传的是 JSON 字符串,不经过 shell,& 不会有转义问题。",
+    "DmMovie": "DmMovie",
+    "DmShow": "DmShow",
+    "JlShow": "JlShow",
+    "XrShow": "XSShow",
+    "SpShow": "SmShow",
+    "MuShow": "SmShow",
+    "CnMovie": "CnMovie",
+    "CnShow": "CnShow",
+    "EnMovie": "EnMovie",
+    "EnShow": "EnShow",
+    "JpKrMovie": "Jp&KrMovie",
+    "JpKrShow": "Jp&KrShow",
+    "HkMovie": "HkMovie",
+    "HkShow": "HkShow",
+    "SeaMovie": "SeaMovie",
+    "SeaShow": "SeaShow",
+    "OtMovie": "OtMovie",
+    "OtShow": "OtShow"
+  },
+  "priority_note": "级联顺序: 动画(Dm) > 纪录片(Jl) > 综艺(Xr) > 体育(Sp) > 音乐(Mu) > 地区(Cn/En/JpKr/Hk/Sea/Ot)。类型优先于地区。不再按 18+ 分级单独分目录(分级写进 NFO, 由 Jellyfin 按分级控制)。"
+}

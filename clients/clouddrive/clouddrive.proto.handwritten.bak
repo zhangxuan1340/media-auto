@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package clouddrive;
+
+// 仅抽取 media-auto 用到的接口与消息。CloudDrive2 v1.0.17 gRPC。
+service CloudDriveFileSrv {
+  rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
+  rpc AddOfflineFiles(AddOfflineFileRequest) returns (FileOperationResult);
+  rpc ListOfflineFilesByPath(FileRequest) returns (OfflineFileListResult);
+  rpc GetSubFiles(FileRequest) returns (stream CloudDriveFile);
+  rpc MoveFile(MoveFileRequest) returns (FileOperationResult);
+  rpc RenameFile(RenameFileRequest) returns (FileOperationResult);
+}
+
+enum OfflineStatus {
+  Pending = 0;
+  Downloading = 1;
+  Finished = 2;
+  Error = 3;
+}
+
+enum FileType {
+  Directory = 0;
+  File = 1;
+  Other = 2;
+}
+
+enum ConflictPolicy {
+  Overwrite = 0;
+  Rename = 1;
+  Skip = 2;
+}
+
+message GetTokenRequest {
+  string username = 1;
+  string password = 2;
+  optional string totpCode = 3;
+}
+
+message GetTokenResponse {
+  bool success = 1;
+  string token = 2;
+  string errorMessage = 3;
+  // 其余字段略
+}
+
+message AddOfflineFileRequest {
+  string urls = 1;
+  string toFolder = 2;
+  uint32 checkFolderAfterSecs = 3;
+}
+
+message FileRequest {
+  string path = 1;
+  optional bool forceRefresh = 2;
+}
+
+message OfflineFile {
+  string name = 1;
+  string url = 2;
+  string infoHash = 3;
+  int64 size = 4;
+  OfflineStatus status = 5;
+  string lastDownloadError = 6;
+  double bytesPerSecond = 7;
+}
+
+message OfflineFileListResult {
+  repeated OfflineFile offlineFiles = 1;
+  OfflineStatus status = 2;
+}
+
+message CloudDriveFile {
+  string id = 1;
+  string name = 2;
+  string fullPathName = 3;
+  int64 size = 4;
+  FileType fileType = 5;
+  // 其余字段略
+}
+
+message FileOperationResult {
+  bool success = 1;
+  string errorMessage = 2;
+}
+
+message MoveFileRequest {
+  repeated string theFilePaths = 1;
+  string destPath = 2;
+  optional ConflictPolicy conflictPolicy = 3;
+  optional bool moveAcrossClouds = 4;
+  optional bool handleConflictRecursively = 5;
+}
+
+message RenameFileRequest {
+  string theFilePath = 1;
+  string newName = 2;
+}

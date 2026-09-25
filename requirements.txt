@@ -1,0 +1,14 @@
+# MediaAuto 运行时依赖
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27
+sqlalchemy>=2.0
+grpcio>=1.60
+grpcio-tools>=1.60
+
+# CloudDrive2 的 gRPC 调用是【纯 Python grpcio 原生 channel】, 无需 grpcurl 等外部二进制。
+# 消息存根由官方 proto 预生成: clients/clouddrive/clouddrive_pb2*.py。
+# proto 升级后重新生成:
+#   venv/bin/python -m grpc_tools.protoc -I clients/clouddrive \
+#     --python_out=clients/clouddrive --grpc_python_out=clients/clouddrive clouddrive.proto
+#   然后把 clouddrive_pb2_grpc.py 里的 `import clouddrive_pb2` 改成带 try/except 的包内导入。

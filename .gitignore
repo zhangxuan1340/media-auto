@@ -1,0 +1,16 @@
+# 运行时生成 / 私密
+config.json
+config.json.bak*
+state/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 虚拟环境(若放在项目内)
+.venv/
+venv/
+
+# 打包产物 / 工具目录
+media-auto-skill.zip
+.workbuddy/
