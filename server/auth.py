@@ -1,6 +1,6 @@
 """MediaAuto Web —— 登录与会话
 
-本地媒体工具的轻量鉴权:用户名/密码来自 config.json 的 web.auth(可用环境变量
+本地媒体工具的轻量鉴权:用户名/密码来自数据库配置的 web.auth(可用环境变量
 WEB_USER / WEB_PASS 覆盖)。登录成功后下发 HttpOnly Cookie,后续请求校验该 Cookie。
 重启服务会刷新密钥,需要重新登录(本地工具可接受)。
 """

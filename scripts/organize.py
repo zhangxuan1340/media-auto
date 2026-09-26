@@ -58,7 +58,7 @@ def _warn_config_once(config, key, raw, expected, default):
         return
     _CONFIG_WARNED.add(tag)
     print(f"[config] ⚠ {tag}={raw!r} 非法(要求 {expected}), 回退默认 {default!r} —— "
-          f"请修正 config.json 的 organize.{key}", file=sys.stderr)
+          f"请在 管理 → 通用 → 整理 里修正 organize.{key}", file=sys.stderr)
 
 
 def min_match_score(config):
@@ -2106,7 +2106,6 @@ def run(config, base_dir=None, apply=False, only=None, limit=None, log=print):
 
 def main():
     ap = argparse.ArgumentParser(description="离线目录整理: 清广告 → 改名 → 归位媒体库")
-    ap.add_argument("--config", default=None, help="配置文件路径(默认 ./config.json)")
     ap.add_argument("--base-dir", default=None, help="项目根目录(默认本脚本上一级)")
     ap.add_argument("--apply", action="store_true", help="真正执行(默认只预览)")
     ap.add_argument("--only", default=None, help="只处理名字含该子串的条目")
@@ -2115,8 +2114,8 @@ def main():
     args = ap.parse_args()
 
     base_dir = args.base_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg_path = args.config or os.path.join(base_dir, "config.json")
-    config = cd2.load_config(cfg_path)
+    from lib.config import load_config as _lc  # noqa: PLC0415
+    config = _lc()   # 只读数据库(app_config)
 
     if args.json:
         plans = build_plans(config, base_dir=base_dir, only=args.only, limit=args.limit)

@@ -11,9 +11,10 @@ doc/
 .workbuddy/
 *.zip
 
-# 私密:配置绝不能进镜像(由 docker-compose 挂载)
+# 私密:配置绝不能进镜像(挂载 + 首启导入数据库)
 config.json
 config.json.bak-*
+config/
 
 # 运行时数据 / 队列状态(一律用卷挂载)
 data/

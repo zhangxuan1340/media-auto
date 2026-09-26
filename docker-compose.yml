@@ -1,7 +1,16 @@
 # MediaAuto — Web 控制台 + 同步作业
-# 用法: cp config.example.json config.json && $EDITOR config.json
-#       docker compose up -d --build
-# 本地未做 docker build/compose 验证(本机无 Docker)。
+#
+# 配置真相源是数据库(data/media_auto.db 的 app_config 表), 配置文件只作首启一次性导入源, 
+# 「首次导入 + 手工备份」, 由 Web「管理 → 通用」页读写即可, 不用改文件。
+#
+# 全新部署:
+#   docker compose up -d --build
+#   → 打开 http://<NAS>:8787 → 登录默认账号 → 走首次引导
+#
+# 老部署一次性迁移(只做一次, 导入完该文件不再被读):
+#   mkdir -p config && mv config.json config/config.json
+#   docker compose up -d --build
+#   首次启动把 config/config.json 一次性导入数据库(不会再问引导, 之后只读库)。
 services:
   media-auto:
     build: .
@@ -15,6 +24,8 @@ services:
     #   WEB_USER: admin
     #   WEB_PASS: change_me
     volumes:
-      - ./config.json:/app/config.json:ro   # 配置:宿主机维护, 容器内只读
-      - ./data:/app/data                    # SQLite + 图片缓存(WAL, 必须本地盘)
-      - ./state:/app/state                  # 队列状态 state/queue.json
+      # 目录挂载(不是文件): 宿主机缺这个目录时 Docker 会自动建成目录,
+      # 不会再出现"文件不存在 → 被挂成目录 → mount not a directory"的坑。
+      - ./config:/app/config
+      - ./data:/app/data   # SQLite(含配置 app_config)+ 图片缓存(WAL, 必须本地盘)
+      - ./state:/app/state # 队列状态 state/queue.json

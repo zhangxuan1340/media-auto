@@ -127,7 +127,7 @@ async def _run_sync(scope: str, full: bool) -> int:
     """同步主体(调用方须已持 SYNC_LOCK)。"""
     cfg = load_config()
     if not cfg.get("jellyfin", {}).get("url"):
-        raise RuntimeError("config.json 未配置 jellyfin.url / jellyfin.token")
+        raise RuntimeError("未配置 jellyfin.url / jellyfin.token(管理 → 通用 → Jellyfin)")
 
     init_db()
     session = SessionLocal()
@@ -184,7 +184,6 @@ def main():
     ap.add_argument("--scope", choices=["all", "libraries", "items", "episodes"], default="all")
     ap.add_argument("--full", action="store_true",
                     help="全库比对并强制重写每一条(默认: 只写差异行)。仍不清表、不删行")
-    ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
     try:
         n = asyncio.run(run(args.scope, full=args.full))

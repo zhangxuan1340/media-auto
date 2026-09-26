@@ -47,7 +47,7 @@ proto 文件(clouddrive.proto)默认与本模块同目录(clients/clouddrive/),�
    OFFLINE_INIT / OFFLINE_DOWNLOADING / OFFLINE_FINISHED / OFFLINE_ERROR / OFFLINE_UNKNOWN
    (注意不是老版本手写 proto 里的 Pending/Downloading/Finished/Error)
 
-config.json -> clouddrive2 关键字段:
+配置里的 clouddrive2 关键字段:
   host                 : 只写 host:port(如 192.168.1.100:19798)。兼容误写 https://host:port,会自动去协议。
   use_tls              : 目标是否 TLS。原生 gRPC 默认端口 19798 为明文 -> false;L4 转发到 TLS 时 true。
   insecure             : true 时跳过服务端证书校验(自签证书场景)。
@@ -306,7 +306,7 @@ def _grpcurl(config, method, data=None, auth=True, emit_defaults=False,
                              "需在反代做 TCP(L4)/grpc_pass 转发; "
                              "4) 可把 host 配成多个候选自动回退")
             if "cloud account" in low and "not found" in low:
-                hints.append("云账号缺失/错误: 请确认 config.json -> clouddrive2 的 "
+                hints.append("云账号缺失/错误: 请确认 管理 → 通用 → CloudDrive2(clouddrive2) 的 "
                              "cloud_name + cloud_account_id(账号可由 GetSubFiles(\"/\") 的 "
                              "CloudAPI.name / userName 得到)")
             raise RuntimeError(f"CD2 {method} 失败: {err}"
@@ -453,7 +453,7 @@ def list_cloud_accounts(config, base_dir=None):
 def resolve_account(config, base_dir=None):
     """得到 (cloud_name, cloud_account_id)。
 
-    优先用 config.json -> clouddrive2 的 cloud_name / cloud_account_id(显式配置最稳);
+    优先用配置里的 clouddrive2.cloud_name / cloud_account_id(显式配置最稳);
     未配置则自动从 GetSubFiles("/") 发现。
     """
     cd2 = config.get("clouddrive2", {}) or {}
@@ -464,7 +464,7 @@ def resolve_account(config, base_dir=None):
     accounts = list_cloud_accounts(config, base_dir=base_dir)
     if not accounts:
         raise RuntimeError(
-            "未发现任何云盘账号。请在 config.json -> clouddrive2 里显式配置 "
+            "未发现任何云盘账号。请在 管理 → 通用 → CloudDrive2(clouddrive2) 里显式配置 "
             "cloud_name 与 cloud_account_id(可从 CD2 网页或 GetSubFiles(\"/\") 的 "
             "CloudAPI.name / userName 得到)"
         )
@@ -906,13 +906,6 @@ def status_text(status):
     }.get(s, str(status or "未知"))
 
 
-def load_config(path):
-    if not path or not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="CD2 gRPC 客户端测试")
@@ -926,11 +919,11 @@ def main():
     ap.add_argument("--pages", type=int, default=None, help="分页最多翻几页")
     ap.add_argument("--infohash", default=None)
     ap.add_argument("--name", default=None, help="按名称子串查找")
-    ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
 
     root = _PROJECT_ROOT
-    cfg = load_config(os.path.join(root, args.config))
+    from lib.config import load_config as _lc  # noqa: PLC0415
+    cfg = _lc()   # 只读数据库
     base = root
 
     if args.action == "accounts":

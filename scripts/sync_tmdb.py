@@ -192,7 +192,7 @@ async def sync_one(kind: str, tmdb_id: int) -> bool:
     """
     cfg = load_config()
     if not (cfg.get("tmdb", {}) or {}).get("api_key"):
-        raise RuntimeError("config.json 未配置 tmdb.api_key")
+        raise RuntimeError("未配置 tmdb.api_key(管理 → 通用 → TMDB)")
     init_db()
     item = await _fetch_one(cfg, kind, tmdb_id)
     if not item:
@@ -236,7 +236,7 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
     """
     cfg = load_config()
     if not (cfg.get("tmdb", {}) or {}).get("api_key"):
-        raise RuntimeError("config.json 未配置 tmdb.api_key(免费注册: themoviedb.org → Settings → API)")
+        raise RuntimeError("未配置 tmdb.api_key(管理 → 通用 → TMDB;免费注册: themoviedb.org → Settings → API)")
 
     init_db()
     session = SessionLocal()

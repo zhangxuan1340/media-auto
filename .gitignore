@@ -1,6 +1,7 @@
 # 运行时生成 / 私密
 config.json
 config.json.bak*
+config/
 state/
 data/
 __pycache__/

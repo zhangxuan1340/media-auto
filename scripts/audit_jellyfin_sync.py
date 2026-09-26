@@ -315,7 +315,7 @@ def cli():
     a = ap.parse_args()
     cfg = load_config()
     if not cfg.get("jellyfin", {}).get("url"):
-        print("config.json 未配置 jellyfin.url", file=sys.stderr)
+        print("未配置 jellyfin.url(管理 → 通用 → Jellyfin)", file=sys.stderr)
         return 2
     return asyncio.run(main(cfg, a.recent_days, a.sample))
 

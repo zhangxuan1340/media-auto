@@ -1,6 +1,6 @@
 """磁力搜索路由: 按片名/剧集搜磁力
 
-两个磁力源, 由 config.json 的 enabled 开关决定用哪个(启用哪个用哪个):
+两个磁力源, 由配置的 enabled 开关决定用哪个(启用哪个用哪个):
   - 原生 Bitmagnet        (bitmagnet.enabled)          GraphQL, 带 seeders/leechers
   - Bitmagnet-Next-Web    (bitmagnet_next_web.enabled) REST(如 https://your-site.example.com), 通常更快, 无 seeders/leechers
 

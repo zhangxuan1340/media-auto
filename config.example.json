@@ -21,7 +21,10 @@
     "_comment": "TMDB 官方 API(本地元数据主源)。api_key 留空=未配置, 所有 TMDB 接口优雅降级(返回空)。免费注册: themoviedb.org → 头像 → Settings → API。",
     "api_key": "YOUR_TMDB_API_KEY",
     "_hosts_comment": "host 候选(不带协议), 按顺序尝试。主用 api.tmdb.org(国内可达), 回退 api.themoviedb.org。",
-    "hosts": ["api.tmdb.org", "api.themoviedb.org"],
+    "hosts": [
+      "api.tmdb.org",
+      "api.themoviedb.org"
+    ],
     "language": "zh-CN"
   },
   "clouddrive2": {
@@ -40,12 +43,12 @@
     "grpc_service": "CloudDriveFileSrv",
     "_offline_root": "离线下载目录。CD2 的 \"/\" 就是云盘根(例如 115 根目录),离线目录常在 /Temp/Offline。",
     "offline_root": "/Temp/Offline",
-  "_no_delete_comment": "这些路径下【一律禁止删除】,只允许往里移动(媒体最终存放区)。",
-  "no_delete_paths": [
-    "/Cloud"
-  ],
-  "_staging_comment": "写文件到受保护路径时的中转目录(先写这里,再 MoveFile 覆盖搬进去,全程不删库内文件)。必须在可删区(如 /Temp 下)。",
-  "staging_dir": "/Temp/.media_auto_stage",
+    "_no_delete_comment": "这些路径下【一律禁止删除】,只允许往里移动(媒体最终存放区)。",
+    "no_delete_paths": [
+      "/Cloud"
+    ],
+    "_staging_comment": "写文件到受保护路径时的中转目录(先写这里,再 MoveFile 覆盖搬进去,全程不删库内文件)。必须在可删区(如 /Temp 下)。",
+    "staging_dir": "/Temp/.media_auto_stage",
     "_account_comment": "离线任务接口必须带云盘名+账号ID(缺任一报 cloud account not found)。留空则自动从 GetSubFiles(\"/\") 的 CloudAPI.name / userName 发现。",
     "cloud_name": "115open",
     "cloud_account_id": "",
@@ -124,7 +127,11 @@
     "_scan_depth": "扫描离线条目的递归层数(剧集 Show/Season 01/xxx.mkv 三层足够)。改完立即生效。留空/非法值回退 3。",
     "scan_depth": 3,
     "_ignore_prefix": "整理时跳过的一级条目前缀(临时/隐藏/探测产物目录)。改完立即生效。留空/非法值回退默认。",
-    "ignore_prefix": ["_", ".", "[Search]"]
+    "ignore_prefix": [
+      "_",
+      ".",
+      "[Search]"
+    ]
   },
   "state_dir": "state",
   "web": {
@@ -135,10 +142,6 @@
       "username": "admin",
       "password": "change_me"
     }
-  },
-  "db": {
-    "_comment": "本地 SQLite 存储。默认 data/media_auto.db,可用环境变量 MEDIA_AUTO_DB 覆盖。",
-    "path": "data/media_auto.db"
   },
   "categories": {
     "_comment": "左边是分类引擎的分类键(不可改),右边是 /Cloud 下的真实目录名(可改)。注意 Jp&Kr* 带 & 号 —— gRPC 传的是 JSON 字符串,不经过 shell,& 不会有转义问题。",

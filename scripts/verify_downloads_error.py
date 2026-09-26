@@ -20,6 +20,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+_sys.path.insert(0, str(ROOT))
+from lib.config import load_config  # noqa: E402  统一配置入口(数据库优先)
 BASE = "http://127.0.0.1:8787"
 OUT = ROOT / "state" / "ui_verify" / "pwa_safearea"
 MSG = "读取 qBittorrent 任务失败: qBittorrent 登录失败: HTTP 204"
@@ -27,7 +30,7 @@ MSG = "读取 qBittorrent 任务失败: qBittorrent 登录失败: HTTP 204"
 
 async def main():
     from playwright.async_api import async_playwright
-    a = json.loads((ROOT / "config.json").read_text())["web"]["auth"]
+    a = load_config()["web"]["auth"]
     OUT.mkdir(parents=True, exist_ok=True)
     bad = []
 

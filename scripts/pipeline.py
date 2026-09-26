@@ -27,7 +27,7 @@ from scripts import check as chk  # noqa: E402
 from scripts import push  # noqa: E402  (build_task/parse_info_hash 与 Web 推送同一构造逻辑)
 
 
-def push_selected(config, base, cfg_path, result, pick_meta=None):
+def push_selected(config, base, result, pick_meta=None):
     magnet = bm_search.magnet(result)
     content = result.get('content') or {}
     bm_type = (content.get('type') or '').upper()
@@ -43,15 +43,15 @@ def push_selected(config, base, cfg_path, result, pick_meta=None):
                            config.get('clouddrive2', {}).get('offline_root', '/Offline'))
     res = cd2.add_offline(config, magnet, task['to_folder'], base_dir=base)
     print('CD2 返回:', res)
-    state.add_task(cfg_path, task)
+    state.add_task(task)
     print(f'已入队: {task["title"]} ({task["content_type"]})')
     return task
 
 
-def wait_loop(config, base, cfg_path, library_root, interval):
+def wait_loop(config, base, library_root, interval):
     print(f'=== 轮询下载(每 {interval}s) ===')
     while True:
-        q = state.load_queue(cfg_path)
+        q = state.load_queue()
         pending = [t for t in q if not t.get('done')]
         if not pending:
             print('全部完成。')
@@ -70,13 +70,11 @@ def main():
     ap.add_argument('--wait', dest='wait', action='store_true', help='等待下载完成后刮削刷新')
     ap.add_argument('--no-wait', dest='wait', action='store_false')
     ap.add_argument('--interval', type=int, default=120)
-    ap.add_argument('--config', default='config.json')
     ap.set_defaults(wait=False)
     args = ap.parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(__file__), '..', args.config)
-    config = classify.load_config(cfg_path)
-    base = os.path.dirname(os.path.abspath(cfg_path))
+    config = classify.load_config()
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))   # 项目根
     library_root = config.get('library_root', '/media')
 
     results = bm_search.search(config, args.query, args.limit)
@@ -97,10 +95,10 @@ def main():
     chosen = results[pick]
     print(f'已选: {chosen.get("name")}')
 
-    push_selected(config, base, cfg_path, chosen)
+    push_selected(config, base, chosen)
 
     if args.wait:
-        wait_loop(config, base, cfg_path, library_root, args.interval)
+        wait_loop(config, base, library_root, args.interval)
         # 刮削 + 刷新
         import finish as fin
         print('=== 下载完成,开始刮削与刷新 ===')

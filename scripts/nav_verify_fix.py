@@ -4,12 +4,15 @@ import asyncio, json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+_sys.path.insert(0, str(ROOT))
+from lib.config import load_config  # noqa: E402  统一配置入口(数据库优先)
 BASE = "http://127.0.0.1:8787"
 OUT = ROOT / "state" / "ui_verify" / "mobile_navfix"
 OUT.mkdir(parents=True, exist_ok=True)
 
 def creds():
-    cfg = json.loads((ROOT / "config.json").read_text())
+    cfg = load_config()
     a = cfg["web"]["auth"]; return a["username"], a["password"]
 
 async def login(page):

@@ -608,7 +608,7 @@ def run(mode="full", limit=0):
     from lib.sync_guard import SYNC_LOCK
     cfg = load_config()
     if not cfg.get("jellyfin", {}).get("url"):
-        raise RuntimeError("config.json 未配置 jellyfin.url / jellyfin.token")
+        raise RuntimeError("未配置 jellyfin.url / jellyfin.token(管理 → 通用 → Jellyfin)")
     with SYNC_LOCK:                      # 见 lib/sync_guard.py
         return asyncio.run(_run_async(cfg, mode=mode, limit=limit))
 

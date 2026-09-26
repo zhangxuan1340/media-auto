@@ -1,10 +1,13 @@
 """MediaAuto Web —— 配置与路径
 
-集中加载 config.json,并暴露项目根目录,供后端复用 lib/、clients/、scripts/ 与 db/。
+配置真相源是 SQLite 的 app_config 表(见 db/models.AppConfig 与 lib/config.py):
+  get_config()   按 DB 的 updated_at 自动热加载, 每次请求都读到最新值
+  save_config()  统一写入口(Web「通用」页 / 分类规则 / qbit 配置都走它)
+
+运行期【只读数据库】: 本模块不读任何配置文件, 配置文件只在首启 lib.config.bootstrap()
+被一次性导入(此后失效)。state/queue.json 固定在 PROJECT_ROOT/state/,与配置文件无关。
 """
 import copy
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -12,67 +15,62 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = PROJECT_ROOT  # 兼容旧引用
 
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
-
 # 把项目根目录加入 sys.path,这样能直接 import lib / clients / scripts / db
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# 同时支持从任意工作目录启动
-WORKDIR = os.environ.get("MEDIA_AUTO_DIR", str(PROJECT_ROOT))
-CONFIG_FILENAME = os.environ.get("MEDIA_AUTO_CONFIG", "config.json")
-CONFIG_PATH = Path(WORKDIR) / CONFIG_FILENAME
+from lib import config as lib_config  # noqa: E402  (依赖上面的 sys.path 注入)
 
+
+def load_config():
+    """读配置(只读数据库; 全库唯一实现见 lib.config.load_config)。"""
+    return lib_config.load_config()
+
+
+# 模块级配置(进程启动时加载一次); bootstrap 后由 main 调 reload_config() 刷新
+CONFIG = load_config()
+
+_CONFIG_CACHE = {"stamp": None, "data": None}
 _config_cache = None
 
 
-def load_config(path=None):
-    p = Path(path) if path else CONFIG_PATH
-    if not p.exists():
-        return {}
+def _stamp():
+    """热加载依据: 只有 DB 的 updated_at(文件 mtime 已随配置退役, 不再参与)。"""
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-# 模块级配置(进程启动时加载一次); 需要热更新时调用 reload_config()
-CONFIG = load_config()
-
-_CONFIG_CACHE = {"mtime": None, "data": None}
+        return lib_config.config_stamp()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def get_config():
     """FastAPI 依赖: 返回配置字典(副本, 防 handler 误改污染全局缓存)。
 
-    按 mtime 自动重载: config.json 被改动后, 下一次请求即读到新值
-    (本地文件 stat 是微秒级, 每请求检查无性能负担)。这样运行时改配置,
-    网页路由与后台同步读到的是同一份最新配置, 不再出现
-    "路由用旧缓存、sync 用新值"的行为分裂。
+    按 updated_at 自动重载: Web 页改配置 / 分类规则写回后, 下一次请求即读到
+    新值, 不需要重启容器(一次索引查询, 无性能负担)。
     """
-    global _config_cache  # 兼容旧引用
+    global _config_cache
     m = _CONFIG_CACHE
-    try:
-        st_mtime = CONFIG_PATH.stat().st_mtime
-    except OSError:
-        st_mtime = None
-    if st_mtime != m["mtime"]:
+    st = _stamp()
+    if st != m["stamp"]:
         m["data"] = load_config()
-        m["mtime"] = st_mtime
+        m["stamp"] = st
         _config_cache = m["data"]
     return copy.deepcopy(m["data"] or {})
 
 
 def reload_config():
-    """强制重读 config.json(立即生效, 不等下一次请求的 mtime 检查)。"""
+    """强制重读配置(写库后立刻调用, 不等下一次请求的 stamp 检查)。"""
     global _config_cache
     _CONFIG_CACHE["data"] = load_config()
-    try:
-        _CONFIG_CACHE["mtime"] = CONFIG_PATH.stat().st_mtime
-    except OSError:
-        _CONFIG_CACHE["mtime"] = None
+    _CONFIG_CACHE["stamp"] = _stamp()
     _config_cache = _CONFIG_CACHE["data"]
     return _config_cache
+
+
+def save_config(data: dict):
+    """整份配置写 DB + 立即刷新本进程缓存(其余进程/下次请求按 stamp 自动跟上)。"""
+    lib_config.save_config(data)
+    return reload_config()
 
 
 def skill_root():

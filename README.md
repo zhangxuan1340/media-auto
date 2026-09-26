@@ -16,7 +16,7 @@ Bitmagnet(GraphQL 搜磁力) → CloudDrive2(gRPC 离线下载)
 MediaAuto/
 ├── README.md            # 本文件
 ├── requirements.txt     # Python 依赖
-├── config.example.json   # 配置模板(复制为 config.json 填真实值)
+├── config.example.json   # 配置模板(全新部署按它播种; 首启也可用 config/config.json 一次性导入)
 ├── Dockerfile / .dockerignore / docker-compose.yml   # 容器化部署
 ├── lib/                  # 公共逻辑
 │   ├── config.py         # 共享配置加载(脚本 & server 共用)
@@ -47,7 +47,7 @@ MediaAuto/
 │   └── sync_tmdb.py      # 同步 TMDB 元数据 → 本地 SQLite
 ├── server/               # FastAPI 网页控制台(单端口)
 │   ├── main.py           # 入口: 登录/鉴权 + 托管 index.html + 挂载 API
-│   ├── config.py         # 加载 config.json, 暴露项目根目录
+│   ├── config.py         # 配置读写(真相源 DB app_config, 文件仅导入/导出), 暴露项目根目录
 │   ├── auth.py           # 用户名/密码 + HttpOnly Cookie 会话
 │   ├── routers/          # search / browse / sync / jobs / cd2 等路由
 │   └── static/index.html # 单页前端
@@ -58,7 +58,8 @@ MediaAuto/
 ## 快速开始(命令行)
 ```bash
 pip install -r requirements.txt
-cp config.example.json config.json      # 填入 Bitmagnet / CD2 / Jellyfin / TMDB / WebDAV 真实地址与令牌
+# 配置存在数据库里: 首次启动把 config/config.json(若有)一次性导入, 此后页面与脚本只读数据库
+# (可选)想预填 Bitmagnet / CD2 / Jellyfin / TMDB 地址与令牌: cp config.example.json config/config.json
 # (可选) brew install mediainfo          # 探测媒体信息写 NFO 的 <fileinfo>(有 ffprobe 也行)
 
 python3 scripts/search.py --query "盗梦空间 2010"
@@ -142,7 +143,7 @@ python3 scripts/availability_sync.py               # 真写库
 ## Web 控制台(可视化界面)
 一个 FastAPI + 单页 HTML 控制台,单端口同时提供 API 与界面：
 
-- 登录(账号来自 `config.json` 的 `web.auth`,可用 `WEB_USER` / `WEB_PASS` 覆盖)
+- 登录(账号存在数据库 `config.web.auth`,可用 `WEB_USER` / `WEB_PASS` 覆盖)
 - **缺失 / 热门 / 演员作品**:基于本地 TMDB 缓存 + 可用性表判定,点开看详情与 Bitmagnet 磁力,一键推 CD2
 - **文件整理**:预览整理计划(要删的广告/杂项、新目录名、目标 `/Cloud/<分类>`、匹配度),勾选或全部执行;
   执行时会顺带写 NFO。库里已有的条目判为 `duplicate`,不重复归位但会清广告。
@@ -152,14 +153,16 @@ python3 scripts/availability_sync.py               # 真写库
 
 启动：
 ```bash
-python -m server.main                 # 读 config.json,端口见 config.web.port(默认 8787)
-MEDIA_AUTO_CONFIG=/path/config.json python -m server.main   # 指定配置
-# 浏览器打开 http://<host>:8787 ,用 web.auth 的账号登录
+python -m server.main   # 首启一次性初始化: 有 config/config.json 就导入, 否则按 config.example.json 播种
+                        # 端口见配置 web.port(默认 8787), 页面改完即热加载
+MEDIA_AUTO_CONFIG=/path/old.json python -m server.main   # 显式指定【一次性导入】的源文件(导入完即失效)
+# 浏览器打开 http://<host>:8787 → 登录 → 首次引导(改密码/填 Jellyfin、TMDB、CD2、库根)
 ```
 
 ## 安装 / 启用
 1. 安装依赖:`pip install -r requirements.txt`
-2. 复制配置:`cp config.example.json config.json`,填入真实地址与令牌
+2. (可选)已有配置就位:`mkdir -p config && cp 你的配置.json config/config.json` ——
+   首次启动会把它**导入数据库**;没有就直接起服务,页面引导里填。
 3. (可选)安装 `mediainfo`:`brew install mediainfo` —— 探测媒体编码/分辨率以写 NFO 的 `<fileinfo>`;
    没装也能正常运行(探测链降级:本地 mediainfo → WebDAV + ffprobe → 文件名推断),
    NFO 其余字段照写,只是不含该段。
@@ -167,41 +170,54 @@ MEDIA_AUTO_CONFIG=/path/config.json python -m server.main   # 指定配置
 
 ## 部署与使用
 
+> **配置存在数据库里**(SQLite 的 `app_config` 表),运行期**不读任何配置文件**:
+> 文件只在首启被一次性导入(导入完永久失效)。改配置一律走 **管理 → 通用** 页面
+> (分组表单 + 高级 JSON + 导出/导入),保存即热加载,不用重启、不用改文件。
+
 ### 方式一:本地直接跑
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-cp config.example.json config.json && $EDITOR config.json
+mkdir -p config && cp config.example.json config/config.json   # (可选)首启想预填就放这里, 首次启动一次性导入
 venv/bin/python -m server.main        # 端口取 config.web.port(默认 8787)
 ```
-浏览器打开 `http://<host>:8787`,用 `config.web.auth` 的账号登录(或用 `WEB_USER` / `WEB_PASS` 覆盖)。
+浏览器打开 `http://<host>:8787` 登录(默认 `admin` / `change_me`,首次登录进引导改密码;
+或用 `WEB_USER` / `WEB_PASS` 覆盖账号)。
 
 ### 方式二:Docker(推荐 NAS)
 ```bash
-cp config.example.json config.json && $EDITOR config.json   # 在宿主机上改配置
 docker compose up -d --build
 docker compose logs -f
 curl -fsS http://localhost:8787/ >/dev/null && echo OK      # 探活: GET / 返回 200 即正常
+```
+
+**老部署一次性迁移**(已有根目录 `config.json` 的机器,只做一次):
+```bash
+mkdir -p config && mv config.json config/config.json
+docker compose up -d --build     # 首启把文件一次性导入数据库(不再走引导),导入完该文件不再被读
 ```
 
 | 项 | 值 |
 | --- | --- |
 | 镜像 | `python:3.12-slim` + `mediainfo` / `ffmpeg`(探测 `<fileinfo>` 用,可缺省) |
 | 端口 | `8787:8787`(容器内监听 `0.0.0.0:8787`) |
-| 配置 | 卷 `./config.json:/app/config.json:ro`(容器**不**内置任何配置) |
+| 配置 | **数据库**(`app_config` 表);卷 `./config:/app/config` 只作首次导入源(容器**不**内置任何配置) |
 | 数据库 | 卷 `./data:/app/data`(**SQLite 走 WAL,必须放本地盘**,不要放网络盘/对象存储) |
 | 图片缓存 | `./data/img_cache`(随 `data` 卷一起持久化) |
 | 队列状态 | 卷 `./state:/app/state`(`state/queue.json`) |
 | 探活 | `GET /`(本项目没有 `/api/health`) |
 
-可用环境变量(仅这几个,其余配置一律走 `config.json`):
+可用环境变量(仅这几个):
 
 | 变量 | 作用 |
 | --- | --- |
-| `WEB_USER` / `WEB_PASS` | 覆盖 `config.web.auth` 的登录账号 |
+| `WEB_USER` / `WEB_PASS` | 覆盖数据库里的 `config.web.auth` 登录账号 |
 | `MEDIA_AUTO_DIR` | 项目根目录(容器内默认 `/app`,一般不用改) |
-| `MEDIA_AUTO_CONFIG` | 配置文件路径(挂载成 `/app/config.json` 后无需设置) |
+| `MEDIA_AUTO_CONFIG` | **一次性导入**的源文件路径(默认自动找 `config/config.json`;导入完即失效) |
 | `MEDIA_AUTO_DB` | SQLite 路径(默认 `/app/data/media_auto.db`) |
+
+**配置备份**:管理 → 通用 →「导出 JSON」(含令牌,注意保管),或直接备 `data/media_auto.db`。
+导入则是「导入 JSON」→ 保存。
 
 > 容器只承载 **Web 控制台 + 同步作业**。整理/搬运要访问的 `/Cloud`、`/Temp` 等媒体目录
 > 与 NAS 上的 tMM/Jellyfin 是另一条链路:需要在 `docker-compose.yml` 里自行加只读卷挂载,

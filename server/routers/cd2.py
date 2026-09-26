@@ -5,7 +5,6 @@
 整理执行(/organize/apply)是【后台任务】: 单条要 删广告→改名→WebDAV 探测(~5s)→写 NFO→移动,
 "执行全部"可能跑几分钟。接口立即返回 job_id, 前端轮询 GET /organize/apply/{job_id} 取进度/结果。
 """
-import json
 import re
 import sys
 import threading
@@ -17,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from server.auth import require_auth
-from server.config import CONFIG_PATH, get_config, reload_config, skill_root
+from server.config import get_config, save_config, skill_root
 from db.database import SessionLocal
 from db import repositories as repo
 
@@ -131,7 +130,7 @@ async def api_push(item: PushItem, cfg: dict = Depends(get_config)):
     # 写入队列, 与 CLI / check.py 共用状态(add_task 返回 False=已存在同 hash/magnet 的任务, 不重复入队)
     task = build_task(item.magnet, meta, to_folder)
     try:
-        queued = bool(state.add_task(CONFIG_PATH, task))
+        queued = bool(state.add_task(task))
     except Exception as e:  # noqa: BLE001
         # CD2 已收到下载, 只是本地队列没记上 —— 如实返回, 不再谎报 queued
         print(f"[push] 写入本地队列失败: {e}", file=sys.stderr)
@@ -535,7 +534,7 @@ async def api_organize_categories_get(cfg: dict = Depends(get_config)):
 
 @router.put("/organize/categories")
 async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(get_config)):
-    """保存分类规则 → 写回 config.json(config 按 mtime 热加载, 下一次整理立即生效, 无需重启)。
+    """保存分类规则 → 写回 app_config 表(updated_at 热加载, 下一次整理立即生效, 无需重启)。
 
     校验(防把整理归位写坏):
       - 分类键必须是 18 个规范键白名单(键不可自造);
@@ -567,21 +566,18 @@ async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(
             raise HTTPException(400, f"媒体库根路径不合法: {new_root}(须以 / 开头, 如 /Cloud)")
         cloud_root = new_root.rstrip("/")
 
-    # 写回 config.json(保留原文件其余内容与顺序; 原子替换防半截写)
+    # 写回配置(app_config 表; updated_at 变化 → 下一次请求热加载, 下次整理生效)
     def _write():
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+        data = dict(get_config())
         data.setdefault("categories", {}).update(cats)
         data.setdefault("organize", {})["cloud_root"] = cloud_root
-        tmp = CONFIG_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(CONFIG_PATH)
-        reload_config()
+        save_config(data)
     try:
         await run_in_threadpool(_write)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"写入 config.json 失败: {e}")
+        raise HTTPException(500, f"写入配置失败: {e}")
 
     return {"ok": True, "changed": changed, "cloud_root": cloud_root,
             "msg": (f"已保存 {changed} 个目录变更" if changed

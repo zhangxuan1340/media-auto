@@ -359,7 +359,7 @@ def main():
     if args.audit:
         cfg = load_config()
         if not (cfg.get("tmdb", {}).get("api_key")):
-            print("config.json 缺 tmdb.api_key, 无法片名搜索")
+            print("缺 tmdb.api_key(管理 → 通用 → TMDB), 无法片名搜索")
             sys.exit(1)
         print(f"[audit] {'APPLY' if args.apply else 'DRY-RUN'} 片名审计…")
         cands, confirmed = run_audit(cfg, apply=args.apply)
@@ -370,7 +370,7 @@ def main():
 
     cfg = load_config()
     if not (cfg.get("tmdb", {}).get("api_key")):
-        print("config.json 缺 tmdb.api_key, 无法用 TMDB 反查")
+        print("缺 tmdb.api_key(管理 → 通用 → TMDB), 无法用 TMDB 反查")
         sys.exit(1)
 
     print(f"[calibrate] {'APPLY' if args.apply else 'DRY-RUN'} 从本地库取媒体项…")

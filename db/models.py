@@ -375,3 +375,22 @@ class PushRecord(Base):
     qbit_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)  # 最近一次推 Qbit 的时间
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
+
+
+class AppConfig(Base):
+    """应用配置(JSON blob)—— 2026-09-26 起的配置唯一真相源。
+
+    配置文件只作「一次性导入源」: 首次启动若本表为空, 自动把
+    config/config.json(或 config.example.json)导入一行; 之后 Web「通用」页与首次
+    引导读写都在这里, 不再有并发写文件的竞态, 也不再有 JSON 语法错导致
+    load_config 静默返回 {} 的坑。
+
+    key='config'        整份配置 JSON(indent=2, 与导出文件同格式)
+    key='setup_done'    首次引导是否完成("1"/"0"; 从已有配置文件导入 = 1)
+    updated_at          unix 秒, 作为热加载依据(server/config.get_config 比对)
+    """
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[int] = mapped_column(Integer, default=0)

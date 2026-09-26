@@ -169,7 +169,7 @@ async function openDetailLocal(kind, tmdbId, pushHist){
       try{
         d = await api(`/api/browse/detail/${kind}/${tmdbId}/pull`,{method:'POST'});
       }catch(e2){
-        $('#mBody').innerHTML=`<div class="empty">实时拉取失败: ${esc(e2.message)}<br><span style="font-size:12px">若未配置 tmdb.api_key, 请到 config.json 添加</span></div>`;
+        $('#mBody').innerHTML=`<div class="empty">实时拉取失败: ${esc(e2.message)}<br><span style="font-size:12px">若未配置 tmdb.api_key, 请到「管理 → 通用 → TMDB」填写</span></div>`;
         return;
       }
     } else {

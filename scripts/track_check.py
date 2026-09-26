@@ -223,7 +223,6 @@ async def _handle_items(cfg, settings, to_folder, base_dir, push_enabled,
                        f"({_resolution_class(hit.get('name'))}, {gb:.1f}GB)")
     from clients.clouddrive import client as cd2
     from lib import state as state_mod
-    from server.config import CONFIG_PATH
     try:
         await asyncio.to_thread(cd2.add_offline, cfg, hit.get("magnet"), to_folder, base_dir)
     except Exception as e:  # noqa: BLE001
@@ -233,7 +232,7 @@ async def _handle_items(cfg, settings, to_folder, base_dir, push_enabled,
         from scripts.push import build_task
         task = build_task(hit.get("magnet"), {"title": title, "content_type": kind},
                           to_folder)
-        state_mod.add_task(CONFIG_PATH, task)
+        state_mod.add_task(task)
     except Exception as e:  # noqa: BLE001
         log(f"    ⚠ 记队列失败(链接已推): {e}")
     return True, f"已推 {hit.get('name', '')[:40]}"
@@ -361,7 +360,7 @@ async def check_async(cfg, log=print):
 
 
 def run(cfg=None, log=print):
-    """同步入口(供调度器线程调用)。cfg 缺省则现读 config.json。"""
+    """同步入口(供调度器线程调用)。cfg 缺省则现读数据库配置(get_config)。"""
     if cfg is None:
         from server.config import get_config
         cfg = get_config()

@@ -22,8 +22,9 @@ BASE = "http://127.0.0.1:8787"
 
 
 def creds():
-    cfg = json.loads((ROOT / "config.json").read_text())
-    a = cfg["web"]["auth"]
+    sys.path.insert(0, str(ROOT))
+    from lib.config import load_config  # noqa: PLC0415  统一配置入口(数据库优先)
+    a = load_config()["web"]["auth"]
     return a["username"], a["password"]
 
 

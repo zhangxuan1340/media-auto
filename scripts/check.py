@@ -81,11 +81,11 @@ def process_task(config, task, base_dir, library_root):
     status = hit.get('status')
     if cd2.is_error(status):
         print(f'  ! 离线任务出错: {task.get("title")} (status={status})')
-        state.update_task(_cfg_path(base_dir), ih, cd2_status='Error')
+        state.update_task(ih, cd2_status='Error')
         return False
     if not cd2.is_finished(status):
         print(f'  ~ 下载中({cd2.status_text(status)}): {task.get("title")}')
-        state.update_task(_cfg_path(base_dir), ih, cd2_status=str(status))
+        state.update_task(ih, cd2_status=str(status))
         return False
 
     # 完成 -> 找文件
@@ -115,14 +115,10 @@ def process_task(config, task, base_dir, library_root):
     except Exception as e:
         print(f'  ! 移动失败: {e}')
         return False
-    state.update_task(_cfg_path(base_dir), ih, cd2_status='Finished', downloaded_path=best['path'],
+    state.update_task(ih, cd2_status='Finished', downloaded_path=best['path'],
                       target_folder=folder, done=True, finished_at=int(time.time()))
     print(f'    已移动到 {dest}')
     return True
-
-
-def _cfg_path(base_dir):
-    return os.path.join(base_dir, 'config.json')
 
 
 def main():
@@ -130,16 +126,14 @@ def main():
     ap.add_argument('--once', action='store_true', default=True)
     ap.add_argument('--loop', action='store_true')
     ap.add_argument('--interval', type=int, default=120)
-    ap.add_argument('--config', default='config.json')
     args = ap.parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(__file__), '..', args.config)
-    config = classify.load_config(cfg_path)
-    base = os.path.dirname(os.path.abspath(cfg_path))
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))   # 项目根
+    config = classify.load_config()
     library_root = config.get('library_root', '/media')
 
     def run_once():
-        q = state.load_queue(cfg_path)
+        q = state.load_queue()
         pending = [t for t in q if not t.get('done')]
         print(f'=== check @ {time.strftime("%Y-%m-%d %H:%M:%S")}  待处理 {len(pending)}/{len(q)} ===')
         for t in pending:

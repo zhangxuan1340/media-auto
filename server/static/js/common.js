@@ -132,9 +132,11 @@ function _initialTab(){
   return [tab, parts[1] || null];
 }
 async function boot(){
-  try{ const me = await api('/api/auth/me'); if(me.authed){ await loadImgSetting(); $('#login').style.display='none'; $('#app').style.display='block'; const [tab,sub]=_initialTab(); switchTab(tab, sub); } else showLogin(); }
+  try{ const me = await api('/api/auth/me'); if(me.authed){ await loadImgSetting(); $('#login').style.display='none'; $('#app').style.display='block'; const [tab,sub]=_initialTab(); switchTab(tab, sub); _maybeSetup(); } else showLogin(); }
   catch{ showLogin(); }
 }
+// 首次启动引导(setup_done=0 时弹出分步引导; 已完成则静默返回)
+function _maybeSetup(){ if(typeof maybeStartSetup === 'function') maybeStartSetup().catch(()=>{}); }
 async function loadImgSetting(){
   try{ const st = await api('/api/settings'); IMG_CACHE = st.image_cache; }catch{ IMG_CACHE = true; }
 }
@@ -145,7 +147,7 @@ $('#loginForm').addEventListener('submit', async e=>{
   e.preventDefault();
   try{
     await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:$('#lu').value,password:$('#lp').value})});
-    $('#login').style.display='none'; $('#app').style.display='block'; const [tab,sub]=_initialTab(); switchTab(tab, sub);
+    $('#login').style.display='none'; $('#app').style.display='block'; const [tab,sub]=_initialTab(); switchTab(tab, sub); _maybeSetup();
   }catch(err){ $('#loginErr').textContent = err.message==='unauth'?'用户名或密码错误':'登录失败'; }
 });
 

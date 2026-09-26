@@ -83,12 +83,10 @@ def main():
     ap.add_argument('--to-folder', default='', help='覆盖默认离线目录')
     ap.add_argument('--batch', action='store_true',
                     help='把多个链接用换行 \\n 一次调用推(默认每个链接单独调用)')
-    ap.add_argument('--config', default='config.json')
     args = ap.parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(__file__), '..', args.config)
-    config = classify.load_config(cfg_path)
-    base = os.path.dirname(os.path.abspath(cfg_path))
+    config = classify.load_config()
+    base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))   # 项目根
 
     # ---- 1. 收集原始链接(多来源) ----
     raw_links = list(args.magnet)
@@ -133,7 +131,7 @@ def main():
         res = cd2.add_offline_batch(config, magnets, to_folder, base_dir=base)
         print('CD2 批量返回:', json.dumps(res, ensure_ascii=False))
         for mg in magnets:
-            state.add_task(cfg_path, build_task(mg, meta, to_folder))
+            state.add_task(build_task(mg, meta, to_folder))
         print(f'已入队 {len(magnets)} 个任务(批量调用)')
         return
 
@@ -142,7 +140,7 @@ def main():
         try:
             res = cd2.add_offline(config, mg, to_folder, base_dir=base)
             print(f'[{i}/{len(magnets)}] ✓ {mg[:50]}... -> CD2: {json.dumps(res, ensure_ascii=False)[:80]}')
-            state.add_task(cfg_path, build_task(mg, meta, to_folder))
+            state.add_task(build_task(mg, meta, to_folder))
             ok += 1
         except Exception as e:
             print(f'[{i}/{len(magnets)}] ✗ 失败: {mg[:50]}... 原因: {e}', file=sys.stderr)

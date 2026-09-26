@@ -9,6 +9,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 
 from db.models import (
+    AppConfig,
     JellyfinItem,
     JellyfinLibrary,
     JfEpisode,
@@ -536,9 +537,8 @@ def get_push_states(session, hashes):
             }
     # 合并 queue.json 历史 CD2 命中(队列里存在的任务 = 已成功推到 CD2)
     try:
-        from server.config import CONFIG_PATH
         from lib import state
-        for t in state.load_queue(str(CONFIG_PATH)):
+        for t in state.load_queue():
             h = (t.get("info_hash") or "").lower()
             if not h:
                 continue
@@ -577,3 +577,62 @@ def mark_pushed(session, info_hash, magnet: str = "", title: str = "", target: s
         row.cd2_at = datetime.now()
     session.flush()
     return row
+
+
+# ---------------------------------------------------------------------------
+# 应用配置 app_config(配置真相源, 见 AppConfig 注释)
+# ---------------------------------------------------------------------------
+def get_app_config(session, key: str = "config"):
+    """返回 (配置dict|None, updated_at)。无记录返回 (None, 0); JSON 坏了返回 (None, ts)。"""
+    import json as _json
+    row = session.query(AppConfig).filter_by(key=key).one_or_none()
+    if row is None:
+        return None, 0
+    try:
+        data = _json.loads(row.value or "{}")
+    except Exception:
+        return None, row.updated_at or 0
+    return (data if isinstance(data, dict) else None), (row.updated_at or 0)
+
+
+def get_app_setting(session, key: str, default: str = "") -> str:
+    """setup_done 之类的附属小开关(与主配置同一张表, 一次事务可见)。"""
+    row = session.query(AppConfig).filter_by(key=key).one_or_none()
+    return row.value if row else default
+
+
+def set_app_config(session, data: dict, key: str = "config") -> int:
+    """整份写入(调用方负责 commit)。返回写入后的 updated_at(unix 秒)。
+
+    时间戳保证【严格递增】: 热加载靠它比对, 同一秒内连续两次保存时,
+    若时间戳不变, get_config 会以为没改而继续用旧缓存。
+    """
+    import json as _json
+    import time as _time
+    row = session.query(AppConfig).filter_by(key=key).one_or_none()
+    ts = _next_ts(int(_time.time()), row.updated_at if row else None)
+    payload = _json.dumps(data, ensure_ascii=False, indent=2)
+    if row is None:
+        session.add(AppConfig(key=key, value=payload, updated_at=ts))
+    else:
+        row.value = payload
+        row.updated_at = ts
+    session.flush()
+    return ts
+
+
+def _next_ts(now: int, old):
+    """时间戳严格递增: 旧值存在且不小于 now 时, 在旧值上 +1。"""
+    if old and now <= old:
+        return int(old) + 1
+    return now
+
+
+def set_app_setting(session, key: str, value: str) -> None:
+    row = session.query(AppConfig).filter_by(key=key).one_or_none()
+    if row is None:
+        session.add(AppConfig(key=key, value=value, updated_at=int(datetime.now().timestamp())))
+    else:
+        row.value = value
+        row.updated_at = int(datetime.now().timestamp())
+    session.flush()

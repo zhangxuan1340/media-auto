@@ -8,7 +8,7 @@ media-auto / search —— Bitmagnet 磁力搜索
   python3 scripts/search.py --query "盗梦空间 2010" [--limit 20]
   python3 scripts/search.py --query " spirited away" --json
 
-依赖: 仅 Python 标准库 (urllib)。Bitmagnet 地址在 config.json -> bitmagnet.url
+依赖: 仅 Python 标准库 (urllib)。Bitmagnet 地址取配置的 bitmagnet.url
 """
 import argparse
 import json
@@ -113,12 +113,10 @@ def main():
     ap = argparse.ArgumentParser(description='Bitmagnet 磁力搜索')
     ap.add_argument('--query', required=True)
     ap.add_argument('--limit', type=int, default=20)
-    ap.add_argument('--config', default='config.json')
     ap.add_argument('--json', action='store_true', help='输出完整 JSON')
     args = ap.parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(__file__), '..', args.config)
-    config = classify.load_config(cfg_path)
+    config = classify.load_config()
     results = search(config, args.query, args.limit)
 
     if args.json:

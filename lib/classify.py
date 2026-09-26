@@ -10,7 +10,7 @@ media-auto 分类引擎
     动画(Dm) > 纪录片(Jl) > 综艺(Xr) > 体育(Sp) > 音乐(Mu) > 地区(Cn/En/JpKr/Hk/Sea/Ot)
 
 设计要点:
-- 所有目录名都在 config.json 的 categories 里,可随意改名/增删。
+- 所有目录名都在配置的 categories 里(管理 → 通用 → 分类),可随意改名/增删。
 - 综艺(Xr)/体育(Sp)/音乐(Mu)只有 Show 变体(本质是系列),电影落到地区。
 - 纪录片不分 Movie/Show,统一进 JlShow(含单部纪录电影)。
 - ⚠️ 不再按 18+ 分级单独分目录(2026-09-22 用户决定移除 Ts 级联):
@@ -30,7 +30,7 @@ media-auto 分类引擎
                reasons.append('adult/18+ signal')
                return _emit('Ts', ct, categories, reasons)
       3) 分类键: server/routers/cd2.py::_CATEGORY_META 补 TsMovie/TsShow,
-         config.json / config.example.json 的 categories 补 "TsMovie"/"TsShow"
+         配置的 categories 补 "TsMovie"/"TsShow"
          (并把本文件的级联 docstring 改回 18+ 在最前)。
 """
 import json
@@ -190,7 +190,7 @@ def classify(media, config=None):
             genres (list[int|str]), language (str), countries (list[str]),
             filename (str, 可选)
             注: adult/certification 已不再参与归类(见模块 docstring), 传了也不影响结果。
-        config: 解析后的 config.json(dict),用于取 categories 目录名
+        config: 解析后的配置(dict),用于取 categories 目录名
     返回:
         dict { category_key, folder, content_type, reasons[] }
     """
@@ -250,10 +250,10 @@ def _emit(key, ct, categories, reasons):
     }
 
 
-def load_config(path):
+def load_config():
     # 统一走 lib/config.py 的 load_config(全库唯一实现; 原本地副本已删)
     from lib.config import load_config as _lc
-    return _lc(path)
+    return _lc()
 
 
 def main():
@@ -266,7 +266,6 @@ def main():
     ap.add_argument('--adult', action='store_true', help='已废弃: 不再影响分类(仅调试用)')
     ap.add_argument('--certification', default='', help='已废弃: 不再影响分类(仅调试用)')
     ap.add_argument('--filename', default='')
-    ap.add_argument('--config', default='config.json')
     args = ap.parse_args()
 
     media = {
@@ -279,7 +278,7 @@ def main():
         'certification': args.certification,
         'filename': args.filename,
     }
-    cfg = load_config(os.path.join(os.path.dirname(__file__), '..', args.config))
+    cfg = load_config()
     result = classify(media, cfg)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

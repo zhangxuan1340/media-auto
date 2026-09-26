@@ -6,7 +6,7 @@
     {id, name, type, interval, cronSchedule, running, cancelFn}, 而不是散落的定时器。
     媒体服务器相关只占两条 —— `jellyfin-recently-added-scan`(最近新增) 与
     `jellyfin-full-scan`(全库); 可用性对账是独立的 `availability-sync`。
-  · **周期可编辑**: cron 存在 settings.json 的 `jobs.<id>.schedule`, 页面可改
+  · **周期可编辑**: cron 存在配置的 `jobs.<id>.schedule`, 页面可改
     (`POST /jobs/:id/schedule`), 改完立即重排下一次执行。
   · **手动运行不改变时间表**: `job.invoke()` 只触发一次, 原来排好的下次时间不动。
 
@@ -18,10 +18,7 @@ cron 形式: 用 6 段 `秒 分 时 日 月 周`(node-schedule 风格), 例如
 ⚠️ 调度器按分钟粒度跑, 所以秒段只接受 `0`(或省略) —— 其它值视为非法, 免得出现
 "写了却永远不触发"的假象。
 """
-import json
-import os
-
-from lib.config import config_path, load_config
+from lib.config import load_config, save_config
 
 # ---------------------------------------------------------------------------
 # 作业类型 / 周期单位
@@ -37,7 +34,7 @@ UNIT_DAYS = "days"
 # ---------------------------------------------------------------------------
 # 作业注册表
 # ---------------------------------------------------------------------------
-# schedule 为默认 cron; 用户可在管理页「作业」里改, 改后写进 config.json 的
+# schedule 为默认 cron; 用户可在管理页「作业」里改, 改后写进配置(app_config)的
 # jobs.<id>.schedule 覆盖默认值(删掉该键即回落默认)。
 JOBS = [
     {
@@ -207,7 +204,7 @@ def next_run(expr, after):
 
 
 # ---------------------------------------------------------------------------
-# 周期持久化(config.json 的 jobs.<id>.schedule)
+# 周期持久化(配置 jobs.<id>.schedule)
 # ---------------------------------------------------------------------------
 def default_schedule(job_id):
     j = JOBS_BY_ID.get(job_id)
@@ -215,7 +212,7 @@ def default_schedule(job_id):
 
 
 def get_schedule(cfg, job_id):
-    """取作业当前周期: config.json 覆盖值优先, 否则用注册表默认值。"""
+    """取作业当前周期: 配置里的覆盖值优先, 否则用注册表默认值。"""
     ov = ((cfg or {}).get("jobs") or {}).get(job_id) or {}
     sched = (ov.get("schedule") or "").strip()
     if sched and valid_cron(sched):
@@ -228,7 +225,7 @@ def get_all_schedules(cfg):
 
 
 def set_schedule(job_id, expr):
-    """把作业周期写回 config.json(原子替换, 保留文件其余内容与键序)。
+    """把作业周期写回配置(app_config 表; updated_at 变化 → 下一次请求热加载)。
 
     ⚠️ 若写入值恰好等于注册表默认值, 则**删掉覆盖项**而不是写一条同值记录 ——
     这样 `isScheduleCustom` 与"是否真的被改过"始终一致, config 也不会越攒越脏。
@@ -240,7 +237,6 @@ def set_schedule(job_id, expr):
     expr = (expr or "").strip()
     if not valid_cron(expr):
         raise ValueError(f"无效的作业周期: {expr!r}(需 6 段 cron, 如 `0 */5 * * * *`)")
-    p = config_path()
     data = load_config()
     jobs_sec = data.get("jobs") or {}
     cur = ((jobs_sec.get(job_id) or {}).get("schedule") or "").strip()
@@ -256,10 +252,7 @@ def set_schedule(job_id, expr):
     else:
         jobs_sec[job_id]["schedule"] = expr
         data["jobs"] = jobs_sec
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    os.replace(tmp, p)
+    save_config(data)
     return True
 
 

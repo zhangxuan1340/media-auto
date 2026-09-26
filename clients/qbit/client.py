@@ -27,7 +27,7 @@
     自动重登一次再重试(免掉"过期就整个功能不可用"的手感)。
   - 所有请求 verify=False 兜底自签/明文内网场景; 如需严格校验可在 config 里留空走默认。
 
-config.json -> qbit 关键字段:
+配置里的 qbit 关键字段:
   url       : WebAPI 地址(如 http://192.168.1.100:8080)。可带 /api/v2 前缀, 会被自动剥离归一。
   username  : WebUI 登录账号
   password  : WebUI 登录密码

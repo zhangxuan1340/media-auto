@@ -75,7 +75,7 @@ async def _tmdb_get(cfg, path, params=None, timeout=30):
     """
     key = _key(cfg)
     if not key:
-        raise RuntimeError("TMDB 未配置 api_key(config.json → tmdb.api_key)")
+        raise RuntimeError("TMDB 未配置 api_key(管理 → 通用 → TMDB, 或 config.example.json 的 tmdb.api_key)")
     _cache_stats.miss("tmdb")
     params = dict(params or {})
     params["api_key"] = key
@@ -104,7 +104,7 @@ def _tmdb_get_sync(cfg, path, params=None, timeout=30):
     """同步版(CLI / organize 线程用)。同样记一次 `miss`(见本文件 _tmdb_get)。"""
     key = _key(cfg)
     if not key:
-        raise RuntimeError("TMDB 未配置 api_key(config.json → tmdb.api_key)")
+        raise RuntimeError("TMDB 未配置 api_key(管理 → 通用 → TMDB, 或 config.example.json 的 tmdb.api_key)")
     _cache_stats.miss("tmdb")
     params = dict(params or {})
     params["api_key"] = key

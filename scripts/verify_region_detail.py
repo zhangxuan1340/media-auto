@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """验证详情页地区显示: 港片应显"港片 · 香港", 欧美片应显"欧美"。"""
-import asyncio, json, sys
+import asyncio, json, sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.config import load_config  # noqa: E402  统一配置入口(数据库优先)
 from playwright.async_api import async_playwright
 
 BASE = "http://127.0.0.1:8787"
@@ -9,7 +11,7 @@ OUT = "state/ui_verify"
 async def login(page):
     await page.goto(BASE, wait_until="networkidle")
     if await page.locator("#login").is_visible():
-        cfg = json.load(open("config.json"))
+        cfg = load_config()
         a = cfg["web"]["auth"]
         await page.fill("#lu", a["username"])
         await page.fill("#lp", a["password"])

@@ -56,7 +56,7 @@ async def main(kind: str, dry: bool, limit: int) -> int:
 
     cfg = load_config()
     if not (cfg.get("tmdb", {}) or {}).get("api_key"):
-        print("config.json 未配置 tmdb.api_key")
+        print("未配置 tmdb.api_key(管理 → 通用 → TMDB)")
         return 1
     init_db()
 

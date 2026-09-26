@@ -75,11 +75,9 @@ def main():
     ap.add_argument('--refresh-only', action='store_true', help='只刷 Jellyfin,不跑 tMM')
     ap.add_argument('--no-scrape', action='store_true')
     ap.add_argument('--no-refresh', action='store_true')
-    ap.add_argument('--config', default='config.json')
     args = ap.parse_args()
 
-    cfg_path = os.path.join(os.path.dirname(__file__), '..', args.config)
-    config = classify.load_config(cfg_path)
+    config = classify.load_config()
 
     if not args.refresh_only and not args.no_scrape:
         if args.all or args.movie:

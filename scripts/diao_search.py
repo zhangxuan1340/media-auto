@@ -6,8 +6,8 @@ media-auto / diao_search —— 从 Bitmagnet-Next-Web 站点提取种子信息
 Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接口**,
 而不是原生 Bitmagnet 的 GraphQL(/graphql)。二者是两套东西,分开配置:
 
-  原生 Bitmagnet        : config.json -> "bitmagnet"            (GraphQL, 带 seeders + TMDB 分类元数据)
-  Bitmagnet-Next-Web    : config.json -> "bitmagnet_next_web"   (REST, 只有 hash/name/size/magnet/files)
+  原生 Bitmagnet        : 配置段 "bitmagnet"            (GraphQL, 带 seeders + TMDB 分类元数据)
+  Bitmagnet-Next-Web    : 配置段 "bitmagnet_next_web"   (REST, 只有 hash/name/size/magnet/files)
 
 站点接口(无需鉴权,无需特殊 UA):
   GET {base}/api/search?keyword=<关键词>&offset=<跳条数>&limit=<每页数>   # limit 最大 10,超过 400
@@ -23,7 +23,7 @@ Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接�
   GET {base}/api/detail?hash=<info_hash>  -> {"data":{<单个 torrent>}}
   GET {base}/api/stats                    -> {"data":{size,updated_at,total_count,...}}
 
-地址优先级: 命令行 --base > config.json 的 bitmagnet_next_web.base > 环境变量 DIAO_BASE > 内置默认。
+地址优先级: 命令行 --base > 配置的 bitmagnet_next_web.base > 环境变量 DIAO_BASE > 内置默认。
 
 用法:
   python3 scripts/diao_search.py --query "求救信号 2026"
@@ -37,7 +37,7 @@ Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接�
   python3 scripts/diao_search.py --stats
   python3 scripts/diao_search.py --base https://另一个同类站点 --query "Mayday"   # 临时换站点
 
-依赖: 仅 Python 标准库(urllib);读 config.json 复用项目 lib.config。
+依赖: 仅 Python 标准库(urllib);配置复用项目 lib.config(只读数据库)。
 """
 import argparse
 import json
@@ -64,7 +64,7 @@ MAX_PAGES = 20          # --all / 翻页上限,防止无限翻
 
 
 def resolve_settings(cfg, cli_base=None, cli_limit=None):
-    """按优先级解析 base 与 limit: 命令行 > config.json > 环境变量 > 内置默认。"""
+    """按优先级解析 base 与 limit: 命令行 > 数据库配置 > 环境变量 > 内置默认。"""
     nw = (cfg.get(CONFIG_KEY) or {})
     base = cli_base or nw.get("base") or os.environ.get("DIAO_BASE") or DEFAULT_BASE
     try:
@@ -190,11 +190,10 @@ def main():
     ap = argparse.ArgumentParser(description="从 Bitmagnet-Next-Web 站点提取种子信息")
     ap.add_argument("--query", "-q", help="搜索关键词")
     ap.add_argument("--base", default=None,
-                    help=f"站点根地址(默认取 config.json 的 {CONFIG_KEY}.base,再退到 {DEFAULT_BASE})")
-    ap.add_argument("--config", default=None, help="config.json 路径(默认项目根 config.json)")
+                    help=f"站点根地址(默认取配置 {CONFIG_KEY}.base,再退到 {DEFAULT_BASE})")
     ap.add_argument("--page", type=int, default=1, help="起始页码(默认 1)")
     ap.add_argument("--limit", type=int, default=None,
-                    help=f"想要的结果条数(默认取 config.json 的 {CONFIG_KEY}.limit,再退到 {PAGE_SIZE};内部按每页 10 翻页)")
+                    help=f"想要的结果条数(默认取配置 {CONFIG_KEY}.limit,再退到 {PAGE_SIZE};内部按每页 10 翻页)")
     ap.add_argument("--all", action="store_true", help=f"翻完全部页(最多 {MAX_PAGES} 页)")
     ap.add_argument("--detail", metavar="HASH", help="查单个 info_hash 的详情")
     ap.add_argument("--stats", action="store_true", help="查看站点索引规模")
@@ -205,7 +204,7 @@ def main():
     ap.add_argument("--magnet-only", action="store_true", help="只输出磁力链")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = load_config()
     base, limit = resolve_settings(cfg, args.base, args.limit)
 
     try:

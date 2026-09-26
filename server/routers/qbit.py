@@ -9,7 +9,6 @@
 ⚠️ 客户端是同步的(httpx), 所有 qbit 调用都经 run_in_threadpool, 不在事件循环里阻塞。
 未配置 qbit 时接口优雅返回 {ok:false, configured:false, msg: ...}, 前端据此提示去配置。
 """
-import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from server.auth import require_auth
-from server.config import CONFIG_PATH, get_config, reload_config
+from server.config import get_config, save_config
 from db.database import SessionLocal
 from db import repositories as repo
 
@@ -68,7 +67,7 @@ async def qbit_config_get(cfg: dict = Depends(get_config)):
 
 @router.put("/qbit/config")
 async def qbit_config_put(body: QbitConfigBody, cfg: dict = Depends(get_config)):
-    """保存 qbit 配置 → 写回 config.json(热加载, 无需重启)。
+    """保存 qbit 配置 → 写回 app_config 表(热加载, 无需重启)。
 
     password 留空 = 保留原密码(前端打码后回传空, 不能把密码清空)。
     校验: url/username 非空; url 必须是合法 http(s) 地址。
@@ -81,7 +80,7 @@ async def qbit_config_put(body: QbitConfigBody, cfg: dict = Depends(get_config))
         raise HTTPException(400, f"qbit 地址不合法: {url}(应为 http://host:port)")
 
     def _write():
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+        data = dict(get_config())
         q = dict(data.get("qbit") or {})
         q["url"] = url
         q["username"] = user
@@ -92,16 +91,13 @@ async def qbit_config_put(body: QbitConfigBody, cfg: dict = Depends(get_config))
         q["category"] = (body.category or "").strip()
         q["_comment"] = "qBittorrent WebAPI 下载器。url 填 WebUI 地址(如 http://host:8080), username/password 是 WebUI 账号。save_path/category 可选, 推送任务的默认保存路径与分类。"
         data["qbit"] = q
-        tmp = CONFIG_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(CONFIG_PATH)
-        reload_config()
+        save_config(data)
     try:
         await run_in_threadpool(_write)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"写入 config.json 失败: {e}")
+        raise HTTPException(500, f"写入配置失败: {e}")
     return {"ok": True, "msg": "qbit 配置已保存(热加载生效)"}
 
 

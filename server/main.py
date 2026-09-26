@@ -7,6 +7,7 @@
 直接复用项目根的 lib/、clients/、scripts/ 与 db/: classify / cd2 / state / jellyfin / sync。
 (浏览/搜索/缺失/详情全走本地 TMDB 缓存。)
 """
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -17,6 +18,7 @@ from server.auth import COOKIE_NAME, current_creds, expected_token, is_authed, m
 from server.config import CONFIG, PROJECT_ROOT, get_config
 from server.routers import browse as browse_router
 from server.routers import cd2 as cd2_router
+from server.routers import configapi as config_router
 from server.routers import jobs as jobs_router
 from server.routers import nfo as nfo_router
 from server.routers import qbit as qbit_router
@@ -25,31 +27,29 @@ from server.routers import sync as sync_router
 from server.routers import track as track_router
 from server import imgproxy as imgproxy_router
 
-app = FastAPI(title="MediaAuto Web", version="1.2")
 
-# 浏览/搜索/缺失/详情全走本地 TMDB 缓存(缓存→TMDB API 现拉写库)。
-app.include_router(search_router.router)
-app.include_router(cd2_router.router)
-app.include_router(qbit_router.router)
-app.include_router(sync_router.router)
-app.include_router(jobs_router.router)   # 作业与缓存(/api/jobs、/api/cache)
-app.include_router(browse_router.router)
-app.include_router(nfo_router.router)    # NFO 更新: 读取上次更新时间 + 手动重新生成
-app.include_router(track_router.router)
-app.include_router(imgproxy_router.router)  # 图片本地缓存代理 /api/img/<token>
+def _startup_config():
+    """配置初始化(必须最先跑): 建表 → 首启把配置文件一次性导入 DB(或从 example 播种)。
 
-
-@app.on_event("startup")
-def _startup_scheduler():
-    """启动进程内调度器(定时: 近增 5 分钟 / 全量每日 3 点 / 可用性对账每日 5 点)。"""
+    之后运行期只读 DB(Web「通用」页写 DB, get_config 按 updated_at 热加载, 文件不再参与);
+    导入失败只打日志不阻断启动(配置回退到 config.example.json 默认值, 服务仍可用)。
+    """
     try:
-        from server import scheduler
-        scheduler.start()
-    except Exception:
+        import sys
+        from db.database import DB_PATH, init_db
+        from lib.config import bootstrap
+        init_db()
+        state = bootstrap()
+        print(f"[config] 配置初始化: {state}; DB={DB_PATH}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[config] 配置初始化失败(回退读文件): {e}", file=sys.stderr)
+    try:
+        from server.config import reload_config
+        reload_config()
+    except Exception:  # noqa: BLE001
         pass
 
 
-@app.on_event("startup")
 def _startup_cleanup():
     """把上次进程退出时还停在 running 的同步日志标记为中断(daemon 线程不保证收尾)。"""
     try:
@@ -70,6 +70,45 @@ def _startup_cleanup():
             s.close()
     except Exception:
         pass
+
+
+def _startup_scheduler():
+    """启动进程内调度器(定时: 近增 5 分钟 / 全量每日 3 点 / 可用性对账每日 5 点)。"""
+    try:
+        from server import scheduler
+        scheduler.start()
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """进程生命周期(替代已弃用的 @app.on_event("startup"))。
+
+    先收尾上一轮遗留的 running 日志, 再起调度器 —— 反过来的话, 调度器首拍
+    起的作业可能刚写 log 就被当成"中断"改掉。
+    关停无需收尾: 调度器是 daemon 线程, 随进程退出。
+    """
+    _startup_config()
+    _startup_cleanup()
+    _startup_scheduler()
+    yield
+
+
+app = FastAPI(title="MediaAuto Web", version="1.2", lifespan=lifespan)
+
+# 浏览/搜索/缺失/详情全走本地 TMDB 缓存(缓存→TMDB API 现拉写库)。
+app.include_router(search_router.router)
+app.include_router(cd2_router.router)
+app.include_router(config_router.router)   # 配置读写: GET/PUT /api/config + 引导
+app.include_router(qbit_router.router)
+app.include_router(sync_router.router)
+app.include_router(jobs_router.router)   # 作业与缓存(/api/jobs、/api/cache)
+app.include_router(browse_router.router)
+app.include_router(nfo_router.router)    # NFO 更新: 读取上次更新时间 + 手动重新生成
+app.include_router(track_router.router)
+app.include_router(imgproxy_router.router)  # 图片本地缓存代理 /api/img/<token>
+
 
 INDEX = PROJECT_ROOT / "server" / "static" / "index.html"
 STATIC_DIR = PROJECT_ROOT / "server" / "static"
