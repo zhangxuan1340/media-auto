@@ -144,11 +144,28 @@ def upsert_tmdb_media(session, data: dict):
                   "vote", "imdb_id", "tvdb_id", "status", "in_production",
                   "original_language", "countries", "genres", "genre_names", "cast_json",
                   "directors_json", "studios_json", "keywords_json", "certification",
-                  "runtime", "premiered", "end_date", "number_of_seasons"):
+                  "runtime", "premiered", "end_date", "number_of_seasons", "title_checked"):
         if field in row:
             setattr(obj, field, row[field])
+    # 手动覆盖的中文标题优先级最高: 每次同步 TMDB 都会带来新的 title,
+    # 这里在写入后强制还原成 custom_title, 保证"改过的标题永不被同步冲掉"。
+    if getattr(obj, "custom_title", ""):
+        obj.title = obj.custom_title
     session.flush()
     return obj
+
+
+def set_custom_title(session, kind: str, tmdb_id: int, title: str) -> bool:
+    """写手动中文标题(custom_title + title 一起改)。空串 = 清除覆盖(还原自动值)。"""
+    obj = session.query(TmdbMedia).filter_by(tmdb_id=tmdb_id, kind=kind).one_or_none()
+    if obj is None:
+        return False
+    title = (title or "").strip()
+    obj.custom_title = title
+    if title:
+        obj.title = title
+    session.flush()
+    return True
 
 
 def upsert_tmdb_seasons(session, tmdb_id, seasons):
@@ -513,6 +530,60 @@ def get_tmdb_ids_in_library(session, kind: str):
     rows = session.query(JellyfinItem.tmdb_id).filter(
         JellyfinItem.type == jf_type, JellyfinItem.tmdb_id != "").distinct().all()
     return {str(r[0]) for r in rows if r[0]}
+
+
+def get_jellyfin_item_path(session, kind: str, tmdb_id) -> str:
+    """本地 jellyfin_item 镜像里该作品的**真实路径**(Jellyfin 的 Path, 权威口径)。
+
+    sync_jellyfin 每 5 分钟全库比对, 有 ProviderIds 的行都带 path:
+      kind='tv'   → Series 行, path 是剧集目录(/Cloud/CnShow/僵尸道长 (1995))
+      kind='movie'→ Movie  行, path 是视频文件(取 dirname 即目录)
+    与「按 TMDB 元数据推分类目录」的区别: 分类规则可能把港剧推成 HkShow 而库里
+    实际在 CnShow, 这里永远是对的。没同步到 / 没配 ProviderIds → ""(调用方回退)。"""
+    jf_type = _KIND_TO_JF_TYPE.get(kind)
+    if not jf_type or tmdb_id in (None, ""):
+        return ""
+    rows = (session.query(JellyfinItem.path)
+            .filter(JellyfinItem.type == jf_type,
+                    JellyfinItem.tmdb_id == str(tmdb_id).strip(),
+                    JellyfinItem.path != "")
+            .limit(1).all())
+    return (rows[0][0] or "") if rows else ""
+
+
+def remap_jellyfin_paths(session, old_dir: str, new_dir: str, file_renames=None) -> int:
+    """作品目录(及其中文件)改名后, 同步本地 jellyfin_item 镜像的 path, 返回影响行数。
+
+    电影的 Movie 行 path 指到**视频文件**, 剧集的 Series/Season/Episode 指到目录 ——
+    所以先做目录前缀替换, 再按改名的文件名(basename)修掉电影那条。
+    不同步也行(sync_jellyfin 5 分钟会全量对齐), 但窗口内 _locate 会拿到旧路径,
+    连锁让「更新 NFO / 按新标题重命名」找不到目录 —— 所以这里就地改掉。"""
+    import os  # noqa: PLC0415
+    old = (old_dir or "").rstrip("/")
+    new = (new_dir or "").rstrip("/")
+    n = 0
+    if old and new and old != new:
+        rows = (session.query(JellyfinItem)
+                .filter(JellyfinItem.path != "",
+                        or_(JellyfinItem.path == old,
+                            JellyfinItem.path.like(old + "/%")))
+                .all())
+        for r in rows:
+            r.path = new + r.path[len(old):]
+            n += 1
+    pairs = (file_renames.items() if isinstance(file_renames, dict)
+             else (file_renames or []))
+    for old_name, new_name in pairs:
+        if not old_name or not new_name or old_name == new_name:
+            continue
+        rows = (session.query(JellyfinItem)
+                .filter(JellyfinItem.path.like("%/" + old_name))
+                .all())
+        for r in rows:
+            if os.path.basename(r.path) == old_name:
+                r.path = r.path[: -len(old_name)] + new_name
+                n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------

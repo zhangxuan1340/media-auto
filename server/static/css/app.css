@@ -452,6 +452,20 @@
   .nfo-update:hover{border-color:var(--brand);background:rgba(70,130,255,.12)}
   .nfo-update:disabled{opacity:.55;cursor:default}
 
+  /* 标题工具行: 改标题 / 按新标题重命名 —— 中性描边(不吃 .dhead-actions .ghost 的危险红) */
+  .dhead-actions .act{display:inline-flex;align-items:center;gap:5px;padding:9px 14px;border-radius:11px;
+    font-size:13px;cursor:pointer;background:var(--glass);border:1px solid var(--line);color:var(--text)}
+  .dhead-actions .act:hover{border-color:var(--brand);color:var(--brand);background:var(--hover-bg)}
+  .dhead-actions .act:disabled{opacity:.55;cursor:default;transform:none}
+  /* 改标题: 内联输入行(移动端禁用 prompt, 全走这里) */
+  .title-edit{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .title-edit input{flex:1 1 200px;min-width:150px;padding:9px 11px;border-radius:10px;font-size:14px;
+    border:1px solid var(--line);background:var(--glass);color:var(--text)}
+  .title-edit input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(10,132,255,.12)}
+  .title-edit .act{display:inline-flex;align-items:center;gap:5px;padding:8px 12px;border-radius:10px;
+    font-size:12.5px;cursor:pointer;background:var(--glass);border:1px solid var(--line);color:var(--text)}
+  .title-edit .act:hover{border-color:var(--brand);color:var(--brand)}
+
   /* 简介: 超长折叠(>180 字) */
   .modal .overview{margin:0 0 16px;line-height:1.72;color:var(--text-2);font-size:14px}
   .overview.clamp{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}

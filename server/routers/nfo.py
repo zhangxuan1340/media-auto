@@ -26,7 +26,7 @@ from db.database import SessionLocal
 from db import repositories as repo
 from clients.clouddrive import client as cd2
 from clients.tmdb import client as tmdb
-from lib import mediainfo, naming, nfo as nfo_mod
+from lib import mediainfo, naming, nfo as nfo_mod, titles
 from scripts import organize
 
 router = APIRouter(prefix="/api", tags=["nfo"], dependencies=[Depends(require_auth)])
@@ -95,8 +95,51 @@ def _resolve_folder(config, cloud, cat_folder, folder_name, expected):
     return expected
 
 
+def _dir_exists(config, path):
+    """CD2 里这个目录存在且非空? 列目录失败(NOT_FOUND / 不可达)一律 False。"""
+    if not path:
+        return False
+    try:
+        return bool(cd2.get_subfiles(config, path) or [])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _jf_folder_candidates(jf_path, kind, cloud):
+    """Jellyfin 的 Path → CD2 目录候选(按可信度排序, 调用方逐个验存在)。
+
+    本部署两边根不一致: Jellyfin 看到 /Cloud/…, CD2 是 /115/Cloud/…。
+    所以除了原样, 还把路径开头逐段去掉再接到 cloud_root 后面试。
+    """
+    p = (jf_path or "").replace("\\", "/").strip().rstrip("/")
+    if not p:
+        return []
+    if kind == "movie":
+        p = os.path.dirname(p)   # 电影的 Path 是文件
+    if not p:
+        return []
+    cloud = (cloud or "").rstrip("/")
+    out = []
+    if cloud and (p == cloud or p.startswith(cloud + "/")):
+        out.append(p)                      # ① 原样(两边根一致时直接命中)
+    parts = [x for x in p.split("/") if x]
+    if cloud:
+        for i in (1, 2):                   # ② 丢掉开头 1~2 段: /Cloud/CnShow/X → <cloud>/CnShow/X
+            if i >= len(parts):
+                break
+            cand = f"{cloud}/{'/'.join(parts[i:])}"
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
 def _locate(config, kind, tmdb_id):
     """定位媒体所在目录 + 目标 NFO 文件名。
+
+    顺序:
+      ① jellyfin_item 镜像里 **Jellyfin 的真实 Path**(权威)—— 分类规则把港剧推成
+         HkShow 而库里实际在 CnShow、或目录被人改过名, 都以 Jellyfin 为准;
+      ② 回退: TMDB 元数据 → 分类规则 → 在分类目录里找同名子目录(与整理口径一致)。
 
     返回 (folder_path, nfo_name, folder_name, cloud)。
     找不到本地缓存行 → 全返回 None; 文件夹无法解析 → folder_path 退回期望路径(后续 exists=False)。"""
@@ -108,12 +151,21 @@ def _locate(config, kind, tmdb_id):
         folder_name = naming.folder_name_from_meta({"title": m.title or "", "year": m.year or ""})
         cat_folder, _key, _reasons = organize.category_of(config, _classify_meta(m), folder_name, [])
         cloud = organize.cloud_root(config)
+        jf_path = repo.get_jellyfin_item_path(s, kind, tmdb_id)
+    finally:
+        s.close()
+
+    folder_path = ""
+    for cand in _jf_folder_candidates(jf_path, kind, cloud):
+        if _dir_exists(config, cand):
+            folder_path = cand
+            break
+
+    if not folder_path:
         if not cat_folder:
             return None, None, folder_name, cloud
         parent = f"{cloud}/{cat_folder}"
         folder_path = _resolve_folder(config, cloud, cat_folder, folder_name, f"{parent}/{folder_name}")
-    finally:
-        s.close()
 
     if kind == "tv":
         nfo_name = "tvshow.nfo"
@@ -224,6 +276,11 @@ def _build_meta(config, kind, tmdb_id):
                                for ss in repo.get_tmdb_seasons(s, tmdb_id)]
         finally:
             s.close()
+
+    # 中文标题兜底(手动覆盖 > 豆瓣国内译名 > TMDB 台/港译名)。
+    # 直连 TMDB 拿到的 title 可能是英文, 且会绕过本地行,不补一次「更新 NFO」会把
+    # 英文标题写回库里(2026-09-26 实测 Bad Sisters)。
+    titles.apply_to_meta(config, kind, tmdb_id, meta)
     return meta
 
 
@@ -363,64 +420,80 @@ async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
         folder_path, nfo_name, folder_name, _cloud = _locate(cfg, kind, tmdb_id)
         if not folder_path or not nfo_name:
             raise HTTPException(404, "找不到媒体所在目录(可能尚未整理入库)")
+        return _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name)
 
-        items = _safe_subfiles(cfg, folder_path)
-        video = _largest_video(items) if kind == "movie" else None
-        # 优先沿用【已存在】的 NFO 文件名(电影可能与视频不同基名 / 剧集固定 tvshow.nfo),
-        # 避免 CD2 列目录抖动时在「读时找不到 → 写时用默认名」之间产生第二个 NFO。
-        existing = _find_nfo_file(cfg, folder_path, kind, nfo_name)
-        if existing:
-            nfo_name = existing.get("name") or nfo_name
-        else:
-            if kind == "movie":
-                nfo_name = (os.path.splitext(video.get("name"))[0] + ".nfo") if video else (folder_name or "movie") + ".nfo"
-            else:
-                nfo_name = nfo_name  # tvshow.nfo
-        nfo_path = folder_path.rstrip("/") + "/" + nfo_name
-
-        meta = _build_meta(cfg, kind, tmdb_id)
-        if not meta:
-            raise HTTPException(502, "无法获取元数据(TMDB 不可达且本地无缓存)")
-
-        # 非阻塞冲突提示: 更新端点 ID 已钉死(来自 URL/本地缓存),不存在整理侧"反查错配"
-        # 的根因,故冲突时【不拒写】,仅记日志 + 在响应带 warning 字段提醒用户 TMDB 可能与库内不一致
-        warning = ""
-        ex_ids = _nfo_ids_from_text(_existing_nfo_text(cfg, folder_path, [nfo_name]))
-        new_imdb = (meta.get("imdb_id") or "").strip().lower()
-        new_tmdb = str(meta.get("tmdb_id") or "").lower()
-        if ex_ids:
-            if new_imdb and ex_ids.get("imdb") and new_imdb != ex_ids["imdb"]:
-                warning = f"imdb 不一致: 库内 {ex_ids['imdb']} → 新 {new_imdb}（已按最新元数据写入）"
-            elif new_tmdb and ex_ids.get("tmdb") and new_tmdb != ex_ids["tmdb"]:
-                warning = f"tmdb 不一致: 库内 {ex_ids['tmdb']} → 新 {new_tmdb}（已按最新元数据写入）"
-        if warning:
-            print(f"    ⚠ NFO 更新 {warning}")
-
-        wikidata = ""
-        if organize.org_cfg(cfg).get("wikidata", True):
-            cache = os.path.join(PROJECT_ROOT, "state", "wikidata_cache.json")
-            wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
-        dateadded = time.time()
-
-        if kind == "tv":
-            xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata,
-                                           dateadded=dateadded)
-        else:
-            streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
-            source = mediainfo.guess_source(video.get("name")) if video else ""
-            # <original_filename> 沿用现有 NFO 里的(整理写的是改名前原始发布名),
-            # 读不到才回退当前视频名(新建 NFO 场景)
-            orig = _original_filename(cfg, folder_path, nfo_name, video)
-            if not orig:
-                orig = video.get("name") if video else ""
-            xml = nfo_mod.build_movie_nfo(meta, info=None, streamdetails=streamdetails,
-                                          source=source, original_filename=orig,
-                                          dateadded=dateadded, wikidata=wikidata)
-
-        written = cd2.write_file(cfg, nfo_path, xml, base_dir=PROJECT_ROOT)
-        it = cd2.find_file_by_path(cfg, folder_path, nfo_name)
-        wt = it.get("writeTime") if it else ""
-        return {"ok": True, "path": nfo_path, "name": nfo_name,
-                "bytes": written, "updated_at": wt or "",
-                "updated_at_text": _fmt_write_time(wt), "warning": warning}
     return await run_in_threadpool(_q)
+
+
+def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name):
+    """生成 NFO 并写回 folder_path(目录必须已存在), 返回写入结果。
+
+    「更新 NFO」与「按新标题重命名」共用;失败抛 HTTPException。
+    目录不存在/不可达给可读 404, 而不是让 CD2 的 NOT_FOUND 炸成 500 堆栈。
+    """
+
+    try:
+        items = cd2.get_subfiles(cfg, folder_path) or []
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(404, f"CD2 找不到媒体目录: {folder_path} — {e}") from e
+    if not items:
+        raise HTTPException(404, f"媒体目录为空或不可达: {folder_path}")
+
+    video = _largest_video(items) if kind == "movie" else None
+    # 优先沿用【已存在】的 NFO 文件名(电影可能与视频不同基名 / 剧集固定 tvshow.nfo),
+    # 避免 CD2 列目录抖动时在「读时找不到 → 写时用默认名」之间产生第二个 NFO。
+    existing = _find_nfo_file(cfg, folder_path, kind, nfo_name)
+    if existing:
+        nfo_name = existing.get("name") or nfo_name
+    else:
+        if kind == "movie":
+            nfo_name = (os.path.splitext(video.get("name"))[0] + ".nfo") if video else (folder_name or "movie") + ".nfo"
+        else:
+            nfo_name = nfo_name  # tvshow.nfo
+    nfo_path = folder_path.rstrip("/") + "/" + nfo_name
+
+    meta = _build_meta(cfg, kind, tmdb_id)
+    if not meta:
+        raise HTTPException(502, "无法获取元数据(TMDB 不可达且本地无缓存)")
+
+    # 非阻塞冲突提示: 更新端点 ID 已钉死(来自 URL/本地缓存),不存在整理侧"反查错配"
+    # 的根因,故冲突时【不拒写】,仅记日志 + 在响应带 warning 字段提醒用户 TMDB 可能与库内不一致
+    warning = ""
+    ex_ids = _nfo_ids_from_text(_existing_nfo_text(cfg, folder_path, [nfo_name]))
+    new_imdb = (meta.get("imdb_id") or "").strip().lower()
+    new_tmdb = str(meta.get("tmdb_id") or "").lower()
+    if ex_ids:
+        if new_imdb and ex_ids.get("imdb") and new_imdb != ex_ids["imdb"]:
+            warning = f"imdb 不一致: 库内 {ex_ids['imdb']} → 新 {new_imdb}（已按最新元数据写入）"
+        elif new_tmdb and ex_ids.get("tmdb") and new_tmdb != ex_ids["tmdb"]:
+            warning = f"tmdb 不一致: 库内 {ex_ids['tmdb']} → 新 {new_tmdb}（已按最新元数据写入）"
+    if warning:
+        print(f"    ⚠ NFO 更新 {warning}")
+
+    wikidata = ""
+    if organize.org_cfg(cfg).get("wikidata", True):
+        cache = os.path.join(PROJECT_ROOT, "state", "wikidata_cache.json")
+        wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
+    dateadded = time.time()
+
+    if kind == "tv":
+        xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata,
+                                       dateadded=dateadded)
+    else:
+        streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
+        source = mediainfo.guess_source(video.get("name")) if video else ""
+        # <original_filename> 沿用现有 NFO 里的(整理写的是改名前原始发布名),
+        # 读不到才回退当前视频名(新建 NFO 场景)
+        orig = _original_filename(cfg, folder_path, nfo_name, video)
+        if not orig:
+            orig = video.get("name") if video else ""
+        xml = nfo_mod.build_movie_nfo(meta, info=None, streamdetails=streamdetails,
+                                      source=source, original_filename=orig,
+                                      dateadded=dateadded, wikidata=wikidata)
+
+    written = cd2.write_file(cfg, nfo_path, xml, base_dir=PROJECT_ROOT)
+    it = cd2.find_file_by_path(cfg, folder_path, nfo_name)
+    wt = it.get("writeTime") if it else ""
+    return {"ok": True, "path": nfo_path, "name": nfo_name,
+            "bytes": written, "updated_at": wt or "",
+            "updated_at_text": _fmt_write_time(wt), "warning": warning}

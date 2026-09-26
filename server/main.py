@@ -20,6 +20,7 @@ from server.routers import browse as browse_router
 from server.routers import cd2 as cd2_router
 from server.routers import configapi as config_router
 from server.routers import jobs as jobs_router
+from server.routers import media as media_router
 from server.routers import nfo as nfo_router
 from server.routers import qbit as qbit_router
 from server.routers import search as search_router
@@ -124,6 +125,7 @@ app.include_router(sync_router.router)
 app.include_router(jobs_router.router)   # 作业与缓存(/api/jobs、/api/cache)
 app.include_router(browse_router.router)
 app.include_router(nfo_router.router)    # NFO 更新: 读取上次更新时间 + 手动重新生成
+app.include_router(media_router.router)  # 手动标题覆盖 + 按新标题重命名(目录/文件/NFO)
 app.include_router(track_router.router)
 app.include_router(imgproxy_router.router)  # 图片本地缓存代理 /api/img/<token>
 

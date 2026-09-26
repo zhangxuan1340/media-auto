@@ -181,7 +181,8 @@ async function openDetailLocal(kind, tmdbId, pushHist){
 }
 
 function renderDetailLocal(d, kind, tmdbId){
-  _curDetail = {kind, tmdbId};   // 供"详情→点演员→返回"定位回该详情
+  // 供"详情→点演员→返回"定位回该详情; title/originalTitle/year 给「改标题 → 重搜磁力/重命名」用
+  _curDetail = {kind, tmdbId, title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, inLibrary: !!d.inLibrary};
   _ctxStack = [];                // 详情是叶子视图: 清掉上级视图上下文, 避免点演员时误用陈旧的搜索/演员上下文
   // 2026-09: 移除顶部 hero 背景横条 —— 标题/年份/评分/类型全部由正文 .dtitle 承载(桌面+移动统一, 不再占篇幅)
   _navTitle(d.title);
@@ -285,7 +286,15 @@ function renderDetailLocal(d, kind, tmdbId){
         ${_metaLine(longPairs)}
         <div class="dhead-actions">
           <button class="ghost" onclick="askBlock('${kind}',${tmdbId}, this.dataset.title, this)" data-title="${esc(d.title)}">${icon('ban')}屏蔽此作品</button>
+          <button class="act" onclick="toggleTitleEdit()">${icon('edit')}改标题</button>
           ${kind==='tv'?`<button class="mbtn" data-track-key="show_${tmdbId}" data-track-label="追踪新季" data-name="${esc(d.title)}" onclick="toggleTrackShow(${tmdbId}, this)">${icon('bell')}<span>追踪新季</span></button>`:''}
+          ${d.inLibrary?`<button class="act" onclick="renameToTitle('${kind}',${tmdbId}, this)">${icon('move')}按新标题重命名</button>`:''}
+        </div>
+        <div class="title-edit" id="titleEdit" style="display:none">
+          <input id="titleInput" type="text" maxlength="512" placeholder="中文标题(留空 = 还原自动译名)"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();saveTitle('${kind}',${tmdbId},document.getElementById('titleSaveBtn'));}"/>
+          <button class="mbtn sm" id="titleSaveBtn" onclick="saveTitle('${kind}',${tmdbId}, this)">保存</button>
+          <button class="act sm" onclick="toggleTitleEdit()">取消</button>
         </div>
         ${d.inLibrary?`<div id="nfoBox" class="nfo-box" title="库内媒体 NFO 上次生成/更新时间, 可手动重新生成">
           <span class="nfo-date" id="nfoDate">NFO 查询中…</span>
@@ -340,6 +349,59 @@ async function updateNfo(kind, tmdbId, btn){
     if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}更新 NFO`; }
   }
 }
+
+// ---- 标题: 手动覆盖 / 按新标题重命名 ----
+// 详情页「改标题」: 内联输入框(移动端禁用 prompt, 一律走这里), 写 tmdb_media.custom_title
+function toggleTitleEdit(){
+  const box = $('#titleEdit'); if(!box) return;
+  const open = box.style.display === 'none' || !box.style.display;
+  box.style.display = open ? 'flex' : 'none';
+  if(open){
+    const i = $('#titleInput');
+    if(i){ i.value = (_curDetail && _curDetail.title) || ''; i.focus(); i.select(); }
+  }
+}
+async function saveTitle(kind, tmdbId, btn){
+  const i = $('#titleInput'); if(!i) return;
+  const title = (i.value || '').trim();
+  if(btn){ btn.disabled = true; btn.textContent = '保存中…'; }
+  try{
+    const r = await api(`/api/media/title/${kind}/${tmdbId}`, {method:'PUT', body: JSON.stringify({title})});
+    toast(title ? `标题已改为「${r.title}」(详情/库/种子搜索都用它)` : '已还原自动译名');
+    if(_curDetail) _curDetail.title = r.title;
+    const h = document.querySelector('.dhead-title'); if(h) h.textContent = r.title;
+    const nv = $('#mNavTitle'); if(nv) nv.textContent = r.title || '详情';
+    i.value = r.title || '';
+    const blk = document.querySelector('[data-title][onclick*="askBlock"]');
+    if(blk) blk.dataset.title = r.title || '';
+    // 标题变了 → 磁力搜索用的关键词也换掉(避免还拿旧英文名搜)
+    searchMagnets(r.title, r.title, null, null, {title: r.title, originalTitle: (_curDetail && _curDetail.originalTitle) || '', year: (_curDetail && _curDetail.year) || '', tmdbId});
+  }catch(e){
+    toast('保存失败: ' + e.message);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '保存'; }
+  }
+}
+// 「按新标题重命名」: 目录 → 文件 → NFO 一起改成当前标题(只改名, 绝不删除; 冲突跳过)
+async function renameToTitle(kind, tmdbId, btn){
+  const t = (_curDetail && _curDetail.title) || '';
+  if(!confirm(`把库内目录、文件名、NFO 都改成「${t}」？\n只改名不删除; 目标名已存在的项会跳过。`)) return;
+  const oldHtml = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.innerHTML = `${icon('refresh')}重命名中…`; }
+  try{
+    const r = await api(`/api/media/rename/${kind}/${tmdbId}`, {method:'POST'});
+    const nf = (r.files || []).length;
+    let msg = r.dir_renamed ? '目录已改名' : '目录名已是最新';
+    if(nf) msg += `, ${nf} 个文件已改名`;
+    if(r.skipped && r.skipped.length) msg += `, 跳过 ${r.skipped.length} 项`;
+    toast(msg);
+    await openDetailLocal(kind, tmdbId, false);
+  }catch(e){
+    toast('重命名失败: ' + e.message);
+    if(btn){ btn.disabled = false; btn.innerHTML = oldHtml; }
+  }
+}
+
 // 详情页"外部跳转"行: 只剩 Jellyfin(库内作品有 jfUrl, 后端拼好完整链接)。
 // TMDB/IMDb 已直接做进上方 facts 超链接, 不再重复出跳转按钮。
 function _detailLinks(kind, d){

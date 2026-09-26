@@ -156,7 +156,7 @@ def _persist(repo, sessionmaker, key, value):
 
 
 def is_setup_done() -> bool:
-    """首次引导是否已完成(从已有配置文件导入过 = 已完成, 不重走引导)。"""
+    """首次引导是否已完成(判据: app_setting.setup_done = 1; 无标记则按「DB 里已有配置」兜底)。"""
     v, _ = _db_read(_SETUP_KEY)
     if v in ("1", "0"):
         return v == "1"

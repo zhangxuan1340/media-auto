@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.config import load_config
 from clients.tmdb import client as tmdb
+from lib import titles
 from db.database import SessionLocal, init_db
 from db import repositories as repo
 from db.models import JellyfinItem
@@ -166,7 +167,9 @@ async def _fetch_one(cfg, kind, tmdb_id):
         except Exception:  # noqa: BLE001
             english_title = ""
     return {"kind": kind, "tmdb_id": tmdb_id,
-            "row": _media_row_from_detail(meta, english_title), "seasons": seasons}
+            "row": _media_row_from_detail(meta, english_title), "seasons": seasons,
+            # TMDB 大陆译名为空时的台/港译名 —— apply_to_row 拿它当"豆瓣也查不到"的退路
+            "zh_fallback": meta.get("zh_fallback") or ""}
 
 
 class GhostMediaError(Exception):
@@ -206,6 +209,8 @@ async def sync_one(kind: str, tmdb_id: int) -> bool:
         old_obj = repo.get_tmdb_media_by_id(session, kind, tmdb_id)
         old_imgs = _image_urls_from_media(old_obj) if old_obj else set()
         new_imgs = _image_urls_from_row(item["row"])
+        # 中文标题兜底: 手动覆盖 > TMDB > 豆瓣(国内译名)> TMDB 台/港译名
+        titles.apply_to_row(cfg, kind, item["row"], old_obj, item.get("zh_fallback") or "")
         repo.upsert_tmdb_media(session, item)
         if item.get("seasons"):
             repo.upsert_tmdb_seasons(session, tmdb_id, item["seasons"])
@@ -270,6 +275,8 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
                                 session, item["kind"], item["tmdb_id"])
                             old_imgs = _image_urls_from_media(old_obj) if old_obj else set()
                             new_imgs = _image_urls_from_row(item["row"])
+                            titles.apply_to_row(cfg, item["kind"], item["row"], old_obj,
+                                                item.get("zh_fallback") or "")
                             repo.upsert_tmdb_media(session, item)
                             if item.get("seasons"):
                                 repo.upsert_tmdb_seasons(session, item["tmdb_id"], item["seasons"])

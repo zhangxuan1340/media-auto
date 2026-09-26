@@ -20,6 +20,7 @@ import httpx
 
 from lib.config import load_config
 from lib import cache_stats as _cache_stats
+from lib import titles
 
 # 主用备用域, 回退官方主域。host 不带协议。
 _HOSTS = ("api.tmdb.org", "api.themoviedb.org")
@@ -559,9 +560,10 @@ async def detail(cfg, kind, tmdb_id):
                                 {"language": _lang(cfg),
                                  # 电影取 release_dates 算分级; 剧集取 content_ratings 算分级 ——
                                  # 两者字段结构不同, 分别用 _certification_tmdb / _certification_tv 归一(2026-09-22 补剧集分级)。
-                                 "append_to_response": "credits,videos,keywords,external_ids,release_dates"
+                                 # translations: 挑中文译名用(主标题 zh-CN 拿不到中文时兜底)
+                                 "append_to_response": "credits,videos,keywords,external_ids,release_dates,translations"
                                  if kind == "movie" else
-                                 "credits,videos,keywords,external_ids,content_ratings"})
+                                 "credits,videos,keywords,external_ids,content_ratings,translations"})
     except Exception as e:  # noqa: BLE001
         global last_error
         last_error = str(e)
@@ -574,6 +576,7 @@ async def detail(cfg, kind, tmdb_id):
     keywords = media.pop("keywords", {}) or {}
     release_dates = media.pop("release_dates", {}) or {}
     content_ratings = media.pop("content_ratings", {}) or {}
+    translations = media.pop("translations", {}) or {}
 
     imdb = (media.get("external_ids") or {}).get("imdb_id") or ""
     tvdb = (media.get("external_ids") or {}).get("tvdb_id")
@@ -615,10 +618,22 @@ async def detail(cfg, kind, tmdb_id):
     else:
         media_seasons = []
 
+    # 中文标题: TMDB 主标题(?language=zh-CN)经常本身就是英文 —— 实测 Bad Sisters
+    # zh-CN 返回 "Bad Sisters"(大陆那条 translation 的 name 是空串)。
+    #   大陆译名有 → 直接用;
+    #   大陆为空   → 保持英文交给 lib/titles 去豆瓣拿国内译名, 台/港译名放 zh_fallback
+    #                作为"豆瓣也查不到"时的退路(至少不是英文)。
+    _cn_title = media.get("title") or media.get("name") or "未知"
+    _zh_main, _zh_other = titles.pick_cn_titles(translations)
+    if not titles.has_cn(_cn_title) and _zh_main:
+        _cn_title = _zh_main
+    _zh_fallback = _zh_other if _zh_other and _zh_other != _cn_title else ""
+
     return {
         "tmdbId": media.get("id") or tmdb_id,
         "kind": kind,
-        "title": media.get("title") or media.get("name") or "未知",
+        "title": _cn_title,
+        "zh_fallback": _zh_fallback,
         "originalTitle": media.get("original_title") or media.get("original_name") or "",
         "year": _year_of(media),
         "overview": media.get("overview") or "",

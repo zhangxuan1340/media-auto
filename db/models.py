@@ -123,6 +123,13 @@ class TmdbMedia(Base):
     # 英文名(TMDB ?language=en 的 title/name)。中文片的 original_title 仍是中文,
     # 磁力双查需要真正的英文标题才能命中英文命名的发布组资源。
     english_title: Mapped[str] = mapped_column(String(512), default="")
+    # 中文标题手动覆盖(详情页「中文标题」填的)。非空时**永远优先于 title**:
+    #   - upsert_tmdb_media 每次同步都会把 title 顶回 TMDB 值 → 这里在写入后强制还原;
+    #   - 目录名 / 文件名 / NFO <title> 全部读 title, 所以保存时同时写 title。
+    custom_title: Mapped[str] = mapped_column(String(512), default="")
+    # 中文标题解析是否已跑完(1 = TMDB 译名 + 豆瓣都试过, 哪怕没查到也不必再查)。
+    # 豆瓣网络失败时保持 0 → 下次同步重试, 不会把"暂时查不到"固化成"永远没有"。
+    title_checked: Mapped[bool] = mapped_column(Boolean, default=False)
     year: Mapped[str] = mapped_column(String(16), default="")
     overview: Mapped[str] = mapped_column(Text, default="")
     poster: Mapped[str] = mapped_column(String(512), default="")
