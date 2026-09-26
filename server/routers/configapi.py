@@ -17,10 +17,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from server.auth import require_auth
+from server.auth import COOKIE_NAME, expected_token, require_auth
 from server.config import get_config, reload_config, save_config
 
 router = APIRouter(prefix="/api", tags=["config"], dependencies=[Depends(require_auth)])
@@ -149,7 +149,13 @@ async def api_config_put(body: ConfigBody):
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"写入配置失败: {e}")
-    return {"ok": True, "msg": "配置已保存并热加载, 立即生效"}
+
+    # 会话 = sha256(用户名:密码:进程密钥): 一旦 web.auth 变了, 旧 cookie 会立刻判 401
+    # (首次引导第 1 步改密码后, 后续步骤就会撞上) → 这里按新凭据换发同一张 cookie。
+    resp = JSONResponse({"ok": True, "msg": "配置已保存并热加载, 立即生效"})
+    resp.set_cookie(COOKIE_NAME, expected_token(data), httponly=True, samesite="lax",
+                    max_age=60 * 60 * 24 * 7)
+    return resp
 
 
 @router.get("/config/export")
