@@ -65,8 +65,7 @@ async function loadOrganize(){
         <button class="ghost" onclick="pickAll()">全选可整理 (${okCount})</button>
         <button onclick="applySelected(this)">${icon('play')}执行选中</button>
         <button class="ghost" onclick="applyAll(this)">${icon('play')}执行全部可整理</button>
-        <button class="ghost" onclick="finishAll('movie')">刮削电影+刷新</button>
-        <button class="ghost" onclick="finishAll('tv')">刮削剧集+刷新</button>
+        <button class="ghost" onclick="finishAll('all')">${icon('refresh')}刷新 Jellyfin</button>
       </div>
       <table><thead><tr><th>原目录名</th><th>正片</th><th>广告/杂项</th><th>→ 新目录名 / 库</th><th>类型 / ID</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
       <p style="color:var(--muted);font-size:12px;margin-top:8px">规则: 删纯推广名广告 + 非视频杂项,剥掉文件名里的推广块,目录改名为 <code>标题 (年份)</code>,视频改名 <code>标题 (年份) 质量标记</code> 并写 NFO,再归位到 ${esc(data.movie_root||'/Cloud')} 或 ${esc(data.tv_root||'/Cloud')}。库里已有同名条目会显示「跳过」(原因见目标列)。删除走 CD2 回收站,可恢复。</p>

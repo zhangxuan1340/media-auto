@@ -1,10 +1,10 @@
 """配置读写路由(管理页「通用」子页签 + 首次引导)
 
-配置真相源是 SQLite 的 app_config(见 db/models.AppConfig), 运行期只读数据库:
-配置文件仅在首启被一次性导入(之后失效), 想改配置只能走这里。本模块提供:
+配置真相源是 SQLite 的 app_config(见 db/models.AppConfig), 运行期只读数据库,
+没有配置文件参与; 配置入口只有「首次初始化引导」与本模块(通用页)。本模块提供:
   GET  /api/config          整份配置(敏感值打码)+ DB 路径 + 引导完成标记
   PUT  /api/config          整份保存(掩码回填原值 → 校验 → 写 DB → 热加载)
-  GET  /api/config/export   导出完整 JSON(含令牌, 用于备份/迁移)
+  GET  /api/config/export   导出完整 JSON(含令牌, 仅供备份)
   GET  /api/config/setup    首次引导的检查项(哪些必填还缺、对应能启用什么)
   POST /api/config/setup/done  标记引导完成
 
@@ -160,7 +160,7 @@ async def api_config_put(body: ConfigBody):
 
 @router.get("/config/export")
 async def api_config_export(cfg: dict = Depends(get_config)):
-    """导出完整配置(不打码)—— 备份与跨机器迁移用, 注意文件里含令牌。"""
+    """导出完整配置(不打码)—— 仅作备份, 注意文件里含令牌。"""
     body = json.dumps(cfg, ensure_ascii=False, indent=2) + "\n"
     return Response(
         content=body,

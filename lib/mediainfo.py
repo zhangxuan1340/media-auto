@@ -8,8 +8,9 @@
   1) 本地挂载: config.clouddrive2.local_root = CD2 根 "/" 对应的本地路径,
      例如 CD2 `/Cloud/CnMovie/x.mkv` -> `/Volumes/Cloud/115/Cloud/CnMovie/x.mkv`。
      只读文件头部,17GB 的 mp4 实测约 7 秒。**程序只使用已存在的路径,绝不自行挂载。**
-  2) CD2 自带 WebDAV(默认入口 /dav): 用 ffprobe 直接读 http(s),
-     ffprobe 会用 Range 只取需要的片段,不必把整个文件拉下来。配置见 config.webdav。
+  2) CD2 自带 WebDAV(默认入口 /dav): 先用 ffprobe 直接读 http(s)(Range 只取需要的片段),
+     ffprobe 没装/失败再让 mediainfo CLI 直读同一 URL 兜底(它也走 libcurl, 认 URL 内嵌 Basic 凭据)。
+     配置见 config.webdav; 两条都不通会在日志里写明断在哪一环。
 
 自测: python3 lib/mediainfo.py <本地视频文件>
 """
@@ -19,7 +20,7 @@ import os
 import re
 import shutil
 import subprocess
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 # MediaInfo 的 Format -> (NFO 里的 <codec>, 文件名用的标记)
 # ---------------------------------------------------------------------------
@@ -194,21 +195,38 @@ def local_path(cd2_path, config=None, base_dir=None):
     return None
 
 
-def probe_file(path, timeout=180):
+def _note(err_out, msg):
+    """把失败原因累积到 err_out(list),调用方据此在日志里说明断在哪一环。"""
+    if err_out is not None:
+        err_out.append(str(msg))
+
+
+def probe_file(path, timeout=180, err_out=None):
     """直接探测一个本地文件路径(MediaInfo CLI)。失败返回 None。"""
     cli = _find_cli()
-    if not cli or not path or not os.path.exists(path):
+    if not cli:
+        _note(err_out, "mediainfo CLI 未安装/未找到")
+        return None
+    if not path or not os.path.exists(path):
+        _note(err_out, f"本地路径不存在: {path}")
         return None
     try:
         proc = subprocess.run([cli, "--Output=JSON", path], capture_output=True,
                               text=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        _note(err_out, f"mediainfo 超时({timeout}s)")
+        return None
+    except OSError as e:
+        _note(err_out, f"mediainfo 无法执行: {e}")
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
+        _note(err_out, f"mediainfo 退出码 {proc.returncode}: "
+                       f"{(proc.stderr or '').strip()[:200]}")
         return None
     try:
         return normalize(json.loads(proc.stdout))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _note(err_out, f"mediainfo 输出解析失败: {e}")
         return None
 
 
@@ -464,10 +482,14 @@ _FF_AUDIO_ALIAS = {
 }
 
 
-def probe_url(url, config=None, timeout=180):
+def probe_url(url, config=None, timeout=180, err_out=None):
     """用 ffprobe 探测一个 http(s) 资源(CD2 WebDAV)。失败返回 None。"""
     cli = _ffprobe_cli()
-    if not cli or not url:
+    if not cli:
+        _note(err_out, "ffprobe 未安装/未找到")
+        return None
+    if not url:
+        _note(err_out, "WebDAV URL 为空")
         return None
     cmd = [cli, "-v", "quiet", "-print_format", "json",
            "-show_format", "-show_streams"]
@@ -485,43 +507,130 @@ def probe_url(url, config=None, timeout=180):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=timeout, env=env)
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        _note(err_out, f"ffprobe 超时({timeout}s): {url}")
+        return None
+    except OSError as e:
+        _note(err_out, f"ffprobe 无法执行: {e}")
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
+        err = (proc.stderr or "").strip().replace("\n", " ")[:300]
+        _note(err_out, f"ffprobe 退出码 {proc.returncode}: {err} ← {url}")
         return None
     try:
         info = normalize_ff(json.loads(proc.stdout))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _note(err_out, f"ffprobe 输出解析失败: {e}")
         return None
     info["url"] = url
     return info
 
 
-def probe(cd2_path, config=None, base_dir=None, timeout=180):
+def _with_basic_auth(url, config):
+    """把 webdav.user/password 内嵌进 URL(mediainfo 的 libcurl 认 https://user:pass@host)。
+
+    已内嵌 / 没配明文密码(只给了 authorization 头)→ 原样返回, 由调用方决定要不要试。
+    """
+    wd = webdav_conf(config)
+    user, pwd = wd.get("user"), wd.get("password")
+    if not user or pwd is None:
+        return url
+    p = urlsplit(url)
+    if p.username:
+        return url
+    host = p.hostname or ""
+    if p.port:
+        host = f"{host}:{p.port}"
+    netloc = f"{quote(str(user), safe='')}:{quote(str(pwd), safe='')}@{host}"
+    return urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
+
+
+def probe_url_mediainfo(url, config=None, timeout=180, err_out=None):
+    """ffprobe 缺失/失败时的兜底: 让 mediainfo CLI 直接读 WebDAV URL。
+
+    产出经 normalize() 与 ffprobe 通道同构, 所以调用方拿去写 <fileinfo> 无差别 ——
+    这条是为了「镜像里只装了 mediainfo、没有 ffmpeg」的部署不至于整个丢掉 fileinfo。
+    """
+    cli = _find_cli()
+    if not cli:
+        _note(err_out, "mediainfo CLI 未安装/未找到")
+        return None
+    if not url:
+        _note(err_out, "WebDAV URL 为空")
+        return None
+    target = _with_basic_auth(url, config)
+    env = dict(os.environ)
+    for k in ("http_proxy", "https_proxy", "all_proxy",
+              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        env.pop(k, None)
+    try:
+        proc = subprocess.run([cli, "--Output=JSON", target], capture_output=True,
+                              text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        _note(err_out, f"mediainfo 读 URL 超时({timeout}s): {url}")
+        return None
+    except OSError as e:
+        _note(err_out, f"mediainfo 无法执行: {e}")
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        err = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")[:300]
+        _note(err_out, f"mediainfo 读 URL 失败(退出码 {proc.returncode}): {err} ← {url}")
+        return None
+    try:
+        info = normalize(json.loads(proc.stdout))
+    except Exception as e:  # noqa: BLE001
+        _note(err_out, f"mediainfo 输出解析失败: {e}")
+        return None
+    # 401/403 时 mediainfo 不报错, 只回 "media":null → 视为没读到
+    if not (info.get("duration_secs") or 0) and not (info.get("video") or {}).get("width"):
+        _note(err_out, f"mediainfo 未解析出媒体流(多半是 401/403 或不是媒体): {url}")
+        return None
+    info["url"] = url
+    return info
+
+
+def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
     """按 CD2 路径探测媒体信息。两条通道依次尝试:
 
       1) 本地挂载(local_root) -> MediaInfo CLI  —— 取值与 TMM 最一致
-      2) CD2 WebDAV            -> ffprobe over HTTP  —— 免挂载
-    都不可用返回 None(调用方退回"从文件名推断质量标记")。
+      2) CD2 WebDAV            -> ffprobe over HTTP  —— 免挂载(主通道)
+      都不可用返回 None(调用方退回"从文件名推断质量标记"),并把**失败原因**
+      交给 log(若提供)—— 否则 <fileinfo> 为空时看不出到底断在哪一环。
     """
+    reasons = []
     lp = local_path(cd2_path, config, base_dir)
     if lp:
-        info = probe_file(lp, timeout=timeout)
+        info = probe_file(lp, timeout=timeout, err_out=reasons)
         if info:
             info["source"] = "local"
             info["local_path"] = lp
             return info
+    else:
+        roots = _local_roots(config)
+        reasons.append("本地通道: 未配置 local_root" if not roots
+                       else f"本地通道: {roots[0]} 下找不到 {cd2_path}(挂载没进容器?)")
 
-    if webdav_conf(config).get("enabled", True):
-        wd = webdav_conf(config)
-        # 没配凭据就不去试(省掉一次必失败的往返);确实允许匿名再打开 allow_anonymous
-        if _auth_header(config) or wd.get("allow_anonymous"):
-            url = webdav_url(cd2_path, config)
-            if url:
-                info = probe_url(url, config, timeout=timeout)
-                if info:
-                    info["source"] = "webdav"
-                    return info
+    wd = webdav_conf(config)
+    if not wd.get("enabled", True):
+        reasons.append("WebDAV: webdav.enabled=false")
+    elif not (_auth_header(config) or wd.get("allow_anonymous")):
+        reasons.append("WebDAV: 未配 user/password(或 authorization),已跳过")
+    else:
+        url = webdav_url(cd2_path, config)
+        if not url:
+            reasons.append(f"WebDAV: 路径 {cd2_path} 不在 account_root="
+                           f"{wd.get('account_root')!r} 范围内(如账号只开到 /Temp)")
+        else:
+            info = probe_url(url, config, timeout=timeout, err_out=reasons)
+            if not info:
+                # ffprobe 没装(镜像漏建)或读不动 → 让 mediainfo 直读同一 URL 兜底
+                info = probe_url_mediainfo(url, config, timeout=timeout, err_out=reasons)
+            if info:
+                info["source"] = "webdav"
+                return info
+
+    if log:
+        log(f"    ⚠ <fileinfo> 探测失败,写空标签 — " + " | ".join(reasons))
     return None
 
 

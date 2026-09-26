@@ -101,9 +101,7 @@ def main():
         wait_loop(config, base, library_root, args.interval)
         # 刮削 + 刷新
         import finish as fin
-        print('=== 下载完成,开始刮削与刷新 ===')
-        fin.run_tmm(config, 'movie')
-        fin.run_tmm(config, 'tv')
+        print('=== 下载完成, 刷新 Jellyfin ===')
         fin.refresh_jellyfin(config)
 
 

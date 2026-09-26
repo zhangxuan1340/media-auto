@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """共享配置加载 —— 真相源是 SQLite 的 app_config 表(运行期【只读数据库】)
 
-读取规则:
-  load_config() 只读 DB 的 app_config['config'], 没有任何文件回退链。
-  DB 里还没有配置这一行时(全新库), bootstrap() 做【一次性】初始化:
-      config/config.json 或 <项目根>/config.json 存在 → 导入 DB(此后该文件永久失效)
-      否则                              → 从 config.example.json 播种
-  初始化完再读一次 DB。因此: 运行期改任何 JSON 文件都不会生效, 改配置只能走
-  Web「管理 → 通用」页(或导入接口)。
+配置只有两个入口:
+  1. 首次初始化引导(Web setup wizard)—— 全新部署填必填项, 写进 DB;
+  2. 「管理 → 通用」页 —— 日常增删改, 保存即热加载。
+  没有任何配置文件参与: 不读 config.json, 也不做"首启从文件导入"。
 
-磁盘上只有两类 JSON 会被读:
-  1. bootstrap() 的一次性导入 —— 仅当 DB 没有配置这一行, 只发生一次;
-  2. Web「通用」页的 导入/导出 —— 用户显式点击。
+bootstrap() 只在 DB 里还没有配置这一行时, 用 config.example.json 播种一份默认值
+(setup_done=0 → 立刻进初始化引导), 然后由引导把它覆盖成真实配置。
 
-DB 位置(不再从任何配置文件读 db.path, 鸡生蛋到此为止):
+DB 位置(不从任何文件读 db.path, 鸡生蛋到此为止):
   MEDIA_AUTO_DB > 默认 <项目根>/data/media_auto.db
 
 ⚠️ 本模块被 db/database.py 依赖(取 project_root), 所以【不能在模块级 import db.*】,
@@ -26,30 +22,16 @@ import sys
 
 _CONFIG_KEY = "config"
 _SETUP_KEY = "setup_done"
+# 已随功能退役的配置段: 保存/导入时自动剥离, 存量库里的残留也一并清掉
+_DEAD_KEYS = ("tinymediamanager", "db")
+# 退役的组内字段: (父段, 字段) —— tinyMediaManager 停用后 <tmm_locked/> 标签一并停写
+_DEAD_FIELDS = (("organize", "tmm_locked"),)
 
 
 def project_root():
     # lib/ -> 项目根目录
     return os.environ.get("MEDIA_AUTO_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
-def import_source_path():
-    """【一次性导入源】的路径, 只在 bootstrap() 里用一次, 不参与运行期读取。
-
-    查找顺序: MEDIA_AUTO_CONFIG > config/config.json(Docker 挂 ./config 目录) >
-    <项目根>/config.json(本地旧布局) > 默认 config/config.json。
-    """
-    env = os.environ.get("MEDIA_AUTO_CONFIG")
-    if env:
-        return env if os.path.isabs(env) else os.path.join(project_root(), env)
-    root = project_root()
-    std = os.path.join(root, "config", "config.json")
-    legacy = os.path.join(root, "config.json")
-    if os.path.exists(std):
-        return std
-    if os.path.exists(legacy):
-        return legacy
-    return std
 
 
 def db_path():
@@ -128,6 +110,12 @@ def save_config(data: dict) -> int:
     if not isinstance(data, dict) or not data:
         raise ValueError("配置内容必须是非空 dict")
     _json.dumps(data, ensure_ascii=False)  # 提前暴露不可序列化问题
+    for k in _DEAD_KEYS:
+        data.pop(k, None)
+    for parent, k in _DEAD_FIELDS:
+        sec = data.get(parent)
+        if isinstance(sec, dict):
+            sec.pop(k, None)
     return _write(_CONFIG_KEY, _json.dumps(data, ensure_ascii=False, indent=2))
 
 
@@ -182,39 +170,28 @@ def set_setup_done(done: bool) -> None:
 
 
 def bootstrap() -> str:
-    """首次初始化(幂等): 只在 DB 没有配置这一行时动文件, 且只动这一次。
+    """首次初始化(幂等): 只在 DB 没有配置这一行时播种默认值。
 
     返回做了什么:
-      'exists'  DB 已有配置, 什么都没做(文件从此与系统无关)
-      'import'  从配置文件一次性导入 DB(老部署 → setup_done=1, 不重走引导)
-      'seed'    从 config.example.json 播种(全新部署 → setup_done=0, 走首次引导)
+      'exists'  DB 已有配置, 什么都没做
+      'seed'    用 config.example.json 播种默认值(setup_done=0 → 进首次初始化引导)
     """
     data, _ = _db_read(_CONFIG_KEY)
     if data is not None:
         return "exists"
 
-    src = import_source_path()
+    src = _example_path()
     src_data = _read_file(src)
-    from_example = False
     if src_data is None:
-        src = _example_path()
-        src_data = _read_file(src)
-        from_example = True
-    if src_data is None:
-        print("[config] 既无可导入的配置文件也无 config.example.json, 跳过初始化", file=sys.stderr)
+        print(f"[config] 找不到播种模板 {src}, 跳过初始化", file=sys.stderr)
         return "exists"
 
-    src_data.pop("db", None)  # db.path 已随鸡生蛋一起退役(MEDIA_AUTO_DB / 默认路径)
     try:
         save_config(src_data)
-        set_setup_done(not from_example)
+        set_setup_done(False)   # 播种的是默认值 → 必须走首次初始化引导
     except Exception as e:  # noqa: BLE001  库不可写 → 不致命, 交给 load_config 的 example 兜底
         print(f"[config] 初始化写库失败: {e}", file=sys.stderr)
         return "exists"
 
-    if from_example:
-        print(f"[config] 首次启动: 已从 {src} 播种到数据库(setup_done=0, 走首次引导)")
-    else:
-        print(f"[config] 首次启动: 已从 {src} 一次性导入数据库"
-              f"(setup_done=1; {src} 此后失效, 改配置请用 Web「管理 → 通用」)")
-    return "seed" if from_example else "import"
+    print(f"[config] 首次启动: 已用 {src} 播种默认配置(setup_done=0, 进入首次初始化引导)")
+    return "seed"

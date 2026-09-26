@@ -5,7 +5,7 @@
 ```
 Bitmagnet(GraphQL 搜磁力) → CloudDrive2(gRPC 离线下载)
    → 轮询完成 + 分类引擎决定目录 + MoveFile 归位
-   → TinyMediaManager(刮削重命名) → Jellyfin(刷新媒体库)
+   → organize(改名 + 写 NFO 刮削) → Jellyfin(刷新媒体库)
 ```
 
 另外,本项目的 **Web 控制台** 会把 **Jellyfin** 的媒体库/分集与 **TMDB** 的元数据
@@ -16,7 +16,7 @@ Bitmagnet(GraphQL 搜磁力) → CloudDrive2(gRPC 离线下载)
 MediaAuto/
 ├── README.md            # 本文件
 ├── requirements.txt     # Python 依赖
-├── config.example.json   # 配置模板(全新部署按它播种; 首启也可用 config/config.json 一次性导入)
+├── config.example.json   # 配置模板(仅首启播种默认值, 之后配置只在数据库)
 ├── Dockerfile / .dockerignore / docker-compose.yml   # 容器化部署
 ├── lib/                  # 公共逻辑
 │   ├── config.py         # 共享配置加载(脚本 & server 共用)
@@ -40,14 +40,14 @@ MediaAuto/
 │   ├── push.py           # 推 CD2 离线下载
 │   ├── check.py          # 轮询完成 + 分类 + 移动
 │   ├── organize.py       # 整理离线目录: 清广告 + 改名 + 写 NFO + 按分类归位 /Cloud/<分类>
-│   ├── finish.py         # tMM 刮削 + Jellyfin 刷新
+│   ├── finish.py         # Jellyfin 刷新(tMM 已停用)
 │   ├── pipeline.py       # 一键全链路
 │   ├── sync_jellyfin.py  # 同步 Jellyfin → 本地 SQLite
 │   ├── sync_jf_scanner.py# 可用性扫描(写 media/season)
 │   └── sync_tmdb.py      # 同步 TMDB 元数据 → 本地 SQLite
 ├── server/               # FastAPI 网页控制台(单端口)
 │   ├── main.py           # 入口: 登录/鉴权 + 托管 index.html + 挂载 API
-│   ├── config.py         # 配置读写(真相源 DB app_config, 文件仅导入/导出), 暴露项目根目录
+│   ├── config.py         # 配置读写(真相源 DB app_config, 无配置文件), 暴露项目根目录
 │   ├── auth.py           # 用户名/密码 + HttpOnly Cookie 会话
 │   ├── routers/          # search / browse / sync / jobs / cd2 等路由
 │   └── static/index.html # 单页前端
@@ -58,8 +58,8 @@ MediaAuto/
 ## 快速开始(命令行)
 ```bash
 pip install -r requirements.txt
-# 配置存在数据库里: 首次启动把 config/config.json(若有)一次性导入, 此后页面与脚本只读数据库
-# (可选)想预填 Bitmagnet / CD2 / Jellyfin / TMDB 地址与令牌: cp config.example.json config/config.json
+# 配置只有两个入口: 首次初始化引导 + Web「管理 → 通用」页, 全部存在数据库里
+# 首启按 config.example.json 播种默认值 → 立刻进初始化引导填真实值
 # (可选) brew install mediainfo          # 探测媒体信息写 NFO 的 <fileinfo>(有 ffprobe 也行)
 
 python3 scripts/search.py --query "盗梦空间 2010"
@@ -67,7 +67,7 @@ python3 scripts/push.py --magnet "magnet:?xt=urn:btih:XXXX" --title "..." --cont
 python3 scripts/check.py --loop --interval 120
 python3 scripts/organize.py                    # 预览整理计划(不动数据)
 python3 scripts/organize.py --apply            # 执行: 清广告 → 改名 → 写 NFO → 归位 /Cloud/<分类>
-python3 scripts/finish.py --all
+python3 scripts/finish.py             # 刷新 Jellyfin
 # 或一键: python3 scripts/pipeline.py --query "盗梦空间 2010" --auto --wait
 ```
 
@@ -98,13 +98,15 @@ python3 scripts/finish.py --all
 - **命名**默认 **TMM 风格**:目录 `标题 (年份)`、电影文件 `标题 (年份) 质量`
   (如 `保持沉默 (2019) 2160p h265 EAC3.mp4`),与你库里现有条目一致。
   想用 `标题.年份.ttIMDB` 只需改 `organize.folder_template` 为 `{title}.{year}.{imdb}`。
-- **自带刮削**:生成 TMM 5.2.12(JELLYFIN profile)兼容的完整 NFO(电影 `<视频名>.nfo`、剧集 `tvshow.nfo`),
+- **自带刮削**:直接生成完整 NFO(电影 `<视频名>.nfo`、剧集 `tvshow.nfo`),Jellyfin 读取即可,
   字段含 `ratings/uniqueid(tmdb,imdb,wikidata)/genre/actor/crew/producer/trailer/fileinfo.streamdetails` 等,
-  末尾写 `<tmm_locked/>` 让 TMM 不再改写。**元数据来自 TMDB 反查**:用目录名 + 主媒体文件名去搜,
+  **元数据来自 TMDB 反查**:用目录名 + 主媒体文件名去搜,
   中英文名都能查(`Fireflies in the Sun` → 误杀2;`Gannibal` → 噬亡村)。磁力链本身不带 TMDB/IMDB,关联就靠这一步。
 - **`<fileinfo>`(编码/分辨率/音轨)探测**按顺序试:① 本地 `local_root` → `mediainfo`;
   ② `config.webdav`(账号根 URL + 账号内路径 + 凭据)→ `ffprobe`;③ 都不通就退回从文件名推断(NFO 不含该段)。
   因为 WebDAV 账号只授到 `/Temp`,**探测在搬运前完成**。
+  两条都不通时,整理日志会写明**断在哪一环**(本地路径不存在 / mediainfo 未装 / WebDAV 未配凭据 /
+  路径超出 `account_root` / ffprobe 报错),NFO 的 `<fileinfo/>` 才留空 —— 不再是静默失败。
 - **广告文件**判定靠"去掉含域名的括号块后没有实际片名"这一特征,不做域名白名单 —— 高清站的域名变体很多
   (HDBTHD / BBEBBB / BBQDDQ / BPHDTV …),但形态一致。正片名里带推广前缀不算广告。
 - **非视频杂项**(`.txt/.url/.doc/.pdf` 等)一并删除;但 **`.nfo` 与海报类资产(`poster.jpg`/`fanart.jpg`/…)一律保留**。
@@ -153,16 +155,13 @@ python3 scripts/availability_sync.py               # 真写库
 
 启动：
 ```bash
-python -m server.main   # 首启一次性初始化: 有 config/config.json 就导入, 否则按 config.example.json 播种
-                        # 端口见配置 web.port(默认 8787), 页面改完即热加载
-MEDIA_AUTO_CONFIG=/path/old.json python -m server.main   # 显式指定【一次性导入】的源文件(导入完即失效)
-# 浏览器打开 http://<host>:8787 → 登录 → 首次引导(改密码/填 Jellyfin、TMDB、CD2、库根)
+python -m server.main   # 首启用 config.example.json 播种默认值, 端口见配置 web.port(默认 8787)
+# 浏览器打开 http://<host>:8787 → 登录 → 首次初始化引导(改密码/填 Jellyfin、TMDB、CD2、库根)
 ```
 
 ## 安装 / 启用
 1. 安装依赖:`pip install -r requirements.txt`
-2. (可选)已有配置就位:`mkdir -p config && cp 你的配置.json config/config.json` ——
-   首次启动会把它**导入数据库**;没有就直接起服务,页面引导里填。
+2. 起服务后登录,按**首次初始化引导**填必填项(配置只存数据库, 没有配置文件)。
 3. (可选)安装 `mediainfo`:`brew install mediainfo` —— 探测媒体编码/分辨率以写 NFO 的 `<fileinfo>`;
    没装也能正常运行(探测链降级:本地 mediainfo → WebDAV + ffprobe → 文件名推断),
    NFO 其余字段照写,只是不含该段。
@@ -170,15 +169,14 @@ MEDIA_AUTO_CONFIG=/path/old.json python -m server.main   # 显式指定【一次
 
 ## 部署与使用
 
-> **配置存在数据库里**(SQLite 的 `app_config` 表),运行期**不读任何配置文件**:
-> 文件只在首启被一次性导入(导入完永久失效)。改配置一律走 **管理 → 通用** 页面
-> (分组表单 + 高级 JSON + 导出/导入),保存即热加载,不用重启、不用改文件。
+> **配置存在数据库里**(SQLite 的 `app_config` 表),运行期**不读任何配置文件**。
+> 配置入口只有两个:**首次初始化引导**(第一次)与 **管理 → 通用** 页(日常),
+> 分组表单保存即热加载,不用重启、不用改文件。
 
 ### 方式一:本地直接跑
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-mkdir -p config && cp config.example.json config/config.json   # (可选)首启想预填就放这里, 首次启动一次性导入
 venv/bin/python -m server.main        # 端口取 config.web.port(默认 8787)
 ```
 浏览器打开 `http://<host>:8787` 登录(默认 `admin` / `change_me`,首次登录进引导改密码;
@@ -191,17 +189,14 @@ docker compose logs -f
 curl -fsS http://localhost:8787/ >/dev/null && echo OK      # 探活: GET / 返回 200 即正常
 ```
 
-**老部署一次性迁移**(已有根目录 `config.json` 的机器,只做一次):
-```bash
-mkdir -p config && mv config.json config/config.json
-docker compose up -d --build     # 首启把文件一次性导入数据库(不再走引导),导入完该文件不再被读
-```
+**老配置不再读取**:旧的 `config.json` 不参与运行(可自行删掉或归档),首次启动会播种默认值并进入
+**初始化引导**,重新填一遍即可;想省事可先在旧机器上「管理 → 通用 → 导出备份」留档。
 
 | 项 | 值 |
 | --- | --- |
 | 镜像 | `python:3.12-slim` + `mediainfo` / `ffmpeg`(探测 `<fileinfo>` 用,可缺省) |
 | 端口 | `8787:8787`(容器内监听 `0.0.0.0:8787`) |
-| 配置 | **数据库**(`app_config` 表);卷 `./config:/app/config` 只作首次导入源(容器**不**内置任何配置) |
+| 配置 | **数据库**(`app_config` 表);容器**不**内置配置、不挂配置文件,只靠初始化引导与通用页 |
 | 数据库 | 卷 `./data:/app/data`(**SQLite 走 WAL,必须放本地盘**,不要放网络盘/对象存储) |
 | 图片缓存 | `./data/img_cache`(随 `data` 卷一起持久化) |
 | 队列状态 | 卷 `./state:/app/state`(`state/queue.json`) |
@@ -213,14 +208,13 @@ docker compose up -d --build     # 首启把文件一次性导入数据库(不�
 | --- | --- |
 | `WEB_USER` / `WEB_PASS` | 覆盖数据库里的 `config.web.auth` 登录账号 |
 | `MEDIA_AUTO_DIR` | 项目根目录(容器内默认 `/app`,一般不用改) |
-| `MEDIA_AUTO_CONFIG` | **一次性导入**的源文件路径(默认自动找 `config/config.json`;导入完即失效) |
 | `MEDIA_AUTO_DB` | SQLite 路径(默认 `/app/data/media_auto.db`) |
 
-**配置备份**:管理 → 通用 →「导出 JSON」(含令牌,注意保管),或直接备 `data/media_auto.db`。
-导入则是「导入 JSON」→ 保存。
+**配置备份**:管理 → 通用 →「导出备份」(含令牌,注意保管),或直接备 `data/media_auto.db`。
+恢复配置 = 恢复数据库文件(配置没有第二份存储)。
 
 > 容器只承载 **Web 控制台 + 同步作业**。整理/搬运要访问的 `/Cloud`、`/Temp` 等媒体目录
-> 与 NAS 上的 tMM/Jellyfin 是另一条链路:需要在 `docker-compose.yml` 里自行加只读卷挂载,
+> 与 NAS 上的 Jellyfin 是另一条链路:需要在 `docker-compose.yml` 里自行加只读卷挂载,
 > 或直接用「方式一」在 NAS 上以进程方式跑流水线脚本。
 
 **备份**:停服务或直接拷 `data/media_auto.db*`(含 `-wal` / `-shm`),恢复时放回 `data/` 即可。

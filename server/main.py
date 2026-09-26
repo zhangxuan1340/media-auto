@@ -29,9 +29,9 @@ from server import imgproxy as imgproxy_router
 
 
 def _startup_config():
-    """配置初始化(必须最先跑): 建表 → 首启把配置文件一次性导入 DB(或从 example 播种)。
+    """配置初始化(必须最先跑): 建表 → 首启用 config.example.json 播种默认值(进初始化引导)。
 
-    之后运行期只读 DB(Web「通用」页写 DB, get_config 按 updated_at 热加载, 文件不再参与);
+    之后运行期只读 DB(引导/「通用」页写 DB, get_config 按 updated_at 热加载);
     导入失败只打日志不阻断启动(配置回退到 config.example.json 默认值, 服务仍可用)。
     """
     try:
@@ -48,6 +48,23 @@ def _startup_config():
         reload_config()
     except Exception:  # noqa: BLE001
         pass
+
+
+def _startup_tools():
+    """探测工具自检: NFO <fileinfo> 需要 mediainfo(本地) 与 ffprobe(WebDAV 通道)。
+
+    缺了不阻断启动(有 mediainfo 兜底), 但必须在容器日志里点名 —— 否则 <fileinfo/>
+    写空时根本看不出是镜像漏装还是网络不通。
+    """
+    try:
+        import sys
+        from lib.mediainfo import _find_cli, _ffprobe_cli
+        mi, fp = _find_cli(), _ffprobe_cli()
+        bits = [f"mediainfo={'ok:' + mi if mi else 'MISSING'}",
+                f"ffprobe={'ok:' + fp if fp else 'MISSING(mediainfo 兜底仍可用)'}"]
+        print(f"[tools] {' | '.join(bits)}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[tools] 探测工具自检失败: {e}", file=sys.stderr)
 
 
 def _startup_cleanup():
@@ -90,6 +107,7 @@ async def lifespan(_app: FastAPI):
     关停无需收尾: 调度器是 daemon 线程, 随进程退出。
     """
     _startup_config()
+    _startup_tools()
     _startup_cleanup()
     _startup_scheduler()
     yield

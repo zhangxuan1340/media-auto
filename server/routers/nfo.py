@@ -396,7 +396,6 @@ async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
         if warning:
             print(f"    ⚠ NFO 更新 {warning}")
 
-        locked = bool(organize.org_cfg(cfg).get("tmm_locked", True))
         wikidata = ""
         if organize.org_cfg(cfg).get("wikidata", True):
             cache = os.path.join(PROJECT_ROOT, "state", "wikidata_cache.json")
@@ -405,7 +404,7 @@ async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
 
         if kind == "tv":
             xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata,
-                                           dateadded=dateadded, tmm_locked=locked)
+                                           dateadded=dateadded)
         else:
             streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
             source = mediainfo.guess_source(video.get("name")) if video else ""
@@ -416,8 +415,7 @@ async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
                 orig = video.get("name") if video else ""
             xml = nfo_mod.build_movie_nfo(meta, info=None, streamdetails=streamdetails,
                                           source=source, original_filename=orig,
-                                          dateadded=dateadded, wikidata=wikidata,
-                                          tmm_locked=locked)
+                                          dateadded=dateadded, wikidata=wikidata)
 
         written = cd2.write_file(cfg, nfo_path, xml, base_dir=PROJECT_ROOT)
         it = cd2.find_file_by_path(cfg, folder_path, nfo_name)

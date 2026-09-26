@@ -839,6 +839,17 @@
   .cfg-note{font-size:12px;color:var(--muted);line-height:1.6;margin:4px 0 8px}
   .cfg-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
   .cfg-actions .cfg-note{margin:0;flex:1;min-width:180px}
+  /* 分组页签: 顶部横排, 一次只显示一组(手机上可横向滑动) */
+  .cfg-tabs{display:flex;gap:6px;overflow-x:auto;padding:2px 0 10px;margin:2px 0 4px;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .cfg-tabs::-webkit-scrollbar{display:none}
+  .cfg-tabs button{flex:0 0 auto;border:1px solid var(--line);background:var(--glass);
+    padding:7px 13px;border-radius:999px;font-size:12.5px;color:var(--muted);
+    backdrop-filter:blur(10px);white-space:nowrap;transition:.2s var(--ease)}
+  .cfg-tabs button.active{background:linear-gradient(135deg,rgba(10,132,255,.14),rgba(191,90,242,.12));
+    color:var(--brand-d);border-color:rgba(10,132,255,.35);font-weight:600}
+  .cfg-panels>.cfg-group{display:none}
+  .cfg-panels>.cfg-group.active{display:block;animation:tabIn .26s var(--ease)}
   .cfg-group{border:1px solid var(--line);background:var(--surface-2);border-radius:14px;padding:13px 14px;margin:10px 0}
   .cfg-gtitle{font-size:13px;font-weight:700;margin:0 0 3px}
   .cfg-gdesc{font-size:12px;color:var(--muted);line-height:1.55;margin:0 0 10px}
@@ -856,15 +867,6 @@
     padding:7px 10px;border:1px solid var(--line);border-radius:10px;background:var(--input-bg);min-height:38px}
   .cfg-check input{width:16px;height:16px;accent-color:var(--brand);flex:none}
   .cfg-check + .cfg-fdesc{margin:-4px 0 4px}
-  .cfg-adv{margin:12px 0;border:1px dashed var(--line);border-radius:14px;background:var(--surface-2);padding:10px 14px}
-  .cfg-adv summary{cursor:pointer;font-size:13px;font-weight:600;list-style:none;display:flex;align-items:center;gap:6px}
-  .cfg-adv summary::before{content:'▸';transition:.18s var(--ease);color:var(--muted)}
-  .cfg-adv[open] summary::before{transform:rotate(90deg)}
-  .cfg-adv textarea{width:100%;min-height:280px;margin-top:10px;padding:11px 12px;border:1px solid var(--line);
-    border-radius:10px;background:var(--input-bg);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    font-size:12px;line-height:1.6;tab-size:2}
-  .cfg-adv textarea:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 4px rgba(10,132,255,.14)}
-  .cfg-adv .cfg-desc{font-size:12px;color:var(--muted);margin:8px 0 0;line-height:1.55}
 
   /* ===== 首次启动引导(强制分步) ===== */
   .setup-ov{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;

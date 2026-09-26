@@ -21,7 +21,8 @@
           导演独立 <director tmdbid="...">, 末尾统一 <crew><role subrole="...">
   - 剧集: <tvshow>, 多 <showtitle>/<namedseason>/<episodeguide>/<status>/<enddate>,
           uniqueid 以 tvdb 为 default
-  - 结尾都有 <tmm_locked/>(锁定后 TMM 不会再改写, 这正是"不需要它刮削"的实现)
+  - 结尾原 TMM 会写 <tmm_locked/>(锁定标记) —— **本工程已随 tinyMediaManager 停用一并移除**,
+    不再输出该标签(Jellyfin 本来也忽略未知标签)
 """
 import html
 import json
@@ -214,7 +215,7 @@ def wikidata_id(imdb_id, timeout=25, cache_file=None):
 # ---------------------------------------------------------------------------
 def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
                     original_filename="", dateadded=None, wikidata="",
-                    tmm_locked=True, cast_limit=0, tag_limit=60, crew_limit=40,
+                    cast_limit=0, tag_limit=60, crew_limit=40,
                     streamdetails=None):
     """生成 TMM 5.2.12 兼容的电影 NFO(XML 字符串)。
 
@@ -345,8 +346,6 @@ def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
     L.append(_el("user_note"))
     L.append(_el("english_title", _english_title(meta)))
     _append_crew(L, meta, crew_limit)
-    if tmm_locked:
-        L.append(_el("tmm_locked"))
     L.append("</movie>")
     return "\n".join(L) + "\n"
 
@@ -439,7 +438,7 @@ def _append_crew(lines, meta, crew_limit):
 # ---------------------------------------------------------------------------
 # 剧集 NFO
 # ---------------------------------------------------------------------------
-def build_tvshow_nfo(meta, *, wikidata="", dateadded=None, tmm_locked=True,
+def build_tvshow_nfo(meta, *, wikidata="", dateadded=None,
                      cast_limit=0, tag_limit=60, original_filename=""):
     """生成 TMM 5.2.12 兼容的 tvshow.nfo(XML 字符串)。
 
@@ -546,8 +545,6 @@ def build_tvshow_nfo(meta, *, wikidata="", dateadded=None, tmm_locked=True,
     L.append('    <group active="true" id="AIRED" name=""/>')
     L.append("  </episode_groups>")
     L.append(_el("english_title", _english_title(meta)))
-    if tmm_locked:
-        L.append(_el("tmm_locked"))
     L.append("</tvshow>")
     return "\n".join(L) + "\n"
 

@@ -966,7 +966,7 @@ def relocated(plan, final_dir, old_path):
     return final_dir.rstrip("/") + "/" + rel
 
 
-def _probe_source_media(config, plan, base_dir=None):
+def _probe_source_media(config, plan, base_dir=None, log=None):
     """探测条目里最大的视频文件 —— **用它在离线目录里的原始路径**。
 
     为什么必须移动前探测: WebDAV 账号只开到 `/Temp`,文件一旦搬到 `/Cloud` 就够不到了
@@ -986,12 +986,13 @@ def _probe_source_media(config, plan, base_dir=None):
     except Exception:  # noqa: BLE001
         timeout = 180
     try:
-        return mediainfo.probe(path, config, base_dir=base_dir, timeout=timeout)
+        return mediainfo.probe(path, config, base_dir=base_dir, timeout=timeout,
+                               log=log)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _probe_main_media(config, plan, final_dir, base_dir=None):
+def _probe_main_media(config, plan, final_dir, base_dir=None, log=None):
     """探测条目里最大的那个视频文件(取媒体技术信息)。失败返回 None。"""
     media = plan.get("media") or []
     if not media:
@@ -1003,7 +1004,7 @@ def _probe_main_media(config, plan, final_dir, base_dir=None):
     except Exception:  # noqa: BLE001
         timeout = 180
     return mediainfo.probe(relocated(plan, final_dir, biggest.get("path")),
-                           config, base_dir=base_dir, timeout=timeout)
+                           config, base_dir=base_dir, timeout=timeout, log=log)
 
 
 def _rename_media_for_movie(config, plan, final_dir, meta, quality, base_dir=None, log=print):
@@ -1480,12 +1481,10 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
     if org_cfg(config).get("wikidata", True):
         cache = os.path.join(base_dir or ".", "state", "wikidata_cache.json")
         wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
-    locked = bool(org_cfg(config).get("tmm_locked", True))
     dateadded = time.time()
 
     if kind == "tv":
         xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata, dateadded=dateadded,
-                                       tmm_locked=locked,
                                        original_filename=(plan.get("origin_filename") or ""))
         path = final_dir.rstrip("/") + "/tvshow.nfo"
     else:
@@ -1497,7 +1496,7 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
         orig = plan.get("origin_filename") or ""
         xml = nfo_mod.build_movie_nfo(meta, info=info, source=source,
                                       original_filename=orig, dateadded=dateadded,
-                                      wikidata=wikidata, tmm_locked=locked)
+                                      wikidata=wikidata)
         path = final_dir.rstrip("/") + "/" + nfo_name
 
     written = cd2.write_file(config, path, xml, base_dir=base_dir)
@@ -1568,7 +1567,7 @@ def finalize_entry(config, plan, final_dir, meta, base_dir=None, log=print,
         # 优先用搬运前探测好的结果(那时路径还在 /Temp 下,WebDAV 够得到)
         info = plan.get("_probe_info")
         if not info:
-            info = _probe_main_media(config, plan, final_dir, base_dir=base_dir)
+            info = _probe_main_media(config, plan, final_dir, base_dir=base_dir, log=log)
         if info:
             out["probed"] = True
             quality = mediainfo.quality_tag(info)
@@ -1633,7 +1632,7 @@ def _apply_merge_seasons(config, plan, base_dir=None, log=print):
         plan["origin_filename"] = biggest.get("name") or ""
 
     if org_cfg(config).get("probe_media", True) and not plan.get("_probe_info"):
-        plan["_probe_info"] = _probe_source_media(config, plan, base_dir=base_dir)
+        plan["_probe_info"] = _probe_source_media(config, plan, base_dir=base_dir, log=log)
 
     if org_cfg(config).get("clean_media_names", True):
         cleaned = clean_media_names(config, plan, base_dir=base_dir, log=log)
@@ -1892,7 +1891,7 @@ def apply_plan(config, plan, base_dir=None, log=print):
     # 0-pre) 媒体探测 —— **必须在搬运之前**。WebDAV 账号只开到 /Temp,
     #   搬到 /Cloud 后文件就探测不到了(没有本地挂载时 <fileinfo> 会丢失)。
     if org_cfg(config).get("probe_media", True) and not plan.get("_probe_info"):
-        plan["_probe_info"] = _probe_source_media(config, plan, base_dir=base_dir)
+        plan["_probe_info"] = _probe_source_media(config, plan, base_dir=base_dir, log=log)
 
     # 0) 媒体/字幕文件名去推广块(默认开,可用 organize.clean_media_names=false 关闭)
     if org_cfg(config).get("clean_media_names", True):

@@ -156,6 +156,8 @@ async function catSave(){
 // 所以表单里直接回显掩码即可, 明文令牌不进浏览器。
 let _cfgData = null;    // 服务端返回的(掩码后)整份配置
 let _cfgDirty = false;
+let _cfgTab = 0;        // 当前配置分组页签(顶部页签, 一次只显示一组)
+try{ _cfgTab = Number(localStorage.getItem('cfgTab')) || 0; }catch(e){ _cfgTab = 0; }
 
 // 表单分组: p = 配置里的点路径; type 缺省 text | number | password | checkbox | select | list(多行=数组)
 const CFG_GROUPS = [
@@ -235,19 +237,12 @@ const CFG_GROUPS = [
     {p: 'organize.clean_media_names', label: '剥文件名推广块', type: 'checkbox'},
     {p: 'organize.keep_subtitles', label: '保留字幕', type: 'checkbox'},
     {p: 'organize.clean_unresolved', label: '未反查到也清广告', type: 'checkbox'},
-    {p: 'organize.tmm_locked', label: 'NFO 写 tmm_locked', type: 'checkbox'},
     {p: 'organize.wikidata', label: '反查 wikidata Q-id', type: 'checkbox'},
   ]},
   {title: '目录与存储', desc: '本机路径; state 目录放队列, 数据库路径用 MEDIA_AUTO_DB 指定。',
    fields: [
     {p: 'library_root', label: '库根路径'},
     {p: 'state_dir', label: '状态目录'},
-  ]},
-  {title: 'tinyMediaManager', desc: '手动刮削/刷新用的命令(整理已自带 NFO, 通常不需要改)。',
-   fields: [
-    {p: 'tinymediamanager.movie_cmd', label: '电影命令'},
-    {p: 'tinymediamanager.tv_cmd', label: '剧集命令'},
-    {p: 'tinymediamanager.docker_exec', label: 'docker exec 前缀'},
   ]},
 ];
 
@@ -288,12 +283,36 @@ function _cfgField(f){
 }
 function _cfgRender(){
   const box = $('#cfgGroups'); if(!box) return;
-  box.innerHTML = CFG_GROUPS.map(g => `
-    <section class="cfg-group">
-      <h4 class="cfg-gtitle">${esc(g.title)}</h4>
-      ${g.desc ? `<p class="cfg-gdesc">${esc(g.desc)}</p>` : ''}
-      <div class="cfg-grid">${g.fields.map(_cfgField).join('')}</div>
-    </section>`).join('');
+  if(_cfgTab < 0 || _cfgTab >= CFG_GROUPS.length) _cfgTab = 0;
+  // 顶部页签: 一次只显示一组(其余分组仍留在 DOM 里, 保存时一并收集, 隐藏页签的改动不会丢)
+  box.innerHTML = `
+    <nav class="cfg-tabs" id="cfgTabs">
+      ${CFG_GROUPS.map((g, i) => `<button class="${i === _cfgTab ? 'active' : ''}"
+        onclick="cfgSwitchTab(${i})">${esc(g.title)}</button>`).join('')}
+    </nav>
+    <div class="cfg-panels">
+      ${CFG_GROUPS.map((g, i) => `
+      <section class="cfg-group${i === _cfgTab ? ' active' : ''}">
+        <h4 class="cfg-gtitle">${esc(g.title)}</h4>
+        ${g.desc ? `<p class="cfg-gdesc">${esc(g.desc)}</p>` : ''}
+        <div class="cfg-grid">${g.fields.map(_cfgField).join('')}</div>
+      </section>`).join('')}
+    </div>`;
+  cfgScrollTab();
+}
+// 切换配置分组页签(记住上次位置; 隐藏页签里的输入值仍在 DOM, 保存时照常收集)
+function cfgSwitchTab(i){
+  if(!(i >= 0 && i < CFG_GROUPS.length)) return;
+  _cfgTab = i;
+  try{ localStorage.setItem('cfgTab', String(i)); }catch(e){ /* 隐私模式忽略 */ }
+  const box = $('#cfgGroups'); if(!box) return;
+  box.querySelectorAll('.cfg-panels .cfg-group').forEach((s, k) => s.classList.toggle('active', k === i));
+  box.querySelectorAll('.cfg-tabs button').forEach((b, k) => b.classList.toggle('active', k === i));
+  cfgScrollTab();
+}
+function cfgScrollTab(){
+  const btns = document.querySelectorAll('#cfgTabs button');
+  if(btns[_cfgTab] && btns[_cfgTab].scrollIntoView) btns[_cfgTab].scrollIntoView({block: 'nearest', inline: 'center'});
 }
 function _cfgTouch(){
   _cfgDirty = true;
@@ -331,26 +350,12 @@ async function _cfgLoad(){
   }
 }
 function cfgReset(){ if(_cfgData){ _cfgRender(); _cfgDirty = false; const b = $('#cfgBar'); if(b) b.style.display = 'none'; } }
-function cfgAdvToggle(d){
-  const ta = $('#cfgJson');
-  if(d.open && ta && !_cfgDirty) ta.value = JSON.stringify(_cfgData || {}, null, 2);
-  else if(d.open && ta && !ta.value.trim()) ta.value = JSON.stringify(_cfgData || {}, null, 2);
-}
 async function cfgSave(){
   const btn = $('#cfgSaveBtn'); if(btn) btn.disabled = true;
   try{
-    let data;
-    const adv = $('#cfgAdv');
-    if(adv && adv.open){
-      try{ data = JSON.parse($('#cfgJson').value); }
-      catch(e){ toast('JSON 语法错误: ' + e.message); if(btn) btn.disabled = false; return; }
-      if(!data || typeof data !== 'object' || Array.isArray(data)){ toast('配置必须是 JSON 对象'); if(btn) btn.disabled = false; return; }
-    }else{
-      data = _cfgApplyTo(JSON.parse(JSON.stringify(_cfgData || {})));
-    }
+    const data = _cfgApplyTo(JSON.parse(JSON.stringify(_cfgData || {})));
     const r = await api('/api/config', {method: 'PUT', body: JSON.stringify({config: data})});
     toast(r.msg || '已保存');
-    const adv2 = $('#cfgAdv'); if(adv2) adv2.open = false;
     await _cfgLoad();
   }catch(e){
     toast('保存失败: ' + e.message);
@@ -368,24 +373,6 @@ function cfgExport(){
     setTimeout(() => URL.revokeObjectURL(a.href), 3000);
     toast('已导出(文件里含令牌, 注意保管)');
   }).catch(e => toast('导出失败: ' + e.message));
-}
-function cfgImport(input){
-  const file = input.files && input.files[0]; input.value = '';
-  if(!file) return;
-  const rd = new FileReader();
-  rd.onload = () => {
-    try{
-      const data = JSON.parse(rd.result);
-      if(!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('必须是 JSON 对象');
-      _cfgData = data;
-      const adv = $('#cfgAdv');
-      if(adv){ adv.open = true; const ta = $('#cfgJson'); if(ta) ta.value = JSON.stringify(data, null, 2); }
-      else _cfgRender();
-      _cfgTouch();
-      toast('已读入文件, 点「保存配置」写入数据库');
-    }catch(e){ toast('导入失败: ' + e.message); }
-  };
-  rd.readAsText(file);
 }
 
 async function renderGeneral(){
@@ -428,23 +415,16 @@ async function renderGeneral(){
 
     <div class="cfg-head">
       <h3 class="set-h">全部配置</h3>
-      <p class="cfg-note">配置存在数据库里(运行期不读任何配置文件)。
-        改完点底部「保存配置」立即热加载生效, <b>无需重启</b>; 密钥显示为 •••••• 表示未修改。</p>
+      <p class="cfg-note">配置只有两个入口: 首次初始化引导, 和这里。存于数据库, 运行期不读任何配置文件。
+        上方页签切换分组(一次只看一组), 改完点底部「保存配置」立即热加载生效, <b>无需重启</b>;
+        密钥显示为 •••••• 表示未修改。<b>切页签不会丢改动</b>, 保存是一起提交的。</p>
       <div class="cfg-actions">
-        <button class="ghost sm" onclick="cfgExport()">导出 JSON</button>
-        <label class="ghost sm" style="cursor:pointer">导入 JSON
-          <input type="file" accept=".json,application/json" hidden onchange="cfgImport(this)"></label>
+        <button class="ghost sm" onclick="cfgExport()">导出备份</button>
         <span class="cfg-note" id="cfgPath"></span>
       </div>
     </div>
     <div id="cfgGroups"><div class="empty"><span class="spin"></span>加载配置…</div></div>
 
-    <details class="cfg-adv" id="cfgAdv" ontoggle="cfgAdvToggle(this)">
-      <summary>高级 — 直接编辑整份 JSON</summary>
-      <textarea id="cfgJson" spellcheck="false" oninput="_cfgTouch()"></textarea>
-      <p class="cfg-desc">分类目录(categories)、各种 _comment 说明字段也在这里编辑。
-        JSON 语法错误会在保存时被拦下。</p>
-    </details>
 
     <div class="cat-bar" id="cfgBar" style="display:none">
       <span class="cat-barmsg"></span>

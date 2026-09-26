@@ -84,14 +84,9 @@
     "save_path": "",
     "category": ""
   },
-  "tinymediamanager": {
-    "movie_cmd": "movie -u -n -r",
-    "tv_cmd": "tvshow -u -n -r",
-    "docker_exec": "docker exec -i tinymediamanager /app/tinyMediaManager"
-  },
   "library_root": "/Cloud",
   "organize": {
-    "_comment": "离线目录整理: 清广告 → 改名 → 按分类归位到 cloud_root/<分类> → 写 NFO(自带刮削, 让 TMM/Jellyfin 不用再刮)。",
+    "_comment": "离线目录整理: 清广告 → 改名 → 按分类归位到 cloud_root/<分类> → 写 NFO(自带刮削, Jellyfin 直接用)。",
     "enabled": true,
     "_cloud_root": "媒体最终存放位置。/Cloud 下只允许往里移动,禁止删除(保护规则见 clouddrive2.no_delete_paths)。目标 = cloud_root/<categories 里的实际目录名>。",
     "cloud_root": "/Cloud",
@@ -105,8 +100,6 @@
     "rename_media_file": true,
     "_probe_media": "用 MediaInfo 探测编码/分辨率/音轨,写进 NFO 的 <fileinfo> 并生成质量标记。需要 clouddrive2.local_root 指向一个已存在的本地路径(程序不会自动挂载)。",
     "probe_media": true,
-    "_tmm_locked": "NFO 末尾写 <tmm_locked/>, 让 tinyMediaManager 不再改写我们自己生成的 NFO。",
-    "tmm_locked": true,
     "_wikidata": "按 IMDb id 反查 wikidata Q-id 写进 uniqueid(走 Wikidata SPARQL, 失败自动跳过)。",
     "wikidata": true,
     "_on_conflict": "目标目录已存在时: skip(默认,跳过并报告) | merge(把内容并入已有目录,适合同剧补季)。",

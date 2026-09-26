@@ -476,19 +476,15 @@ async def api_organize_finish(body: dict = Body(default={}), cfg: dict = Depends
 
     def _worker():
         try:
-            from scripts import finish as tmm_finish
-            if mode in ("movie", "all"):
-                tmm_finish.run_tmm(cfg, "movie")
-            if mode in ("tv", "all"):
-                tmm_finish.run_tmm(cfg, "tv")
-            tmm_finish.refresh_jellyfin(cfg)
+            from scripts import finish as jf_finish
+            jf_finish.refresh_jellyfin(cfg)
         except Exception:
             pass
 
     # 后台执行(刮削可能很久), 立即返回, 不阻塞网页
     threading.Thread(target=_worker, daemon=True).start()
     return {"ok": True, "mode": mode, "started": True,
-            "msg": "已在后台启动 tMM 刮削 + Jellyfin 刷新, 稍后到 Jellyfin 查看结果"}
+            "msg": "已在后台刷新 Jellyfin, 稍后到 Jellyfin 查看结果"}
 
 
 # ---------------------------------------------------------------------------

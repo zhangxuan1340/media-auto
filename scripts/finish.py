@@ -1,47 +1,24 @@
 #!/usr/bin/env python3
 """
-media-auto / finish —— TinyMediaManager 刮削重命名 + Jellyfin 刷新
+media-auto / finish —— Jellyfin 刷新
 ===============================================================
-下载并归位完成后:
-  1. 跑 tMM 命令行刮削(更新数据源→刮削新增→重命名归位)
-  2. 触发 Jellyfin 媒体库刷新,让新文件入列
+下载并归位完成后触发 Jellyfin 媒体库刷新, 让新文件入列。
+
+tinyMediaManager 已停用(2026-09-26): 刮削/NFO 全部由 scripts/organize.py
+自带生成, 不再调用 tMM; 旧参数仍被接受但无实际作用, 保持命令行兼容。
 
 用法:
-  python3 scripts/finish.py --all            # 电影+剧集都刮,然后刷新 Jellyfin
-  python3 scripts/finish.py --movie --no-refresh
-  python3 scripts/finish.py --refresh-only
+  python3 scripts/finish.py            # 刷新 Jellyfin
+  python3 scripts/finish.py --no-refresh
 """
 import argparse
-import json
 import os
-import subprocess
 import sys
 import urllib.request
 import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 import classify  # noqa: E402
-
-
-def run_tmm(config, which):
-    tmm = config.get('tinymediamanager', {})
-    exec_tmpl = tmm.get('docker_exec', 'docker exec -i tinymediamanager /app/tinyMediaManager')
-    if which == 'movie':
-        cmd_suffix = tmm.get('movie_cmd', 'movie -u -n -r')
-    else:
-        cmd_suffix = tmm.get('tv_cmd', 'tvshow -u -n -r')
-    cmd = f'{exec_tmpl} {cmd_suffix}'
-    print(f'[tMM] {cmd}')
-    try:
-        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
-    except subprocess.TimeoutExpired:
-        print('  ! tMM 超时(>30min)')
-        return False
-    if proc.returncode != 0:
-        print(f'  ! tMM 返回非零: {proc.stderr.strip()[:500]}')
-        return False
-    print('  ✓ tMM 完成')
-    return True
 
 
 def refresh_jellyfin(config):
@@ -68,25 +45,16 @@ def refresh_jellyfin(config):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='tMM 刮削 + Jellyfin 刷新')
-    ap.add_argument('--all', action='store_true', help='电影+剧集')
-    ap.add_argument('--movie', action='store_true')
-    ap.add_argument('--tv', action='store_true')
-    ap.add_argument('--refresh-only', action='store_true', help='只刷 Jellyfin,不跑 tMM')
-    ap.add_argument('--no-scrape', action='store_true')
-    ap.add_argument('--no-refresh', action='store_true')
+    ap = argparse.ArgumentParser(description='Jellyfin 刷新(tMM 已停用, NFO 由 organize 自带生成)')
+    ap.add_argument('--all', action='store_true', help='兼容旧参数, 无实际作用')
+    ap.add_argument('--movie', action='store_true', help='兼容旧参数, 无实际作用')
+    ap.add_argument('--tv', action='store_true', help='兼容旧参数, 无实际作用')
+    ap.add_argument('--refresh-only', action='store_true', help='兼容旧参数')
+    ap.add_argument('--no-scrape', action='store_true', help='兼容旧参数(tMM 已停用)')
+    ap.add_argument('--no-refresh', action='store_true', help='不刷新 Jellyfin')
     args = ap.parse_args()
 
     config = classify.load_config()
-
-    if not args.refresh_only and not args.no_scrape:
-        if args.all or args.movie:
-            run_tmm(config, 'movie')
-        if args.all or args.tv:
-            run_tmm(config, 'tv')
-    elif args.refresh_only:
-        pass
-
     if not args.no_refresh:
         refresh_jellyfin(config)
 

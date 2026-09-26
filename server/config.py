@@ -4,8 +4,8 @@
   get_config()   按 DB 的 updated_at 自动热加载, 每次请求都读到最新值
   save_config()  统一写入口(Web「通用」页 / 分类规则 / qbit 配置都走它)
 
-运行期【只读数据库】: 本模块不读任何配置文件, 配置文件只在首启 lib.config.bootstrap()
-被一次性导入(此后失效)。state/queue.json 固定在 PROJECT_ROOT/state/,与配置文件无关。
+运行期【只读数据库】, 不读任何配置文件; 配置只有两个入口: 首次初始化引导 + 「管理 → 通用」页。
+state/queue.json 固定在 PROJECT_ROOT/state/。
 """
 import copy
 import sys
