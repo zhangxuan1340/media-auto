@@ -273,6 +273,8 @@ function cardHTML(it, idx){
     libBadge(it),
     (it.missingCount!=null && it.missingCount>0) ? `<span class="badge err">缺${it.missingCount}集</span>` : '',
     (it.extraCount!=null && it.extraCount>0) ? `<span class="badge warn">多${it.extraCount}集</span>` : '',
+    // numbersSynced=false: TMDB 真实集号还没同步 → 后端不报缺/多(不猜), 这里如实提示
+    it.numbersSynced === false ? '<span class="badge warn" title="TMDB 真实集号同步中, 暂不判断缺/多">集号待同步</span>' : '',
     it.inProduction ? '<span class="badge pend">在播</span>' : '',
   ].filter(Boolean).join('');
   return `<div class="card" style="--i:${idx%12}" onclick="openCardIdx(${idx})">

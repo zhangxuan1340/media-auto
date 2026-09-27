@@ -204,11 +204,15 @@ function renderDetailLocal(d, kind, tmdbId){
     // 逐季折叠: 每季一条(完整=绿勾, 不完整=进度横条), 点开看逐集(拥有打勾/缺失空圈)
     const seasonBlocks = d.seasons.map(s=>{
       const S = String(s.number).padStart(2,'0');
-      const complete = s.missing===0 && s.expected>0;
+      // numbersKnown=false: 该季没有 TMDB 真实集号 → 不猜缺/多, 显示"编号未同步"
+      const known = s.numbersKnown !== false;
+      const complete = known && s.missing===0 && s.expected>0;
       const pct = s.expected>0 ? Math.round(s.have/s.expected*100) : 0;
-      const barColor = complete ? 'var(--ok)' : (s.have>0 ? 'var(--warn)' : 'var(--err)');
+      const barColor = !known ? 'var(--muted)' : (complete ? 'var(--ok)' : (s.have>0 ? 'var(--warn)' : 'var(--err)'));
       const autoOpen = !!(s.inProduction && s.missing>0);   // 在播且缺集: 默认展开(与自动扫种子联动)
-      const missingTag = s.missing>0 ? `<span class="badge err">缺${s.missing}</span>` : (complete?'<span class="badge ok">完整</span>':'');
+      const missingTag = !known
+        ? '<span class="badge warn" title="TMDB 真实集号尚未同步, 暂不判断缺/多(避免误报)">编号未同步</span>'
+        : (s.missing>0 ? `<span class="badge err">缺${s.missing}</span>` : (complete?'<span class="badge ok">完整</span>':''));
       return `<div class="seas" id="seas-${s.number}" data-open="${autoOpen?'1':'0'}">
         <div class="seas-head" onclick="toggleSeason(${tmdbId},${s.number},this)">
           <span class="seas-check${complete?' ok':''}">${icon('check')}</span>
@@ -226,7 +230,7 @@ function renderDetailLocal(d, kind, tmdbId){
         </div></div>`;
     }).join('');
     seasonHTML = `<h3>${icon('tv')}分集状态(本地 Jellyfin vs TMDB)</h3>
-      <div class="seas-summary">已有 ${d.haveEpisodes} 集 / 应有 ${d.tmdbEpisodes} 集${d.missingCount?` · <span style="color:var(--err)">缺 ${d.missingCount} 集</span>`:''}${d.extraCount?` · <span style="color:var(--warn)">多 ${d.extraCount} 集(版本差异)</span>`:''} · 点季展开逐集明细</div>
+      <div class="seas-summary">已有 ${d.haveEpisodes} 集 / 应有 ${d.tmdbEpisodes} 集${d.numbersSynced===false?` · <span class="badge warn" title="TMDB 真实集号尚未同步, 暂不判断缺/多(避免误报)">编号未同步</span>`:''}${d.missingCount?` · <span style="color:var(--err)">缺 ${d.missingCount} 集</span>`:''}${d.extraCount?` · <span style="color:var(--warn)">多 ${d.extraCount} 集(版本差异)</span>`:''} · 点季展开逐集明细</div>
       ${seasonBlocks}`;
     // 默认展开的季(在播且缺集): 立即加载逐集; 自动扫种子(最多 2 个, 避免一次打太多搜索)
     // ⚠️ 函数名是 scanSeasonSeads(与定义/手动按钮 onclick 一致), 不是 Seeds

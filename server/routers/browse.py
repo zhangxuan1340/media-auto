@@ -202,41 +202,68 @@ def _media_card(r, in_lib: bool, blocked: bool, complete: bool, extra=None):
     return d
 
 
+def _real_numbers(season_row):
+    """该季 TMDB 真实集号(已回填的 tmdb_season.episode_numbers)。没有则返回 None。"""
+    if not season_row.episode_numbers:
+        return None
+    try:
+        nums = json.loads(season_row.episode_numbers)
+        if nums:
+            return {int(n) for n in nums}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _series_missing(tmdb_id, seasons, s_map, ep_map, check_s0=False):
-    """单部剧的分集缺失: 返回 (missing_count, extra_count, per_season, have_eps, tmdb_eps)。
+    """单部剧的分集缺失: 返回 (missing_count, extra_count, per_season, have_eps,
+    tmdb_eps, numbers_synced)。
 
     s_map: {series_item_id: tmdb_id_str}; ep_map: {series_item_id: set((season,episode))}。
     由调用方预计算一次传入, 避免 O(n²) 重复查全表。
     check_s0: 开启时特别篇(S00)也计入作品级缺失(默认关, 与历史口径一致)。
+
+    ⚠️ **没有真实集号就不猜**(2026-09-27 定的口径: 猜错缺/多, 问题就大了)。单季判定:
+      ① 有 TMDB 真实集号(episode_numbers 已回填)→ 逐集精确比对;
+      ② 本地该季一集都没有 → 缺全季(集数来自 TMDB, 任何编号方案下都成立);
+      ③ 本地实有集号与「绝对集号区间」**完全一致** → 缺0/多0(完全对齐才敢下结论);
+      ④ 其余(未回填又无法确证)→ 该季 numbersKnown=False, **不计入缺/多**;
+         只要有季不可确证, 作品级 missing_count = None(前端显示"编号未同步")。
+    绝不拿 1..count 估算去报"缺N"(火影疾风传 缺468多468 就是这么来的)。
     """
     # 找这部剧对应的 series item_id
     series_ids = [iid for iid, tid in s_map.items() if str(tid) == str(tmdb_id)]
     have = set()
     for iid in series_ids:
         have |= ep_map.get(iid, set())
-    have_total = len(have)
     abs_ranges = _abs_season_ranges(seasons) if seasons else {}
     per_season, missing_count, extra_count, have_eps, tmdb_eps = [], 0, 0, 0, 0
+    numbers_synced = True
     for se in seasons:
-        exp = _season_expected_numbers(se)
-        # 实有该季的集
+        est = _season_expected_numbers(se)     # 估算: 只用于「应有集数」展示与缺全季计数
+        real = _real_numbers(se)               # TMDB 真实集号 | None
+        alt = abs_ranges.get(se.season_number)
         have_se = {e for (s, e) in have if s == se.season_number}
-        # ⚠️ 编号方案兜底: episode_numbers 未回填时估算只有 1..count, 而 TMDB 对长篇剧
-        #    用**绝对集号**(火影疾风传 S02=33..53), 本地 Jellyfin 同源亦然 → 实有集号
-        #    全落在估算之外, 每季都被误报成"缺N多N"(Seerr 却显示完整)。
-        #    实有集号有落在估算之外的、且整体落在「绝对集号区间」内 → 改用绝对区间再比。
-        if not se.episode_numbers and have_se and (have_se - exp):
-            alt = abs_ranges.get(se.season_number)
-            if alt and have_se.issubset(alt):
-                exp = alt
-        miss = exp - have_se
-        extra = have_se - exp
+        if real is not None:
+            exp, known = real, True                                    # ①
+        elif not have_se:
+            exp, known = est, True                                     # ②
+        elif alt is not None and have_se == alt:
+            exp, known = alt, True                                     # ③
+        else:
+            exp, known = est, False                                    # ④
+        miss = (exp - have_se) if known else set()
+        extra = (have_se - exp) if known else set()
         per_season.append({
             "number": se.season_number, "name": se.name,
             "expected": len(exp), "have": len(have_se),
-            "missing": len(miss), "extra": len(extra),
+            "missing": len(miss) if known else 0,
+            "extra": len(extra) if known else 0,
+            "numbersKnown": known,
             "inProduction": bool(se.in_production),
-            "missingEpisodes": sorted(miss), "extraEpisodes": sorted(extra),
+            # 集号清单只有真实集号在手才给(否则给的也是猜的)
+            "missingEpisodes": sorted(miss) if (known and real is not None) else [],
+            "extraEpisodes": sorted(extra) if (known and real is not None) else [],
         })
         if se.season_number == 0 and not check_s0:
             # 特别篇(S00): 季行照常显示(进剧集详情可见缺哪集), 但**不计入作品级缺失**
@@ -245,93 +272,47 @@ def _series_missing(tmdb_id, seasons, s_map, ep_map, check_s0=False):
             continue
         tmdb_eps += len(exp)
         have_eps += len(have_se)
-        missing_count += len(miss)
-        extra_count += len(extra)
-    return missing_count, extra_count, per_season, have_eps, tmdb_eps
-
-
-_hydrate_backoff: dict = {}   # {tmdb_id: ts} 回填失败退避(TMDB 挂了别每次开详情都重试)
-_HYDRATE_BACKOFF = 600
+        if known:
+            missing_count += len(miss)
+            extra_count += len(extra)
+        else:
+            numbers_synced = False
+    if not numbers_synced:
+        # 有季无法确证 → 作品级不报缺/多(与 jf_episode 未同步同一降级口径)
+        missing_count = None
+        extra_count = 0
+    return missing_count, extra_count, per_season, have_eps, tmdb_eps, numbers_synced
 
 
 async def _hydrate_episode_numbers(cfg, tmdb_id) -> int:
-    """给该剧中缺 tmdb_season.episode_numbers 的季, 回填 TMDB 真实集号并落库。
+    """回填该剧中缺 tmdb_season.episode_numbers 的季(实现在 lib/episode_numbers)。
 
-    「缺N/多N」精确到集的前提就是这份集号; 只有同步存了 episode_count,
-    没存集号时只能按 1..count 估算 → 遇到绝对集号的长篇剧会整部误判
-    (《火影忍者:疾风传》缺468多468, 2026-09-27)。并发拉取, 一次回填永久缓存;
-    失败不抛(上层退到估算 + _series_missing 的绝对集号兜底)。
+    没有真实集号就不猜缺失(「未回填 + 兜底不适用 → 编号未同步」), 所以开详情/
+    缺失明细时先补集号: 一次回填永久缓存, 失败 600s 退避, 不阻断页面。
     """
-    if not (cfg.get("tmdb", {}) or {}).get("api_key"):
-        return 0
-    ts = _hydrate_backoff.get(tmdb_id)
-    if ts and time.time() - ts < _HYDRATE_BACKOFF:
-        return 0
-    from clients.tmdb import client as tmdb
-
-    def _pending():
-        s = SessionLocal()
-        try:
-            return [se.season_number for se in repo.get_tmdb_seasons(s, tmdb_id)
-                    if not se.episode_numbers]
-        finally:
-            s.close()
-
-    pend = await run_in_threadpool(_pending)
-    if not pend:
-        return 0
-    sem = asyncio.Semaphore(4)   # 别把 TMDB 限流打爆(长篇剧一季一拉)
-
-    async def _one(sn):
-        async with sem:
-            eps = await tmdb.season_episodes(cfg, tmdb_id, sn)
-        return sn, [e.get("episode") for e in (eps or []) if e.get("episode") is not None]
-
-    try:
-        got = await asyncio.gather(*(_one(sn) for sn in pend))
-    except Exception:  # noqa: BLE001
-        _hydrate_backoff[tmdb_id] = time.time()
-        return 0
-    filled = {sn: nums for sn, nums in got if nums}
-    if len(filled) < len(pend):
-        _hydrate_backoff[tmdb_id] = time.time()   # 有季没拉到 → 整体稍后重试
-    if not filled:
-        return 0
-
-    def _save():
-        s = SessionLocal()
-        try:
-            n = 0
-            for se in repo.get_tmdb_seasons(s, tmdb_id):
-                if se.season_number in filled and not se.episode_numbers:
-                    se.episode_numbers = json.dumps(filled[se.season_number])
-                    n += 1
-            if n:
-                s.commit()
-            return n
-        finally:
-            s.close()
-
-    return await run_in_threadpool(_save)
+    from lib import episode_numbers as epnums
+    return await epnums.hydrate_show(cfg, tmdb_id)
 
 
 def _persist_episode_numbers(tmdb_id, season_number, nums):
-    """把一季的真实集号落库(展开分集明细时的副产品, 不额外打 TMDB)。"""
-    if not nums:
-        return 0
+    """展开某季时顺手落库真实集号(0 额外 TMDB 请求; 实现在 lib/episode_numbers)。"""
+    from lib import episode_numbers as epnums
+    return epnums.persist_season_numbers(tmdb_id, season_number, nums)
+
+
+def _in_library_series(tmdb_id) -> bool:
+    """本地 Jellyfin 有没有这部剧(Series 项带该 TMDB ID)。
+
+    详情页只给在库剧回填集号 —— 没看过的剧本地无分集, 逐季规则②本来就会判
+    「已知、不报缺」, 再去 TMDB 拉集号是白花请求(刷热门/搜索时详情开得很勤)。
+    口径与 get_series_tmdb_map 同源, 不会漏掉能算缺失的剧。
+    """
     s = SessionLocal()
     try:
-        from db.models import TmdbSeason
-        se = (s.query(TmdbSeason)
-              .filter_by(tmdb_id=tmdb_id, season_number=season_number).first())
-        if se and not se.episode_numbers:
-            se.episode_numbers = json.dumps(nums)
-            s.commit()
-            return 1
-        return 0
-    except Exception:  # noqa: BLE001
-        s.rollback()
-        return 0
+        return (s.query(JellyfinItem.item_id)
+                .filter(JellyfinItem.type == "Series",
+                        JellyfinItem.tmdb_id == str(tmdb_id))
+                .first() is not None)
     finally:
         s.close()
 
@@ -687,6 +668,7 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
             tmdb_eps = sum(len(_season_expected_numbers(se)) for se in seasons
                            if (se.season_number != 0) or check_s0)
             d["episodesSynced"] = False
+            d["numbersSynced"] = False
             d["seasons"] = []
             d["haveEpisodes"] = 0
             d["tmdbEpisodes"] = tmdb_eps
@@ -695,13 +677,14 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
         else:
             s_map = _series_item_to_tmdb(s)
             ep_map = _jf_episode_map(s)
-            mc, xc, per_season, have_eps, tmdb_eps = _series_missing(
+            mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
                 tmdb_id, seasons, s_map, ep_map, check_s0)
             d["episodesSynced"] = True
+            d["numbersSynced"] = nsync    # False = 有季没有 TMDB 真实集号 → 不报缺/多
             d["seasons"] = per_season
             d["haveEpisodes"] = have_eps
             d["tmdbEpisodes"] = tmdb_eps
-            d["missingCount"] = mc
+            d["missingCount"] = mc        # numbersSynced=False 时为 None
             d["extraCount"] = xc
     return d
 
@@ -710,9 +693,11 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
 async def browse_detail(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
     """详情弹窗数据(本地缓存)。含 分集缺失信息(剧集)。未缓存返回 404(前端会转现拉)。"""
     if kind == "tv":
-        # 缺 episode_numbers 的季先回填真实集号(否则缺失对比退化成 1..count 估算,
-        # 遇绝对集号的长篇剧会误报"缺N多N")。已回填的剧不发请求。
-        await _hydrate_episode_numbers(cfg, tmdb_id)
+        # 缺 episode_numbers 的季先回填 TMDB 真实集号 —— 没有真实集号就不报缺/多
+        # (「编号未同步」)。已回填的剧不发任何请求; 不在库的剧不用回填(本地无分集
+        # 本来就不报缺), 刷热门/搜索时详情开得勤, 别白打 TMDB。
+        if await run_in_threadpool(_in_library_series, tmdb_id):
+            await _hydrate_episode_numbers(cfg, tmdb_id)
     def _q():
         s = SessionLocal()
         try:
@@ -872,12 +857,18 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
     }
     if kind == "tv":
         # 分集缺失与缓存路径同算法(TMDB 应有集 vs Jellyfin 实有集); 特别篇不计作品级
+        if await run_in_threadpool(_in_library_series, tmdb_id):
+            # 在库剧先把 TMDB 真实集号回填进来, 否则这条现拉详情只敢显示「编号未同步」
+            await _hydrate_episode_numbers(cfg, tmdb_id)
         try:
             tseasons = await tmdb.all_seasons(cfg, tmdb_id) or []
         except Exception:  # noqa: BLE001
             tseasons = []
         s = SessionLocal()
         try:
+            # 回填后的真实集号(现拉的季对象本身不带 episode_numbers)
+            persisted = {x.season_number: (x.episode_numbers or "")
+                         for x in repo.get_tmdb_seasons(s, tmdb_id)}
             s_map = _series_item_to_tmdb(s)
             ep_map = _jf_episode_map(s)
             check_s0 = repo.get_setting(s, "check_missing_s0", "false") == "true"
@@ -887,14 +878,16 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
                     self.season_number = number
                     self.name = name
                     self.episode_count = count
-                    self.episode_numbers = ""
+                    self.episode_numbers = persisted.get(number, "")
                     self.in_production = in_prod
 
             seasons = [_TS(t.get("number") or 0, t.get("name", ""),
                            t.get("episodes") or t.get("episode_count") or 0,
                            bool(t.get("in_production"))) for t in tseasons]
-            mc, xc, per_season, have_eps, tmdb_eps = _series_missing(tmdb_id, seasons, s_map, ep_map, check_s0)
-            d.update(episodesSynced=True, seasons=per_season, haveEpisodes=have_eps,
+            mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
+                tmdb_id, seasons, s_map, ep_map, check_s0)
+            d.update(episodesSynced=True, numbersSynced=nsync, seasons=per_season,
+                     haveEpisodes=have_eps,
                      tmdbEpisodes=tmdb_eps, missingCount=mc, extraCount=xc)
         finally:
             s.close()
@@ -1107,9 +1100,10 @@ async def missing(kind: str = Query("tv"), cfg: dict = Depends(get_config)):
                                                   "tmdbEpisodes": sum(len(_season_expected_numbers(se)) for se in seasons
                                                                       if (se.season_number != 0) or check_s0),
                                                   "seasonCount": len(seasons),
+                                                  "numbersSynced": False,
                                                   "episodesSynced": False}))
                     continue
-                mc, xc, per_season, have_eps, tmdb_eps = _series_missing(
+                mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
                     r.tmdb_id, seasons, s_map, ep_map, check_s0)
                 if mc == 0 and xc == 0 and hide_complete:
                     continue
@@ -1118,12 +1112,56 @@ async def missing(kind: str = Query("tv"), cfg: dict = Depends(get_config)):
                                               "haveEpisodes": have_eps,
                                               "tmdbEpisodes": tmdb_eps,
                                               "seasonCount": len(seasons),
+                                              "numbersSynced": nsync,
                                               "episodesSynced": True}))
             out.sort(key=lambda x: (-(x["missingCount"] or 0), x["inLibrary"], x["title"]))
             return out
         finally:
             s.close()
-    return await run_in_threadpool(_q)
+    result = await run_in_threadpool(_q)
+    # 有剧还缺 TMDB 真实集号 → 后台补(不阻塞本请求; 稳态 0 请求)。
+    # 没有真实集号的剧在本轮只显示"编号未同步", 不报缺/多。
+    await _kick_numbers_hydration(cfg)
+    return result
+
+
+_hydrate_task = None   # 全局: 同一时刻只跑一个后台回填任务
+_HYDRATE_BATCH = 200   # 每次请求最多给多少部剧排回填(大库别一次打爆 TMDB, 多开几次补齐)
+
+
+def _ids_needing_hydration():
+    """在库剧里仍缺 TMDB 集号的 tmdb_id 列表(只查库, 无网络), 最多 _HYDRATE_BATCH 个。"""
+    from lib import episode_numbers as epnums
+    s = SessionLocal()
+    try:
+        ids = set()
+        for tid in repo.get_series_tmdb_map(s).values():
+            try:
+                ids.add(int(tid))
+            except (TypeError, ValueError):
+                continue
+        return epnums.shows_needing_hydration(ids)[:_HYDRATE_BATCH]
+    finally:
+        s.close()
+
+
+async def _kick_numbers_hydration(cfg):
+    """后台回填在库剧的集号(一次补齐; 已在跑或无待补时什么都不做)。"""
+    global _hydrate_task
+    if _hydrate_task is not None and not _hydrate_task.done():
+        return
+    ids = await run_in_threadpool(_ids_needing_hydration)
+    if not ids:
+        return
+    from lib import episode_numbers as epnums
+
+    async def _bg():
+        try:
+            await epnums.hydrate_many(cfg, ids)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _hydrate_task = asyncio.create_task(_bg())
 
 
 @router.get("/jf-episodes-status")
@@ -1160,13 +1198,14 @@ async def missing_episodes_detail(tmdb_id: int, cfg: dict = Depends(get_config))
             s_map = _series_item_to_tmdb(s)
             ep_map = _jf_episode_map(s)
             check_s0 = repo.get_setting(s, "check_missing_s0", "false") == "true"
-            mc, xc, per_season, have_eps, tmdb_eps = _series_missing(
+            mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
                 tmdb_id, seasons, s_map, ep_map, check_s0)
             return {
                 "tmdbId": tmdb_id, "title": media.title,
                 "inLibrary": str(tmdb_id) in _jf_in_library_ids(s, "tv"),
                 "haveEpisodes": have_eps, "tmdbEpisodes": tmdb_eps,
                 "missingCount": mc, "extraCount": xc,
+                "numbersSynced": nsync,
                 "seasons": per_season,
             }
         finally:
