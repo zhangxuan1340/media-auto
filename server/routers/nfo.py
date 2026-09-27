@@ -11,7 +11,6 @@
   - 电影 NFO = <视频文件名去扩展名>.nfo; 剧集 NFO = tvshow.nfo
 NFO 格式对齐 TMM 5.2.12(JELLYFIN 口径), 见 lib/nfo.py。
 """
-import json
 import os
 import re
 import time
@@ -217,49 +216,22 @@ def _fmt_write_time(wt):
 # 元数据构建(更新 NFO 用)
 # ---------------------------------------------------------------------------
 def _build_meta(config, kind, tmdb_id):
-    """取 NFO 所需的完整元数据: TMDB 直连优先, 失败回退本地缓存行。
+    """取 NFO 所需的完整元数据: **只走 TMDB 直连, 没有任何本地回退**。
 
-    返回的 meta 形状与 lib/nfo.build_*_nfo 完全对齐(与 organize.resolve_full_meta 同口径)。"""
-    meta = None
-    if (config.get("tmdb", {}) or {}).get("api_key"):
-        try:
-            meta = tmdb.detail_sync(config, kind, tmdb_id)
-        except Exception:  # noqa: BLE001
-            meta = None
-
+    铁律(用户要求): NFO 生成不许读本地缓存行 —— TMDB 取不到就让「更新 NFO」直接
+    报错失败, 宁可不写, 也不把可能过期的本地数据写进 /Cloud。
+    返回的 meta 形状与 lib/nfo.build_*_nfo 完全对齐(与 organize.resolve_full_meta 同口径)。
+    失败抛 HTTPException 502(可读原因)。"""
+    if not (config.get("tmdb", {}) or {}).get("api_key"):
+        raise HTTPException(502, "未配置 TMDB api_key — 无法直连生成 NFO(不回退本地缓存)")
+    try:
+        meta = tmdb.detail_sync(config, kind, tmdb_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            502, f"TMDB 直连获取元数据失败(不回退本地缓存): {str(e)[:200]}") from e
     if not meta:
-        # 回退: 本地 TmdbMedia 行(展示/分类口径同 organize)
-        s = SessionLocal()
-        try:
-            m = repo.get_tmdb_media_by_id(s, kind, tmdb_id)
-            if m:
-                meta = {
-                    "tmdb_id": m.tmdb_id, "imdb_id": m.imdb_id or "",
-                    "tvdb_id": m.tvdb_id or None, "title": m.title or "",
-                    "originalTitle": m.original_title or "", "year": m.year or "",
-                    "vote": m.vote or 0, "vote_count": 0,
-                    "certification": m.certification or "",
-                    "genres": [g for g in (m.genre_names or "").split(",") if g],
-                    "countries": [c for c in (m.countries or "").split(",") if c],
-                    "languages": [m.original_language] if m.original_language else [],
-                    "studios": _json_list(m.studios_json),
-                    "cast": _json_list(m.cast_json),
-                    "directors": _json_list(m.directors_json),
-                    "producers": [], "keywords": _json_list(m.keywords_json),
-                    "runtime": m.runtime or 0, "premiered": m.premiered or "",
-                    "end_date": m.end_date or "", "status": m.status or "",
-                    "overview": m.overview or "", "tagline": "",
-                    "trailer": "", "collection": None, "seasons": [],
-                    "english_title": m.english_title or "", "kind": m.kind,
-                }
-                if kind == "tv":
-                    meta["seasons"] = [{"number": ss.season_number, "name": ss.name or ""}
-                                       for ss in repo.get_tmdb_seasons(s, tmdb_id)]
-        finally:
-            s.close()
-
-    if not meta:
-        return None
+        raise HTTPException(
+            502, f"TMDB 直连未返回数据(kind={kind}, tmdb_id={tmdb_id}) — 不写 NFO")
 
     # 英文名(?language=en): TMM 的 <english_title> 取这个
     if not meta.get("english_title") and (config.get("tmdb", {}) or {}).get("api_key"):
@@ -268,18 +240,10 @@ def _build_meta(config, kind, tmdb_id):
         except Exception:  # noqa: BLE001
             meta["english_title"] = ""
 
-    # 剧集 seasons 兜底(本地表有但直连没带时)
-    if kind == "tv" and not meta.get("seasons"):
-        s = SessionLocal()
-        try:
-            meta["seasons"] = [{"number": ss.season_number, "name": ss.name or ""}
-                               for ss in repo.get_tmdb_seasons(s, tmdb_id)]
-        finally:
-            s.close()
-
     # 中文标题兜底(手动覆盖 > 豆瓣国内译名 > TMDB 台/港译名)。
     # 直连 TMDB 拿到的 title 可能是英文, 且会绕过本地行,不补一次「更新 NFO」会把
     # 英文标题写回库里(2026-09-26 实测 Bad Sisters)。
+    # 只动 title 一个键, 其余元数据仍原样来自 TMDB 直连。
     titles.apply_to_meta(config, kind, tmdb_id, meta)
     return meta
 
@@ -370,6 +334,34 @@ def _original_filename(config, folder_path, nfo_name, video):
     return None
 
 
+def _probe_fileinfo(config, folder_path, video):
+    """现场探测一次媒体文件, 返回 (<fileinfo> XML 片段, 原因)。
+
+    只给【现有 NFO 没有 <fileinfo> 的存量条目】用 —— 整理时 WebDAV 通常只开 /Temp,
+    入库后想补流信息就只能靠 local_root 挂载或 WebDAV 覆盖到 /Cloud。
+    读不到返回 (None, 可读原因), 调用方原样带回给前端, 不写空标签也写不出假数据。
+    """
+    if not video or not video.get("name"):
+        return None, "目录里没有视频文件"
+    try:
+        timeout = int((config.get("webdav") or {}).get("timeout") or 180)
+    except Exception:  # noqa: BLE001
+        timeout = 180
+    notes = []
+
+    def _log(msg):
+        notes.append(str(msg).strip().lstrip("⚠").strip())
+
+    path = folder_path.rstrip("/") + "/" + video["name"]
+    try:
+        info = mediainfo.probe(path, config, timeout=timeout, log=_log)
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)[:200]
+    if not info:
+        return None, (" / ".join(n for n in notes if n)[:300] or "本地挂载与 WebDAV 都读不到该文件")
+    return mediainfo.streamdetails_xml(info, indent="  "), ""
+
+
 # ---------------------------------------------------------------------------
 # 端点
 # ---------------------------------------------------------------------------
@@ -394,9 +386,15 @@ async def nfo_info(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
                     "note": "尚未生成 NFO"}
         wt = it.get("writeTime")
         name = it.get("name") or nfo_name
+        # has_fileinfo: 电影的 <fileinfo> 是否已有内容 —— 前端据此决定「更新 NFO」要不要
+        # 带 probe=1 现场补探测(剧集 tvshow.nfo 本来就不写 fileinfo → 恒 True 不触发)。
+        has_fileinfo = True
+        if kind == "movie":
+            video = _largest_video(_safe_subfiles(cfg, folder_path))
+            has_fileinfo = bool(_fileinfo(cfg, folder_path, name, video))
         return {"exists": True, "updated_at": wt or "", "updated_at_text": _fmt_write_time(wt),
                 "path": it.get("fullPathName") or (folder_path + "/" + name),
-                "name": name, "note": ""}
+                "name": name, "note": "", "has_fileinfo": has_fileinfo}
     try:
         return await run_in_threadpool(_q)
     except HTTPException:
@@ -407,12 +405,15 @@ async def nfo_info(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
 
 
 @router.post("/nfo/update/{kind}/{tmdb_id}")
-async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
+async def nfo_update(kind: str, tmdb_id: int, probe: bool = False,
+                     cfg: dict = Depends(get_config)):
     """手动重新生成 NFO 并写回 /Cloud(走 cd2.write_file 的中转+Overwrite, 不删任何东西)。
 
-    刷新的是 TMDB 元数据(类型/分类/ID/演员导演); <fileinfo> 只【沿用现有 NFO】里
-    已有的(本地挂载读 → WebDAV GET 读), 读不到则留空, 绝不重新探测媒体 —— 流信息是
-    媒体物理属性, 应由整理(organize)负责, 不该在元数据刷新时改动。返回写入结果 + 新的更新时间。"""
+    刷新的是 TMDB 元数据(类型/分类/ID/演员导演); <fileinfo> 默认【沿用现有 NFO】里
+    已有的(本地挂载读 → WebDAV GET 读), 读不到则留空, 绝不擅自改写已有的流信息 ——
+    流信息是媒体物理属性, 应由整理(organize)负责。probe=1 时额外一次机会: 现有 NFO
+    压根没有 <fileinfo> 的存量条目, 现场探测一次补上(读不到照旧留空, 并带回原因)。
+    返回写入结果 + 新的更新时间 + {probed, probe_error}。"""
     if kind not in ("movie", "tv"):
         raise HTTPException(400, "kind 仅支持 movie / tv")
 
@@ -420,16 +421,21 @@ async def nfo_update(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
         folder_path, nfo_name, folder_name, _cloud = _locate(cfg, kind, tmdb_id)
         if not folder_path or not nfo_name:
             raise HTTPException(404, "找不到媒体所在目录(可能尚未整理入库)")
-        return _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name)
+        return _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name,
+                            probe=probe)
 
     return await run_in_threadpool(_q)
 
 
-def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name):
+def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=False):
     """生成 NFO 并写回 folder_path(目录必须已存在), 返回写入结果。
 
     「更新 NFO」与「按新标题重命名」共用;失败抛 HTTPException。
     目录不存在/不可达给可读 404, 而不是让 CD2 的 NOT_FOUND 炸成 500 堆栈。
+
+    probe=True(仅电影): 现有 NFO 没有 <fileinfo> 时现场探测一次补上 —— 存量条目
+    整理时没探到(容器缺 ffprobe / WebDAV 只开 /Temp)就靠这个补。已有 <fileinfo> 一律
+    沿用不动(与整理一致: 流信息是物理属性, 不在元数据刷新时改写)。
     """
 
     try:
@@ -454,7 +460,7 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name):
 
     meta = _build_meta(cfg, kind, tmdb_id)
     if not meta:
-        raise HTTPException(502, "无法获取元数据(TMDB 不可达且本地无缓存)")
+        raise HTTPException(502, "无法获取元数据(TMDB 直连未返回, 不回退本地缓存)")
 
     # 非阻塞冲突提示: 更新端点 ID 已钉死(来自 URL/本地缓存),不存在整理侧"反查错配"
     # 的根因,故冲突时【不拒写】,仅记日志 + 在响应带 warning 字段提醒用户 TMDB 可能与库内不一致
@@ -475,18 +481,28 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name):
         cache = os.path.join(PROJECT_ROOT, "state", "wikidata_cache.json")
         wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
     dateadded = time.time()
+    probed, probe_error = False, ""
 
     if kind == "tv":
         xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata,
                                        dateadded=dateadded)
     else:
         streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
-        source = mediainfo.guess_source(video.get("name")) if video else ""
+        if probe and not streamdetails:
+            streamdetails, probe_error = _probe_fileinfo(cfg, folder_path, video)
+            probed = bool(streamdetails)
+            if probed:
+                print(f"    ✓ NFO 存量补探测成功: {nfo_name} ({len(streamdetails)} 字节 <fileinfo>)")
+            else:
+                print(f"    ⚠ NFO 存量补探测失败: {probe_error}")
         # <original_filename> 沿用现有 NFO 里的(整理写的是改名前原始发布名),
         # 读不到才回退当前视频名(新建 NFO 场景)
         orig = _original_filename(cfg, folder_path, nfo_name, video)
         if not orig:
             orig = video.get("name") if video else ""
+        # 片源用【改名前】的原始发布名猜: 当前视频名已是 '标题 (年份) 2160p h265',
+        # UHD.BluRay 这类字样丢了 → 会猜成 NONE
+        source = mediainfo.guess_source(orig) if orig else ""
         xml = nfo_mod.build_movie_nfo(meta, info=None, streamdetails=streamdetails,
                                       source=source, original_filename=orig,
                                       dateadded=dateadded, wikidata=wikidata)
@@ -496,4 +512,5 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name):
     wt = it.get("writeTime") if it else ""
     return {"ok": True, "path": nfo_path, "name": nfo_name,
             "bytes": written, "updated_at": wt or "",
-            "updated_at_text": _fmt_write_time(wt), "warning": warning}
+            "updated_at_text": _fmt_write_time(wt), "warning": warning,
+            "probed": probed, "probe_error": probe_error}

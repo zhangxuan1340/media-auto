@@ -1489,10 +1489,11 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
         path = final_dir.rstrip("/") + "/tvshow.nfo"
     else:
         media = plan.get("media") or []
-        source = ""
-        if media:
-            from lib import mediainfo  # noqa: WPS433
-            source = mediainfo.guess_source(media[0]["name"])
+        # 片源用【改名前】的原始文件名猜: 到这一步 media[0]["name"] 已经被改成
+        # '标题 (年份) 2160p h265', UHD.BluRay 这类片源字样丢了 → 会猜成 NONE
+        from lib import mediainfo  # noqa: WPS433
+        source = mediainfo.guess_source(
+            plan.get("origin_filename") or (media[0]["name"] if media else ""))
         orig = plan.get("origin_filename") or ""
         xml = nfo_mod.build_movie_nfo(meta, info=info, source=source,
                                       original_filename=orig, dateadded=dateadded,
@@ -1508,8 +1509,35 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
 
 
 
-# 执行期缓存: (kind, tmdb_id) -> 完整元数据。同一轮里避免重复请求。
+# 执行期缓存: (kind, tmdb_id) -> (完整元数据, 取到的时间戳)。
+# 只为「同一轮整理里预览/执行重复解析同一条」去重 —— **必须带 TTL**:
+# 服务可能数周不重启, 进程内 dict 不会自己清空, 没有 TTL 就会把一个月前的
+# TMDB 响应一直复用(用户点名的新旧风险)。超过 TTL 一律重新直连 TMDB。
+#
+# 不设"条数上限": 条数上限会把同一轮里不同条目互相挤掉(处理第 501 部时踢掉第 1 部,
+# 纯属误伤)。改为**落新条目时顺手清一遍过期的** —— 字典里永远只留 10 分钟内创建的,
+# 规模自然等于"最近一轮处理过的条目数", 既不堆积也不误挤。
 _FULL_META_CACHE = {}
+_FULL_META_TTL = 600      # 10 分钟: 一轮整理绰绰有余, 又不会跨天复用旧数据
+
+
+def _full_meta_get(key):
+    hit = _FULL_META_CACHE.get(key)
+    if not hit:
+        return None
+    meta, ts = hit
+    if time.time() - ts > _FULL_META_TTL:
+        _FULL_META_CACHE.pop(key, None)
+        return None
+    return meta
+
+
+def _full_meta_put(key, meta):
+    now = time.time()
+    for k, (_m, ts) in list(_FULL_META_CACHE.items()):
+        if now - ts > _FULL_META_TTL:
+            _FULL_META_CACHE.pop(k, None)
+    _FULL_META_CACHE[key] = (meta, now)
 
 
 def resolve_full_meta(config, plan):
@@ -1524,8 +1552,9 @@ def resolve_full_meta(config, plan):
         return None
     kind = summary.get("kind") or kind_hint_of(plan.get("name") or "") or "movie"
     key = (kind, tmdb_id)
-    if key in _FULL_META_CACHE:
-        return _FULL_META_CACHE[key]
+    cached = _full_meta_get(key)
+    if cached is not None:
+        return cached
     meta = None
     # 主源: TMDB 直连(唯一源)
     if (config.get("tmdb", {}) or {}).get("api_key"):
@@ -1542,9 +1571,16 @@ def resolve_full_meta(config, plan):
             meta = None
     if not meta:
         return None
+    # 中文标题兜底(与 nfo._build_meta 同口径): TMDB 直连的 title 可能是英文,
+    # 不在这里套一次, 整理/「重匹配」写出的 NFO 就是英文标题(2026-09-26 实测 Bad Sisters)
+    try:
+        from lib import titles as _titles  # noqa: PLC0415  避免模块级环
+        _titles.apply_to_meta(config, kind, tmdb_id, meta)
+    except Exception:  # noqa: BLE001
+        pass
     meta["match_score"] = summary.get("match_score")
     meta["matched_query"] = summary.get("matched_query")
-    _FULL_META_CACHE[key] = meta
+    _full_meta_put(key, meta)
     return meta
 
 

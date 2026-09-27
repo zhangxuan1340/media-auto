@@ -149,6 +149,12 @@ def apply_to_row(cfg, kind: str, row: dict, existing=None, fallback: str = "") -
         row["title_checked"] = True
         return
     if existing is not None and getattr(existing, "title_checked", False):
+        # 已核对过 → 不再查豆瓣; 但必须**沿用上次解析出的中文标题**:
+        # 同步每轮都用 TMDB 的 title 覆盖 row, 不还原的话库里中文会被打回英文
+        # (实测 Bad Sisters: 库里 坏姐妹 → 一次同步后变回 Bad Sisters)。
+        prev = (getattr(existing, "title", "") or "").strip()
+        if prev and has_cn(prev) and not has_cn(row.get("title")):
+            row["title"] = prev
         return
     zh, status = douban_cn_title(row.get("original_title") or row.get("title") or "",
                                  row.get("year") or "", kind)

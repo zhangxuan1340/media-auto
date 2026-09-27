@@ -325,10 +325,12 @@ async function loadNfoInfo(kind, tmdbId){
     const info = await api(`/api/nfo/info/${kind}/${tmdbId}`);
     if(!info.exists){
       dateEl.innerHTML = `${icon('file')} 尚未生成 NFO`;
-      if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}生成 NFO`; }
+      if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}生成 NFO`;
+               btn._hasFileinfo = false; }   // 没有 NFO → 必然没有 <fileinfo>
     } else {
       dateEl.innerHTML = `${icon('file')} 更新于 ${esc(info.updated_at_text || info.updated_at || '')}`;
-      if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}更新 NFO`; }
+      if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}更新 NFO`;
+               btn._hasFileinfo = info.has_fileinfo !== false; }
     }
   }catch(e){
     dateEl.innerHTML = `${icon('file')} NFO 查询失败`;
@@ -336,11 +338,22 @@ async function loadNfoInfo(kind, tmdbId){
   }
 }
 // 手动重新生成 NFO 并写回 /Cloud(后端走中转+覆盖, 不破坏 /Cloud 禁删铁律)
+// <fileinfo> 为空(存量条目整理时没探到) → 自动带 probe=1 现场补探测一次:
+// 补到了就写入分辨率/编码/音轨/字幕, 读不到照旧留空并把原因提示出来。
 async function updateNfo(kind, tmdbId, btn){
-  if(btn){ btn.disabled = true; btn.innerHTML = `${icon('refresh')} 更新中…`; }
+  const needProbe = btn && btn._hasFileinfo === false;
+  if(btn){ btn.disabled = true;
+           btn.innerHTML = `${icon('refresh')} ${needProbe ? '探测并更新中…' : '更新中…'}`; }
   try{
-    const r = await api(`/api/nfo/update/${kind}/${tmdbId}`, {method:'POST'});
-    toast('NFO 已更新' + (r.updated_at_text?`（${r.updated_at_text}）`:''));
+    const url = `/api/nfo/update/${kind}/${tmdbId}` + (needProbe ? '?probe=1' : '');
+    const r = await api(url, {method:'POST'});
+    let msg = 'NFO 已更新' + (r.updated_at_text?`（${r.updated_at_text}）`:'');
+    if(needProbe){
+      if(r.probed){ msg += '，已补写 <fileinfo> 流信息'; btn._hasFileinfo = true; }
+      else { msg += `；流信息仍为空: ${r.probe_error || '本地挂载与 WebDAV 都读不到该文件'}`; }
+    }
+    if(r.warning) msg += `；⚠ ${r.warning}`;
+    toast(msg);
     const dateEl = $('#nfoDate');
     if(dateEl) dateEl.innerHTML = `${icon('file')} 更新于 ${esc(r.updated_at_text || r.updated_at || '')}`;
     if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}更新 NFO`; }
