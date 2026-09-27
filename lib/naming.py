@@ -18,6 +18,12 @@
 import os
 import re
 
+# 文件名正则的边界: **不要用 \b** —— Python 的 \b 按 \w 判定, 而 \w 含 CJK,
+# '中字S01E01' 里中文与 'S' 之间不算边界, `\bS\d+E\d+\b` 匹配不到 → 正片被判成
+# 广告、季集抽不出来(2026-09-26 审查)。统一改成"前后不能是 ASCII 字母/数字/下划线"。
+_LB = r"(?<![0-9A-Za-z_])"
+_RB = r"(?![0-9A-Za-z_])"
+
 # ---------------------------------------------------------------------------
 # 扩展名分类(可在 管理 → 通用 → 整理 里覆盖)
 # ---------------------------------------------------------------------------
@@ -91,9 +97,9 @@ _STRONG_TLDS = "com|net|org|cc|xyz|top|vip|biz|site|club|online|cn|info|art|fun"
 _WEAK_TLDS = "tv|me|la|im|io|pro|name|link|live"
 _ALL_TLDS = _STRONG_TLDS + "|" + _WEAK_TLDS
 # 括号内使用的域名特征(含弱后缀)
-_DOMAIN_HINT = r"(?:www\.[\w-]+|https?://[\w./?=&\-]+|[\w-]+\.(?:" + _ALL_TLDS + r")\b)"
+_DOMAIN_HINT = r"(?:www\.[\w-]+|https?://[\w./?=&\-]+|[\w-]+\.(?:" + _ALL_TLDS + r")" + _RB + ")"
 # 裸域名(只用强后缀,避免误伤)
-_BARE_HINT = r"(?:https?://[\w./?=&\-]+|www\.[\w.\-]+|[\w-]+\.(?:" + _STRONG_TLDS + r")\b)"
+_BARE_HINT = r"(?:https?://[\w./?=&\-]+|www\.[\w.\-]+|[\w-]+\.(?:" + _STRONG_TLDS + r")" + _RB + ")"
 # 括号(中/英/日式)包裹、且内含域名 → 推广块。括号内允许任意文案。
 PROMO_BLOCK = re.compile(
     r"[【\[〔《〈(（][^】\]〕》〉)）]{0,200}?" + _DOMAIN_HINT + r"[^】\]〕》〉)）]{0,200}?[】\]〕》〉)）]",
@@ -129,7 +135,7 @@ _SEASON_TOKEN = re.compile(r"^S\d{1,2}$|^E\d{1,3}$|^EP?\d{1,3}$|^S\d{1,2}E\d{1,3
 _TAIL_NUM = re.compile(r"\d+$")
 # "正片标记": 季集编号(正片几乎都有,广告不会有)
 EP_MARKER = re.compile(
-    r"\bS\d{1,2}E\d{1,3}\b|\bS\d{1,2}\b|\bE\d{1,3}\b|\bEP?\d{1,3}\b"
+    rf"{_LB}S\d{{1,2}}E\d{{1,3}}{_RB}|{_LB}S\d{{1,2}}{_RB}|{_LB}E\d{{1,3}}{_RB}|{_LB}EP?\d{{1,3}}{_RB}"
     r"|第\s*\d+\s*[季集话話期]|共\s*\d+\s*[季集話]|全\s*\d+\s*[集話]",
     re.IGNORECASE,
 )
@@ -422,11 +428,11 @@ def is_normalized(name):
 # ⚠️ 季与集之间的分隔符是 [.\s_\-]* —— 点/下划线/连字符/空白都算(2026-09-20 修复:
 # 旧版只写 \s*, 导致 S01.E33 这种【点分格式】解析不出集号、被误判成整季包 S01,
 # 整季包改名又撞名 → 集文件全部保留原名未规范(用户反馈"爱的理想生活 S01.E33 没改名")。
-_SEASON_EP_RE = re.compile(r"\bS(\d{1,2})[.\s_\-]*E(\d{1,3})\b", re.IGNORECASE)
-_SEASON_EP_X_RE = re.compile(r"\bS(\d{1,2})[.\s_\-]*[xX×][.\s_\-]*E?(\d{1,3})(?!\d)", re.IGNORECASE)
+_SEASON_EP_RE = re.compile(_LB + r"S(\d{1,2})[.\s_\-]*E(\d{1,3})" + _RB, re.IGNORECASE)
+_SEASON_EP_X_RE = re.compile(_LB + r"S(\d{1,2})[.\s_\-]*[xX×][.\s_\-]*E?(\d{1,3})(?!\d)", re.IGNORECASE)
 # 裸 Sxx(整季包: 只有季没有集, 如 Show.S01.1080p.mkv)
 # ⚠️ 用 (?!\d) 防 "S012" 误读; 不要求 \b 在 E 侧, 因为 S02E01 已由上面的规则先吃掉
-_SEASON_ONLY_RE = re.compile(r"\bS(\d{1,2})(?!\d)", re.IGNORECASE)
+_SEASON_ONLY_RE = re.compile(_LB + r"S(\d{1,2})(?!\d)", re.IGNORECASE)
 
 # 中文数字(季/集号): 兼容 1~几十 的阿拉伯与中文写法
 _CN_NUM_RE = r"[\d一二两三四五六七八九十]+"

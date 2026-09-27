@@ -334,7 +334,7 @@ async function loadNfoInfo(kind, tmdbId){
     }
   }catch(e){
     dateEl.innerHTML = `${icon('file')} NFO 查询失败`;
-    if(btn) btn.disabled = false;
+    if(btn){ btn.disabled = false; btn._hasFileinfo = null; }   // 未知 → 不自动带 probe
   }
 }
 // 手动重新生成 NFO 并写回 /Cloud(后端走中转+覆盖, 不破坏 /Cloud 禁删铁律)
@@ -342,6 +342,8 @@ async function loadNfoInfo(kind, tmdbId){
 // 补到了就写入分辨率/编码/音轨/字幕, 读不到照旧留空并把原因提示出来。
 async function updateNfo(kind, tmdbId, btn){
   const needProbe = btn && btn._hasFileinfo === false;
+  // 竞态: 先抓 dateEl, await 完再写 —— 期间切到别的条目会把别人的更新时间写进来
+  const dateEl = $('#nfoDate');
   if(btn){ btn.disabled = true;
            btn.innerHTML = `${icon('refresh')} ${needProbe ? '探测并更新中…' : '更新中…'}`; }
   try{
@@ -349,13 +351,22 @@ async function updateNfo(kind, tmdbId, btn){
     const r = await api(url, {method:'POST'});
     let msg = 'NFO 已更新' + (r.updated_at_text?`（${r.updated_at_text}）`:'');
     if(needProbe){
-      if(r.probed){ msg += '，已补写 <fileinfo> 流信息'; btn._hasFileinfo = true; }
-      else { msg += `；流信息仍为空: ${r.probe_error || '本地挂载与 WebDAV 都读不到该文件'}`; }
+      if(r.probed){
+        msg += '，已补写 <fileinfo> 流信息';
+        if(btn) btn._hasFileinfo = true;
+      } else if(r.probe_attempted){
+        // 只有"真的探过且没探到"才提示失败; probed=false 也可能= 没必要探(三义混同)
+        msg += `；流信息仍为空: ${r.probe_error || '本地挂载与 WebDAV 都读不到该文件'}`;
+      } else {
+        // 现在已有 <fileinfo>(或非电影) → 不用再探, 也别报假错误
+        if(btn) btn._hasFileinfo = (kind === 'tv') ? true : (r.has_fileinfo !== false);
+      }
     }
     if(r.warning) msg += `；⚠ ${r.warning}`;
     toast(msg);
-    const dateEl = $('#nfoDate');
-    if(dateEl) dateEl.innerHTML = `${icon('file')} 更新于 ${esc(r.updated_at_text || r.updated_at || '')}`;
+    const t = r.updated_at_text || r.updated_at;
+    if(dateEl && t && dateEl.isConnected)
+      dateEl.innerHTML = `${icon('file')} 更新于 ${esc(t)}`;
     if(btn){ btn.disabled = false; btn.innerHTML = `${icon('refresh')}更新 NFO`; }
   }catch(e){
     toast('更新失败: ' + e.message);
@@ -376,7 +387,15 @@ function toggleTitleEdit(){
 }
 async function saveTitle(kind, tmdbId, btn){
   const i = $('#titleInput'); if(!i) return;
+  if(btn && btn.disabled) return;            // Enter 连按/重复点击 → 只发一次
   const title = (i.value || '').trim();
+  const cur = (_curDetail && _curDetail.title) || '';
+  if(title === cur){
+    // 同值保存: 没改动就别写库 —— 否则会把当前**自动**译名钉成 custom_title,
+    // 以后 TMDB/豆瓣出更好的中文名也不会再跟(2026-09-26 审查 P2)
+    toast('标题没有改动' + (title ? `（当前就是「${title}」）` : ''));
+    i.value = cur; return;
+  }
   if(btn){ btn.disabled = true; btn.textContent = '保存中…'; }
   try{
     const r = await api(`/api/media/title/${kind}/${tmdbId}`, {method:'PUT', body: JSON.stringify({title})});
@@ -387,8 +406,14 @@ async function saveTitle(kind, tmdbId, btn){
     i.value = r.title || '';
     const blk = document.querySelector('[data-title][onclick*="askBlock"]');
     if(blk) blk.dataset.title = r.title || '';
-    // 标题变了 → 磁力搜索用的关键词也换掉(避免还拿旧英文名搜)
-    searchMagnets(r.title, r.title, null, null, {title: r.title, originalTitle: (_curDetail && _curDetail.originalTitle) || '', year: (_curDetail && _curDetail.year) || '', tmdbId});
+    // 标题变了 → 磁力搜索用的关键词也换掉(避免还拿旧英文名搜);
+    // englishTitle 也要带上, 否则 _magQueries 的英文查询词直接丢了
+    searchMagnets(r.title, r.title, null, null, {
+      title: r.title,
+      originalTitle: (_curDetail && _curDetail.originalTitle) || '',
+      englishTitle: (_curDetail && _curDetail.englishTitle) || '',
+      year: (_curDetail && _curDetail.year) || '',
+      tmdbId});
   }catch(e){
     toast('保存失败: ' + e.message);
   }finally{

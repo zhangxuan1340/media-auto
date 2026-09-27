@@ -152,9 +152,14 @@ def apply_to_row(cfg, kind: str, row: dict, existing=None, fallback: str = "") -
         # 已核对过 → 不再查豆瓣; 但必须**沿用上次解析出的中文标题**:
         # 同步每轮都用 TMDB 的 title 覆盖 row, 不还原的话库里中文会被打回英文
         # (实测 Bad Sisters: 库里 坏姐妹 → 一次同步后变回 Bad Sisters)。
-        prev = (getattr(existing, "title", "") or "").strip()
-        if prev and has_cn(prev) and not has_cn(row.get("title")):
-            row["title"] = prev
+        if not has_cn(row.get("title")):
+            prev = (getattr(existing, "title", "") or "").strip()
+            if prev and has_cn(prev):
+                row["title"] = prev
+            elif fallback:
+                # 库里也没中文(上次落成英文) → 台/港兜底照样套:
+                # "豆瓣查过"与"用不用兜底"是两件事, 少了这步英文状态永不自愈。
+                row["title"] = fallback
         return
     zh, status = douban_cn_title(row.get("original_title") or row.get("title") or "",
                                  row.get("year") or "", kind)
@@ -166,11 +171,14 @@ def apply_to_row(cfg, kind: str, row: dict, existing=None, fallback: str = "") -
         row["title_checked"] = True
 
 
-def apply_to_meta(cfg, kind: str, tmdb_id, meta: dict) -> dict:
+def apply_to_meta(cfg, kind: str, tmdb_id, meta: dict, *, read_only: bool = False) -> dict:
     """直连 TMDB 拿到的 meta(title/originalTitle/...)做同样的兜底, 并回写本地行。
 
     用在 NFO 重建(元数据以 TMDB 直连为准, 会绕过本地行的中文标题)。
     meta["zh_fallback"] 是 detail() 带回的 TMDB 台/港译名(大陆为空时的退路)。
+
+    read_only=True: **只算不写** —— 干跑(rename?dry_run)也要看到最终标题, 但不能
+    顺手把 title/title_checked 钉进库、也不能消耗豆瓣"每条一次"的核对标记。
     """
     from db.database import SessionLocal       # noqa: PLC0415  避免模块级环
     from db import repositories as repo        # noqa: PLC0415
@@ -184,7 +192,7 @@ def apply_to_meta(cfg, kind: str, tmdb_id, meta: dict) -> dict:
             meta["title"] = custom
             return meta
         if has_cn(meta.get("title")):
-            if obj is not None and not obj.title_checked:
+            if not read_only and obj is not None and not obj.title_checked:
                 obj.title_checked = True
                 s.commit()
             return meta
@@ -194,16 +202,31 @@ def apply_to_meta(cfg, kind: str, tmdb_id, meta: dict) -> dict:
             meta["title"] = obj.title
             return meta
         if obj is not None and obj.title_checked:
+            # 已核对过(豆瓣每条最多查一次) → 不再查, 但**台/港兜底照样要套**:
+            # 不套的话这次会把 TMDB 英文标题直接写进 NFO/改名, 与上一次写的中文
+            # 互相跳变(实测: 第 1 次「更新 NFO」写中文, 第 2 次变回英文)。
+            if not has_cn(meta.get("title")) and fallback:
+                meta["title"] = fallback
+                if not read_only and obj and not has_cn(obj.title or ""):
+                    obj.title = fallback   # 回写库, 否则库里永远停在英文
+                    s.commit()
             return meta
-        zh, status = douban_cn_title(meta.get("original_title") or meta.get("title") or "",
+        # 豆瓣查询词用【原名】: meta 里是 originalTitle(TMDB detail 的键名),
+        # 早期写成不存在的 original_title → 实际退回显示名, 与同步路径查询词不一致。
+        zh, status = douban_cn_title(meta.get("originalTitle") or meta.get("original_title")
+                                     or meta.get("title") or "",
                                      meta.get("year") or "", kind)
         if zh:
             meta["title"] = zh
-            if obj is not None:
+            if not read_only and obj is not None:
                 obj.title = zh
         elif fallback:
             meta["title"] = fallback
-        if obj is not None:
+            if not read_only and obj is not None:
+                # 台/港兜底也回写库: 只写 meta 的话, 下次同步用 TMDB 英文覆盖
+                # row 后再走到这里, 库内标题永远是英文(与 apply_to_row 口径不一致)。
+                obj.title = fallback
+        if not read_only and obj is not None:
             if status in ("hit", "none"):
                 obj.title_checked = True
             s.commit()

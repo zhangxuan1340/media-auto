@@ -22,6 +22,13 @@ import shutil
 import subprocess
 from urllib.parse import quote, urlsplit, urlunsplit
 
+# 文件名正则的边界: **不要用 \b** —— Python 的 \b 按 \w 判定, 而 \w 含 CJK,
+# '中字2160p' / '中字WEB-DL' 里中文与 ASCII 之间不算边界, `\b2160p\b` 会匹配不到,
+# 质量/片源/版本在中文标题旁恒猜不出(2026-09-26 审查)。
+# 统一改成"前后不能是 ASCII 字母/数字/下划线", 把中文当边界。
+_LB = r"(?<![0-9A-Za-z_])"
+_RB = r"(?![0-9A-Za-z_])"
+
 # MediaInfo 的 Format -> (NFO 里的 <codec>, 文件名用的标记)
 # ---------------------------------------------------------------------------
 # 覆盖面尽量全: MediaInfo 的 Format 字符串五花八门(而且同一编码有多种写法),
@@ -589,6 +596,31 @@ def probe_url_mediainfo(url, config=None, timeout=180, err_out=None):
     return info
 
 
+def probe_timeout(config):
+    """探测超时(秒): 0 / 负数 / 乱码 → 默认 180, 上限 600。
+
+    老代码会把配置原样传给 subprocess.run —— 负数会让 mediainfo 与 ffprobe 两条
+    通道**都**立刻超时, 所有 <fileinfo> 变空, 日志却只写 "ffprobe 超时(-5s)",
+    根本看不出是配置填错了。"""
+    try:
+        t = int(float(((config or {}).get("webdav") or {}).get("timeout") or 180))
+    except Exception:  # noqa: BLE001
+        t = 180
+    if t <= 0:        # 0 / 负数 = 没配或配错 → 用默认, 不是"0 秒超时"
+        t = 180
+    return min(t, 600)
+
+
+def _usable(info):
+    """探测结果必须带【视频流】(编码 + 宽度)才算有效。
+
+    moov 在尾 / Range 读不全 / 401 时, 两条通道都可能吐出"只有时长、没有流"的
+    残缺 info; 拿它写 <fileinfo> 会把缺音轨缺字幕的结果**永久固化**(下次更新还会
+    因为"已有 fileinfo"不再补探)。宁可判失败, 让调用方退回文件名推断/留空。"""
+    v = (info or {}).get("video") or {}
+    return bool((v.get("codec") or "").strip() and (v.get("width") or 0))
+
+
 def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
     """按 CD2 路径探测媒体信息。两条通道依次尝试:
 
@@ -601,10 +633,12 @@ def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
     lp = local_path(cd2_path, config, base_dir)
     if lp:
         info = probe_file(lp, timeout=timeout, err_out=reasons)
-        if info:
+        if info and _usable(info):
             info["source"] = "local"
             info["local_path"] = lp
             return info
+        if info:
+            reasons.append("本地通道: 解析结果缺视频流(编码/宽度), 视为无效")
     else:
         roots = _local_roots(config)
         reasons.append("本地通道: 未配置 local_root" if not roots
@@ -622,9 +656,15 @@ def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
                            f"{wd.get('account_root')!r} 范围内(如账号只开到 /Temp)")
         else:
             info = probe_url(url, config, timeout=timeout, err_out=reasons)
+            if info and not _usable(info):
+                reasons.append("ffprobe: 结果缺视频流(moov 在尾 / Range 读不全?)")
+                info = None
             if not info:
                 # ffprobe 没装(镜像漏建)或读不动 → 让 mediainfo 直读同一 URL 兜底
                 info = probe_url_mediainfo(url, config, timeout=timeout, err_out=reasons)
+                if info and not _usable(info):
+                    reasons.append("mediainfo: 结果缺视频流(moov 在尾 → 只读到时长)")
+                    info = None
             if info:
                 info["source"] = "webdav"
                 return info
@@ -679,10 +719,9 @@ def normalize(mi):
 
     aspect = v.get("DisplayAspectRatio") or ""
     if aspect:
-        try:
-            aspect = f"{round(float(str(aspect).split()[0]), 2):g}"
-        except Exception:  # noqa: BLE001
-            aspect = str(aspect)
+        # 统一走 _ratio + _snap_aspect: 与 ffprobe 通道同口径(TMM 风格 '2.40',
+        # 且 2.376 → 2.40),否则同一条片在两条通道下 aspect 一个 '2.4' 一个 '2.40'。
+        aspect = _snap_aspect(_ratio(aspect)) or str(aspect)
 
     duration = _f(gen.get("Duration")) or _f(v.get("Duration"))
     video = {
@@ -771,15 +810,18 @@ def _tag_for(table, text):
 
 
 # 从发布名里推质量标记(探测不可用时的兜底)。顺序敏感: 先具体(DDP/EAC3), 再 AC3/DTS 等。
-_NAME_RES = [(r"\b(?:8k|4320p)\b", "4320p"), (r"\b(?:4k|2160p|uhd)\b", "2160p"),
-             (r"\b1080[pi]\b", "1080p"), (r"\b720[pi]\b", "720p"), (r"\b(?:576[pi]|480[pi]|sd)\b", "480p")]
-_NAME_VCODEC = [(r"\b(?:x265|h\.?265|hevc)\b", "h265"), (r"\b(?:x264|h\.?264|avc)\b", "h264"),
-                (r"\bav1\b", "av1"), (r"\bvp9\b", "vp9"), (r"\b(?:mpeg-?2|xvid|divx)\b", "mpeg2")]
-_NAME_ACODEC = [(r"\b(?:atmos|dd\+|ddp|eac3|e-ac-3)", "EAC3"),
-                (r"\btruehd\b", "TrueHD"), (r"\bdts[-.\s]?(?:hd|ma|x)\b", "DTSHD"),
-                (r"\bdts\b", "DTS"), (r"\bac3\b", "AC3"), (r"\b(?:dd5\.1|dd)\b", "AC3"),
-                (r"\baac\b", "AAC"), (r"\bflac\b", "FLAC"), (r"\b(?:lpcm|pcm)\b", "PCM"),
-                (r"\bopus\b", "Opus"), (r"\bmp3\b", "MP3")]
+# 边界用 _LB/_RB(见文件头): '标题中字2160p' 这种中文贴着数字的写法 \b 匹配不到。
+_NAME_RES = [(rf"{_LB}(?:8k|4320p){_RB}", "4320p"), (rf"{_LB}(?:4k|2160p|uhd){_RB}", "2160p"),
+             (rf"{_LB}1080[pi]{_RB}", "1080p"), (rf"{_LB}720[pi]{_RB}", "720p"),
+             (rf"{_LB}(?:576[pi]|480[pi]|sd){_RB}", "480p")]
+_NAME_VCODEC = [(rf"{_LB}(?:x265|h\.?265|hevc){_RB}", "h265"), (rf"{_LB}(?:x264|h\.?264|avc){_RB}", "h264"),
+                (rf"{_LB}av1{_RB}", "av1"), (rf"{_LB}vp9{_RB}", "vp9"),
+                (rf"{_LB}(?:mpeg-?2|xvid|divx){_RB}", "mpeg2")]
+_NAME_ACODEC = [(rf"{_LB}(?:atmos|dd\+|ddp|eac3|e-ac-3)", "EAC3"),
+                (rf"{_LB}truehd{_RB}", "TrueHD"), (rf"{_LB}dts[-.\s]?(?:hd|ma|x){_RB}", "DTSHD"),
+                (rf"{_LB}dts{_RB}", "DTS"), (rf"{_LB}ac3{_RB}", "AC3"), (rf"{_LB}(?:dd5\.1|dd){_RB}", "AC3"),
+                (rf"{_LB}aac{_RB}", "AAC"), (rf"{_LB}flac{_RB}", "FLAC"), (rf"{_LB}(?:lpcm|pcm){_RB}", "PCM"),
+                (rf"{_LB}opus{_RB}", "Opus"), (rf"{_LB}mp3{_RB}", "MP3")]
 
 def quality_from_name(name):
     """只靠文件名推质量标记,如 `Remain.Silent.2019.2160p.WEB-DL.H265.10bit.DDP5.1`
@@ -804,7 +846,8 @@ _SOURCE_WEIGHT = {"REMUX": 4, "BLURAY": 3, "WEBDL": 2, "WEBRIP": 2, "HDTV": 1}
 
 def resolution_rank(text):
     """从文件名/质量标记取分辨率权重。`2160p`→4, `1080p`→3;未知→0。"""
-    m = re.search(r"\b(4320p|2160p|1080[pi]|720[pi]|576[pi]|480[pi])\b", str(text or ""), re.IGNORECASE)
+    m = re.search(rf"{_LB}(4320p|2160p|1080[pi]|720[pi]|576[pi]|480[pi]){_RB}",
+                  str(text or ""), re.IGNORECASE)
     if not m:
         return 0
     key = m.group(1).lower().replace("i", "p")
@@ -920,15 +963,16 @@ def streamdetails_xml(info, indent="  "):
 
 
 # 片源标记: TMM 的 <source> 也是从原始文件名猜的
+# 边界用文件头定义的 _LB/_RB(不用 \b, 理由见文件头): '中字WEB-DL' 也要能猜出来。
 SOURCE_HINTS = [
-    (r"\bremux\b", "REMUX"),
-    (r"\bblu-?ray\b|\bbdrip\b|\bbdmv\b|\bcomplete\s*bluray\b", "BLURAY"),
-    (r"\bweb-?dl\b|\bwebrip\b|\bweb\b", "WEBDL"),
-    (r"\bhdtv\b", "HDTV"),
-    (r"\bdvd\b|\bdvdrip\b", "DVD"),
-    (r"\buhd\b", "UHD"),
-    (r"\bhddvd\b", "HDDVD"),
-    (r"\btv\b(?![a-z])", "TV"),
+    (rf"{_LB}remux{_RB}", "REMUX"),
+    (rf"{_LB}blu-?ray{_RB}|{_LB}bdrip{_RB}|{_LB}bdmv{_RB}|{_LB}complete\s*bluray{_RB}", "BLURAY"),
+    (rf"{_LB}web-?dl{_RB}|{_LB}webrip{_RB}|{_LB}web{_RB}", "WEBDL"),
+    (rf"{_LB}hdtv{_RB}", "HDTV"),
+    (rf"{_LB}dvd{_RB}|{_LB}dvdrip{_RB}", "DVD"),
+    (rf"{_LB}uhd{_RB}", "UHD"),
+    (rf"{_LB}hddvd{_RB}", "HDDVD"),
+    (rf"{_LB}tv{_RB}", "TV"),
 ]
 
 
@@ -942,19 +986,22 @@ def guess_source(name):
 
 
 def guess_edition(name):
-    """从名字猜版本(导演剪辑/加长版等);TMM 默认 NONE。"""
+    """从名字猜版本(导演剪辑/加长版等);TMM 默认 NONE。
+
+    边界同 SOURCE_HINTS(_LB/_RB): `\b` 在 CJK 相邻处不成立, '中字IMAX' 会猜不出来。
+    """
     s = (name or "").lower()
-    if re.search(r"\bextended\b|加长", s):
+    if re.search(rf"{_LB}extended{_RB}|加长", s):
         return "EXTENDED"
-    if re.search(r"\bdirector'?s?\.?cut\b|导演剪辑", s):
+    if re.search(rf"{_LB}director'?s?\.?cut{_RB}|导演剪辑", s):
         return "DIRECTORSCUT"
-    if re.search(r"\bunrated\b|未分级", s):
+    if re.search(rf"{_LB}unrated{_RB}|未分级", s):
         return "UNRATED"
-    if re.search(r"\bremastered\b|修复版", s):
+    if re.search(rf"{_LB}remastered{_RB}|修复版", s):
         return "REMASTERED"
-    if re.search(r"\bimax\b", s):
+    if re.search(rf"{_LB}imax{_RB}", s):
         return "IMAX"
-    if re.search(r"\b\d+\s*fps\b|\b60fps\b|\b帧率\b", s):
+    if re.search(rf"{_LB}\d+\s*fps{_RB}|帧率", s):
         return "NONE"  # 帧率版本 TMM 也归 NONE
     return "NONE"
 

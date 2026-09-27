@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -615,7 +616,7 @@ def companion_subtitles(config, media_name, siblings):
     return out
 
 
-def analyse_entry(config, entry, base_dir=None, siblings=None):
+def analyse_entry(config, entry, base_dir=None, siblings=None, read_only=False):
     """分析一个离线条目,返回 plan 字典(status: ok / no_media / unresolved)。"""
     name = entry.get("name") or ""
     path = entry.get("fullPathName") or f"{offline_root(config).rstrip('/')}/{name}"
@@ -672,6 +673,16 @@ def analyse_entry(config, entry, base_dir=None, siblings=None):
     resolved = bool(meta) and not meta.get("rejected")
 
     if resolved:
+        # 目录名/文件名与 NFO 必须用**同一个**中文标题源: 否则会出现"目录英文 /
+        # NFO 中文"的自相矛盾 —— 反查命中新条目时, 这里拿到的是 TMDB 原始 title,
+        # 而写 NFO 走 resolve_full_meta → apply_to_meta(豆瓣/台港兜底), 两边不同源。
+        try:
+            from lib import titles as _titles      # noqa: PLC0415 避免模块级环
+            # read_only: 预览/dry-run 只算标题, 不写 title/title_checked、不占豆瓣核对标记
+            _titles.apply_to_meta(config, meta.get("kind") or kind_hint_of(name) or "movie",
+                                  meta.get("tmdb_id"), meta, read_only=read_only)
+        except Exception:  # noqa: BLE001 标题兜底失败不阻断反查(用 TMDB 原始名)
+            pass
         plan["meta"] = {
             "title": meta.get("title"),
             "year": meta.get("year"),
@@ -719,7 +730,7 @@ def analyse_entry(config, entry, base_dir=None, siblings=None):
     return plan
 
 
-def build_plans(config, base_dir=None, only=None, limit=None):
+def build_plans(config, base_dir=None, only=None, limit=None, read_only=False):
     root = offline_root(config)
     ignore_prefix_list = ignore_prefixes(config)
     entries = cd2.get_subfiles(config, root, base_dir=base_dir)
@@ -742,7 +753,8 @@ def build_plans(config, base_dir=None, only=None, limit=None):
             stem = os.path.splitext(name)[0].lower()
             if any(stem == m or stem.startswith(m + ".") or m.startswith(stem + ".") for m in loose_media_stems):
                 continue
-        plans.append(analyse_entry(config, e, base_dir=base_dir, siblings=entries))
+        plans.append(analyse_entry(config, e, base_dir=base_dir, siblings=entries,
+                                   read_only=read_only))
         if limit and len(plans) >= limit:
             break
 
@@ -966,6 +978,11 @@ def relocated(plan, final_dir, old_path):
     return final_dir.rstrip("/") + "/" + rel
 
 
+# 探测失败负缓存: path → 过期时间戳。两条通道都不通时, 同一条 plan 会在
+# 搬运前/搬运后各等一轮完整超时; 10 分钟内直接回 None(2026-09-26 审查 P2)。
+_PROBE_NEG = {}
+
+
 def _probe_source_media(config, plan, base_dir=None, log=None):
     """探测条目里最大的视频文件 —— **用它在离线目录里的原始路径**。
 
@@ -981,15 +998,23 @@ def _probe_source_media(config, plan, base_dir=None, log=None):
     if not path:
         return None
     from lib import mediainfo
+    now = time.time()
+    if _PROBE_NEG.get(path, 0) > now:
+        return None                      # 10 分钟内这个路径已探失败过, 不再白等一轮超时
+    for _k in [k for k, exp in _PROBE_NEG.items() if exp <= now]:
+        _PROBE_NEG.pop(_k, None)
+    timeout = mediainfo.probe_timeout(config)   # 0/负数/乱码 → 180, 上限 600, 免得坏配置让两条通道全秒失败
+    info = None
     try:
-        timeout = int((config.get("webdav") or {}).get("timeout") or 180)
-    except Exception:  # noqa: BLE001
-        timeout = 180
-    try:
-        return mediainfo.probe(path, config, base_dir=base_dir, timeout=timeout,
+        info = mediainfo.probe(path, config, base_dir=base_dir, timeout=timeout,
                                log=log)
     except Exception:  # noqa: BLE001
-        return None
+        info = None
+    if info:
+        _PROBE_NEG.pop(path, None)
+    else:
+        _PROBE_NEG[path] = now + 600     # 失败负缓存 10 分钟: 两条通道全不通时别每条都等满超时
+    return info
 
 
 def _probe_main_media(config, plan, final_dir, base_dir=None, log=None):
@@ -999,10 +1024,7 @@ def _probe_main_media(config, plan, final_dir, base_dir=None, log=None):
         return None
     biggest = max(media, key=lambda f: f.get("size") or 0)
     from lib import mediainfo
-    try:
-        timeout = int((config.get("webdav") or {}).get("timeout") or 180)
-    except Exception:  # noqa: BLE001
-        timeout = 180
+    timeout = mediainfo.probe_timeout(config)   # 0/负数/乱码 → 180, 上限 600, 免得坏配置让两条通道全秒失败
     return mediainfo.probe(relocated(plan, final_dir, biggest.get("path")),
                            config, base_dir=base_dir, timeout=timeout, log=log)
 
@@ -1425,8 +1447,11 @@ def _nfo_update_allowed(config, plan, meta, final_dir, nfo_name, base_dir=None, 
                plan.get("origin_filename") or ""])
     try:
         hit = cd2.find_file_by_path(config, final_dir, nfo_name, base_dir=base_dir)
-    except Exception:  # noqa: BLE001
-        hit = None
+    except Exception as e:  # noqa: BLE001
+        # 列目录**异常** ≠ 库里没有 NFO: 当"新写"放行会绕过下面的 ID 冲突闸门
+        # (2026-09-18 巴比伦柏林事故正是校验被绕过)。宁可这轮拒写、下轮再试。
+        log(f"    ⚠ NFO 闸门: 查现有 NFO 失败({str(e)[:100]}),本轮拒写")
+        return False
     if not hit:
         return True  # 新写
 
@@ -1460,6 +1485,21 @@ def _nfo_update_allowed(config, plan, meta, final_dir, nfo_name, base_dir=None, 
     return True
 
 
+def _existing_local_state(config, final_dir, nfo_name):
+    """读回【旧 NFO】里的本机状态(dateadded / watched / playcount / lastplayed)。
+
+    更新已有 NFO 时必须原样保留: 老代码每次写 time.time() + watched=false,
+    整理一遍就把"加入时间"顶成今天、观看记录清零。读不到(新写/两条通道都读不回)
+    返回空 dict → 调用方回退默认值。"""
+    from lib import nfo as nfo_mod
+    try:
+        from server.routers.nfo import _existing_nfo_text  # 懒加载, 避免与 nfo.py 循环导入
+        txt = _existing_nfo_text(config, final_dir, [nfo_name])
+    except Exception:  # noqa: BLE001
+        txt = None
+    return nfo_mod.read_local_state(txt or "")
+
+
 def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=print):
     """写 NFO(含老化更新)。电影写 '<视频名>.nfo',剧集写 'tvshow.nfo'。
 
@@ -1481,11 +1521,16 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
     if org_cfg(config).get("wikidata", True):
         cache = os.path.join(base_dir or ".", "state", "wikidata_cache.json")
         wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
-    dateadded = time.time()
+    # 本机状态: 更新已有 NFO 时保留 dateadded / 观看记录(新建 → 空 → 用当前时间)
+    state = _existing_local_state(config, final_dir, nfo_name)
+    dateadded = state.get("dateadded") or time.time()
 
     if kind == "tv":
         xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata, dateadded=dateadded,
-                                       original_filename=(plan.get("origin_filename") or ""))
+                                       original_filename=(plan.get("origin_filename") or ""),
+                                       watched=state.get("watched") or None,
+                                       playcount=state.get("playcount") or None,
+                                       lastplayed=state.get("lastplayed") or None)
         path = final_dir.rstrip("/") + "/tvshow.nfo"
     else:
         media = plan.get("media") or []
@@ -1497,7 +1542,10 @@ def _write_entry_nfo(config, plan, final_dir, meta, info, base_dir=None, log=pri
         orig = plan.get("origin_filename") or ""
         xml = nfo_mod.build_movie_nfo(meta, info=info, source=source,
                                       original_filename=orig, dateadded=dateadded,
-                                      wikidata=wikidata)
+                                      wikidata=wikidata,
+                                      watched=state.get("watched") or None,
+                                      playcount=state.get("playcount") or None,
+                                      lastplayed=state.get("lastplayed") or None)
         path = final_dir.rstrip("/") + "/" + nfo_name
 
     written = cd2.write_file(config, path, xml, base_dir=base_dir)
@@ -1538,6 +1586,14 @@ def _full_meta_put(key, meta):
         if now - ts > _FULL_META_TTL:
             _FULL_META_CACHE.pop(k, None)
     _FULL_META_CACHE[key] = (meta, now)
+
+
+def invalidate_full_meta(kind, tmdb_id):
+    """改标题/清标题后立刻丢掉该条目的执行期元数据缓存。
+
+    否则改完标题的 10 分钟内, 整理/重匹配仍会用**旧标题**写 NFO ——
+    目录名(读 DB)是新标题、NFO(读缓存)是旧标题, 两边打架。"""
+    _FULL_META_CACHE.pop((kind, tmdb_id), None)
 
 
 def resolve_full_meta(config, plan):
@@ -1595,6 +1651,10 @@ def finalize_entry(config, plan, final_dir, meta, base_dir=None, log=print,
     """
     out = {"renamed_media": {}, "nfo": None, "probed": False}
     if not meta:
+        # plan 里有摘要(本来该写 NFO)却取不到完整元数据 → 必须在日志里点名,
+        # 否则"删了广告、没写 NFO"完全静默, 用户只看到条目没有元数据。
+        if plan.get("meta"):
+            log("    ⚠ 跳过 NFO 写入: TMDB 直连未取到元数据(原有 NFO 已保留)")
         return out
 
     quality, info = "", None
@@ -1606,10 +1666,18 @@ def finalize_entry(config, plan, final_dir, meta, base_dir=None, log=print,
             info = _probe_main_media(config, plan, final_dir, base_dir=base_dir, log=log)
         if info:
             out["probed"] = True
-            quality = mediainfo.quality_tag(info)
+            # quality_tag 可能为空(流里没有 bitrate/位深等) → 退回文件名推断,
+            # 否则 NFO 的 <quality> 恒空(2026-09-26 审查: 两条分支只在 info 为
+            # None 时才回退, info 在但算不出标记时没人管)。
+            quality = (mediainfo.quality_tag(info) or "").strip()
+            if not quality:
+                quality = mediainfo.quality_from_name(
+                    plan.get("origin_filename")
+                    or (plan.get("media") or [{}])[0].get("name") or "")
+                log(f"    ⚠ 探测成功但算不出质量标记 → 退回文件名推断: {quality or '(无)'}")
             v = info.get("video") or {}
             ch = {"local": "本地挂载", "webdav": "WebDAV"}.get(info.get("source") or "", info.get("source") or "")
-            log(f"    🔎 探测[{ch}]: {quality}  ({info.get('resolution_label')} {v.get('codec_label')}"
+            log(f"    🔎 探测[{ch}]: {quality}  ({v.get('resolution_label')} {v.get('codec_label')}"
                 f" {int(info.get('duration') or 0) // 60} 分钟)")
         else:
             # 本地挂载与 WebDAV 都不可用 → 退回从文件名推质量标记(结果通常一致),
@@ -1647,9 +1715,24 @@ def finalize_entry(config, plan, final_dir, meta, base_dir=None, log=print,
 # 补季执行期缓存: ("sd", season) → 库内季目录路径, ("ls", season) → 季目录已有文件名集合。
 # 防止同一季反复 get_subfiles; 每个 plan 执行完清空。
 _MERGE_CACHE = {}
+# 补季串行锁: 整理 job 在 cd2.py 里各开线程, 可能同时跑两条 plan, 而 _MERGE_CACHE
+# 是模块级共享的 —— 不串行的话 A 条目的季目录/文件集合会被 B 复用(2026-09-26 审查)。
+_APPLY_MERGE_LOCK = threading.Lock()
 
 
 def _apply_merge_seasons(config, plan, base_dir=None, log=print):
+    """补季执行(外层): 串行 + 无论成败都清 _MERGE_CACHE。
+
+    老实现把 clear() 放在函数末尾, 中途抛异常就漏清 → 下一条 plan 复用这一条查到的
+    季目录/文件集合, 可能往错的目录里搬文件。"""
+    with _APPLY_MERGE_LOCK:
+        try:
+            return _merge_seasons_impl(config, plan, base_dir=base_dir, log=log)
+        finally:
+            _MERGE_CACHE.clear()
+
+
+def _merge_seasons_impl(config, plan, base_dir=None, log=print):
     """剧集补季执行: 清推广名 → 删广告 → 【逐文件】把缺失季的视频/字幕搬入库内对应季目录
     (文件级 MoveFile Skip,绝不覆盖) → 集文件按标准名改名(字幕跟随) → 更新 tvshow.nfo。
 
@@ -1826,7 +1909,6 @@ def _apply_merge_seasons(config, plan, base_dir=None, log=print):
                                           plan.get("_probe_info"), base_dir=base_dir, log=log)
         except Exception as e:  # noqa: BLE001
             log(f"    ⚠ NFO 写入失败: {str(e)[:150]}")
-    _MERGE_CACHE.clear()
     return res
 
 
@@ -1836,9 +1918,12 @@ def quality_of_plan(config, plan):
     info = plan.get("_probe_info")
     if info:
         try:
-            return (mediainfo.quality_tag(info) or "").strip()
+            q = (mediainfo.quality_tag(info) or "").strip()
+            if q:
+                return q
         except Exception:  # noqa: BLE001
             pass
+        # 算不出标记(流里没有位深/码率) → 继续走文件名推断, 不返回空串
     media = plan.get("media") or []
     biggest = max(media, key=lambda f: f.get("size") or 0) if media else {}
     return (mediainfo.quality_from_name(
@@ -1926,7 +2011,10 @@ def apply_plan(config, plan, base_dir=None, log=print):
 
     # 0-pre) 媒体探测 —— **必须在搬运之前**。WebDAV 账号只开到 /Temp,
     #   搬到 /Cloud 后文件就探测不到了(没有本地挂载时 <fileinfo> 会丢失)。
-    if org_cfg(config).get("probe_media", True) and not plan.get("_probe_info"):
+    #   只探 status=ok 的计划: unresolved/duplicate/无媒体这些到 2038 行就早退,
+    #   探了也是白等 5~10 秒; merge 由 _merge_seasons_impl 自己探(也在搬之前)。
+    if (org_cfg(config).get("probe_media", True) and not plan.get("_probe_info")
+            and plan.get("status") == "ok"):
         plan["_probe_info"] = _probe_source_media(config, plan, base_dir=base_dir, log=log)
 
     # 0) 媒体/字幕文件名去推广块(默认开,可用 organize.clean_media_names=false 关闭)
@@ -1945,7 +2033,15 @@ def apply_plan(config, plan, base_dir=None, log=print):
     will_write_nfo = (write_nfo_enabled(config) and bool(plan.get("meta"))
                       and plan.get("status") == "ok")
     if will_write_nfo:
-        trash += list(plan.get("nfos") or [])
+        # 【顺序关键】先确认 TMDB 直连拿得到元数据, 再决定删不删旧 NFO。
+        # 反过来(先删后取)的话: TMDB 抖一下 → 源 NFO 已删、新 NFO 写不出来,
+        # 条目变成"一个 NFO 都没有", 且日志里毫无提示(2026-09-26 审查 P0)。
+        # resolve_full_meta 结果有 10 分钟执行期缓存, 后面 finalize_entry 复用同一次。
+        if resolve_full_meta(config, plan):
+            trash += list(plan.get("nfos") or [])
+        else:
+            will_write_nfo = False
+            log("    ⚠ TMDB 直连取不到元数据 → 保留原有 NFO(不删旧的, 也不写新的)")
     if trash:
         cd2.delete_files(config, trash, base_dir=base_dir)
         res["deleted"] = trash
@@ -2064,7 +2160,8 @@ def clean_unresolved_enabled(config):
 
 
 def run(config, base_dir=None, apply=False, only=None, limit=None, log=print):
-    plans = build_plans(config, base_dir=base_dir, only=only, limit=limit)
+    # 预览(apply=False)全程只读: 不写 title/title_checked, 也不消耗豆瓣核对标记
+    plans = build_plans(config, base_dir=base_dir, only=only, limit=limit, read_only=not apply)
     summary = {"total": len(plans), "ok": 0, "unresolved": 0, "no_media": 0,
                "duplicate": 0, "merge": 0, "applied": 0, "cleaned": 0,
                "dedup_cleaned": 0, "merged": 0,
@@ -2153,7 +2250,8 @@ def main():
     config = _lc()   # 只读数据库(app_config)
 
     if args.json:
-        plans = build_plans(config, base_dir=base_dir, only=args.only, limit=args.limit)
+        plans = build_plans(config, base_dir=base_dir, only=args.only, limit=args.limit,
+                           read_only=not args.apply)
         print(json.dumps({"offline_root": offline_root(config), "plans": plans},
                          ensure_ascii=False, indent=2))
         return 0

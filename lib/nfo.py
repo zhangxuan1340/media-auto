@@ -103,8 +103,32 @@ def xml_text(value):
 
 
 def fmt_dt(ts=None):
-    """TMM 的 dateadded 格式: YYYY-MM-DD HH:MM:SS(本地时区)。"""
+    """TMM 的 dateadded 格式: YYYY-MM-DD HH:MM:SS(本地时区)。
+
+    传字符串时**原样返回** —— 字符串通常是从现有 NFO 读回的 dateadded, 刷新
+    元数据不该把"加入库的时间"顶成今天(条目在 Jellyfin 里会跳到"最近添加"最前面)。
+    """
+    if isinstance(ts, str):
+        return ts.strip()
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts if ts else time.time()))
+
+
+def read_local_state(text):
+    """从【现有 NFO】读回不能被元数据刷新顶掉的本机状态。
+
+    dateadded   = 条目加入时间(Jellyfin 按它排"最近添加")
+    watched/playcount/lastplayed = 观看状态(刷新元数据清零 = 用户看着看着
+    的观看记录凭空消失)
+    读不到/没这个标签 → 空串, 调用方回退默认值(新建 NFO 场景)。
+    """
+    out = {"dateadded": "", "watched": "", "playcount": "", "lastplayed": ""}
+    if not text:
+        return out
+    for tag in out:
+        m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.S)
+        if m:
+            out[tag] = m.group(1).strip()
+    return out
 
 
 def country_zh(cc):
@@ -216,7 +240,8 @@ def wikidata_id(imdb_id, timeout=25, cache_file=None):
 def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
                     original_filename="", dateadded=None, wikidata="",
                     cast_limit=0, tag_limit=60, crew_limit=40,
-                    streamdetails=None):
+                    streamdetails=None, watched=None, playcount=None,
+                    lastplayed=None):
     """生成 TMM 5.2.12 兼容的电影 NFO(XML 字符串)。
 
     meta : tmdb.detail_sync() 的返回
@@ -290,8 +315,12 @@ def build_movie_nfo(meta, info=None, *, source="", edition="NONE",
     for cc in (meta.get("countries") or []):
         L.append(_el("country", country_zh(cc)))
     L.append(_el("premiered", (meta.get("premiered") or "")[:10]))
-    L.append(_el("watched", "false"))
-    L.append(_el("playcount", "0"))
+    # 观看状态默认 false/0, 但【从现有 NFO 读回】的值优先(见 read_local_state):
+    # 刷新元数据不该把用户的观看记录清零
+    L.append(_el("watched", "false" if watched in (None, "") else str(watched)))
+    L.append(_el("playcount", "0" if playcount in (None, "") else str(playcount)))
+    if lastplayed:
+        L.append(_el("lastplayed", lastplayed))
     for g in (meta.get("genres") or []):
         L.append(_el("genre", g))
     for s in (meta.get("studios") or []):
@@ -439,7 +468,8 @@ def _append_crew(lines, meta, crew_limit):
 # 剧集 NFO
 # ---------------------------------------------------------------------------
 def build_tvshow_nfo(meta, *, wikidata="", dateadded=None,
-                     cast_limit=0, tag_limit=60, original_filename=""):
+                     cast_limit=0, tag_limit=60, original_filename="",
+                     watched=None, playcount=None, lastplayed=None):
     """生成 TMM 5.2.12 兼容的 tvshow.nfo(XML 字符串)。
 
     注: TMM 的 tvshow.nfo **不写** <producer>/<crew>/<original_filename>/<fileinfo>,
@@ -519,8 +549,11 @@ def build_tvshow_nfo(meta, *, wikidata="", dateadded=None,
 
     L.append(_el("premiered", (meta.get("premiered") or "")[:10]))
     L.append(_el("status", meta.get("status") or ""))
-    L.append(_el("watched", "false"))
-    L.append(_el("playcount"))
+    # 同电影: 读回的观看状态优先, 刷新元数据不清零
+    L.append(_el("watched", "false" if watched in (None, "") else str(watched)))
+    L.append(_el("playcount", None if playcount in (None, "") else str(playcount)))
+    if lastplayed:
+        L.append(_el("lastplayed", lastplayed))
     for g in (meta.get("genres") or []):
         L.append(_el("genre", g))
     for s in (meta.get("studios") or []):

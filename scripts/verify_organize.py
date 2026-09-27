@@ -139,7 +139,7 @@ def _probe_info(res="1080p", codec="h264", audio="EAC3"):
 
 def _tv_plan(cfg, base):
     entry = {"name": os.path.basename(TV_DIR), "fullPathName": TV_DIR, "isDirectory": True}
-    plan = og.analyse_entry(cfg, entry, base_dir=base)
+    plan = og.analyse_entry(cfg, entry, base_dir=base, read_only=True)
     plan["meta"] = {"kind": "tv", "title": "欢乐合唱团"}
     # 质量固定成 '1080p h264 EAC3': 与树里"已就位"的 Season 4 名一致, 才能验证"不被降级改名"
     plan["_probe_info"] = _probe_info("1080p", "h264", "EAC3")
@@ -148,7 +148,7 @@ def _tv_plan(cfg, base):
 
 def _movie_plan(cfg, base):
     entry = {"name": os.path.basename(MV_DIR), "fullPathName": MV_DIR, "isDirectory": True}
-    plan = og.analyse_entry(cfg, entry, base_dir=base)
+    plan = og.analyse_entry(cfg, entry, base_dir=base, read_only=True)
     plan["meta"] = {"kind": "movie", "title": "后室", "year": 2026}
     plan["_probe_info"] = _probe_info("2160p", "h265", "EAC3")
     return plan

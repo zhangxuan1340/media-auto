@@ -557,16 +557,23 @@ def remap_jellyfin_paths(session, old_dir: str, new_dir: str, file_renames=None)
     电影的 Movie 行 path 指到**视频文件**, 剧集的 Series/Season/Episode 指到目录 ——
     所以先做目录前缀替换, 再按改名的文件名(basename)修掉电影那条。
     不同步也行(sync_jellyfin 5 分钟会全量对齐), 但窗口内 _locate 会拿到旧路径,
-    连锁让「更新 NFO / 按新标题重命名」找不到目录 —— 所以这里就地改掉。"""
+    连锁让「更新 NFO / 按新标题重命名」找不到目录 —— 所以这里就地改掉。
+
+    ⚠ LIKE 里的 `_`/`%` 要转义: 目录名/文件名含下划线(如 `Some_Show`)时, `_`
+    会匹配任意字符 → 把**别的**条目 path 也一起改掉(2026-09-26 审查)。"""
     import os  # noqa: PLC0415
     old = (old_dir or "").rstrip("/")
     new = (new_dir or "").rstrip("/")
     n = 0
+
+    def _like(s):  # 仅转义 _ 与 %, 前缀的 % 通配符由调用方保留
+        return (s or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     if old and new and old != new:
         rows = (session.query(JellyfinItem)
                 .filter(JellyfinItem.path != "",
                         or_(JellyfinItem.path == old,
-                            JellyfinItem.path.like(old + "/%")))
+                            JellyfinItem.path.like(_like(old) + "/%", escape="\\")))
                 .all())
         for r in rows:
             r.path = new + r.path[len(old):]
@@ -577,7 +584,7 @@ def remap_jellyfin_paths(session, old_dir: str, new_dir: str, file_renames=None)
         if not old_name or not new_name or old_name == new_name:
             continue
         rows = (session.query(JellyfinItem)
-                .filter(JellyfinItem.path.like("%/" + old_name))
+                .filter(JellyfinItem.path.like("%/" + _like(old_name), escape="\\"))
                 .all())
         for r in rows:
             if os.path.basename(r.path) == old_name:

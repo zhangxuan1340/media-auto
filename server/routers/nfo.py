@@ -95,13 +95,23 @@ def _resolve_folder(config, cloud, cat_folder, folder_name, expected):
 
 
 def _dir_exists(config, path):
-    """CD2 里这个目录存在且非空? 列目录失败(NOT_FOUND / 不可达)一律 False。"""
+    """CD2 里这个目录存在且非空?
+
+    **只有"确知不存在"才返回 False**; 列目录超时 / 网络抖动这类"未知"必须往上抛,
+    否则 _locate 会把"查不到"当成"没有", 退到分类目录里再找一个同名文件夹 ——
+    定位到错误目录后照样写 NFO(2026-09-26 审查)。
+    """
     if not path:
         return False
     try:
         return bool(cd2.get_subfiles(config, path) or [])
-    except Exception:  # noqa: BLE001
-        return False
+    except Exception as e:  # noqa: BLE001
+        msg = str(e).lower()
+        if any(k in msg for k in ("not found", "not_found", "no such", "不存在")):
+            return False
+        raise HTTPException(502,
+                            f"CD2 列目录失败,无法确认目录是否存在(拒绝退到分类目录): "
+                            f"{path} — {str(e)[:160]}") from e
 
 
 def _jf_folder_candidates(jf_path, kind, cloud):
@@ -194,8 +204,9 @@ def _find_nfo_file(config, folder_path, kind, nfo_name):
                     return it
         if nfo_items:
             return nfo_items[0]
-    elif kind == "tv" and nfo_items:
-        return nfo_items[0]
+    # 剧集【只认】tvshow.nfo, 不做"任意 .nfo"兜底: 目录里可能有下载包自带的集级
+    # S01E01.nfo(别家刮的), 拿它兜底会把整集刮削结果覆盖成剧集元数据。
+    # 找不到就返回 None → 由调用方用默认名 tvshow.nfo 新建。
     return None
 
 
@@ -215,7 +226,7 @@ def _fmt_write_time(wt):
 # ---------------------------------------------------------------------------
 # 元数据构建(更新 NFO 用)
 # ---------------------------------------------------------------------------
-def _build_meta(config, kind, tmdb_id):
+def _build_meta(config, kind, tmdb_id, *, title_read_only: bool = False):
     """取 NFO 所需的完整元数据: **只走 TMDB 直连, 没有任何本地回退**。
 
     铁律(用户要求): NFO 生成不许读本地缓存行 —— TMDB 取不到就让「更新 NFO」直接
@@ -244,7 +255,11 @@ def _build_meta(config, kind, tmdb_id):
     # 直连 TMDB 拿到的 title 可能是英文, 且会绕过本地行,不补一次「更新 NFO」会把
     # 英文标题写回库里(2026-09-26 实测 Bad Sisters)。
     # 只动 title 一个键, 其余元数据仍原样来自 TMDB 直连。
-    titles.apply_to_meta(config, kind, tmdb_id, meta)
+    # 包 try: 标题兜底里的 DB 写入抖动不该把整个「更新 NFO」变成 500(与 organize 同口径)。
+    try:
+        titles.apply_to_meta(config, kind, tmdb_id, meta, read_only=title_read_only)
+    except Exception as e:  # noqa: BLE001
+        print(f"    ⚠ 中文标题兜底失败(沿用 TMDB 直连 title): {str(e)[:120]}")
     return meta
 
 
@@ -293,6 +308,26 @@ def _nfo_ids_from_text(txt):
     return ids
 
 
+def _fileinfo_state(config, folder_path, nfo_name, video):
+    """现有 NFO 的 <fileinfo> 三态: 'ok' / 'empty'(读到了但没有流信息) / 'unreadable'。
+
+    **必须**区分 empty 与 unreadable: 两者都表现为"抽不出 <fileinfo>", 但后果完全不同 ——
+    empty 是"这条没探测过"(该补), unreadable 是"读不到现有文件"(此时若照常重建,
+    会把库里已有的 <fileinfo>/<original_filename>/<source> 抹成空标签)。
+    读通道: 本地挂载 → WebDAV GET, 都不通则 unreadable。"""
+    names = []
+    if video:
+        names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
+    names.append(nfo_name)
+    txt = _existing_nfo_text(config, folder_path, names)
+    if txt is None:
+        return "unreadable"
+    mm = re.search(r"<fileinfo>.*?</fileinfo>", txt, re.S)
+    if mm and re.search(r"<streamdetails>", mm.group(0)):
+        return "ok"
+    return "empty"
+
+
 def _fileinfo(config, folder_path, nfo_name, video):
     """电影 NFO 的 <fileinfo> 段: 只【保留】现有 NFO 里已有的, 绝不重新探测媒体。
 
@@ -302,8 +337,9 @@ def _fileinfo(config, folder_path, nfo_name, video):
     现有文件/无探测工具的环境里把流信息弄丢。
 
     因此只从【现有 NFO 文件】把 <fileinfo>...</fileinfo> 抽出来原样回填(本地挂载读 →
-    WebDAV GET 读)。都读不到 → 返回 None(不生成新的 streamdetails)。
-    若想给老 NFO 补 <fileinfo>, 应走整理(organize)重新探测, 而不是 NFO 更新。"""
+    WebDAV GET 读)。读不到 → 返回 None —— **调用方必须先用 _fileinfo_state 区分
+    "读不到"与"没有"**, 读不到时禁止重建(见 _rebuild_nfo 的闸门)。
+    若想给老 NFO 补 <fileinfo>, 应走整理(organize)重新探测或 probe=1, 而不是裸更新。"""
     names = []
     if video:
         names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
@@ -343,10 +379,7 @@ def _probe_fileinfo(config, folder_path, video):
     """
     if not video or not video.get("name"):
         return None, "目录里没有视频文件"
-    try:
-        timeout = int((config.get("webdav") or {}).get("timeout") or 180)
-    except Exception:  # noqa: BLE001
-        timeout = 180
+    timeout = mediainfo.probe_timeout(config)   # 0/负数/乱码 → 180, 上限 600, 免得坏配置让两条通道全秒失败
     notes = []
 
     def _log(msg):
@@ -386,12 +419,15 @@ async def nfo_info(kind: str, tmdb_id: int, cfg: dict = Depends(get_config)):
                     "note": "尚未生成 NFO"}
         wt = it.get("writeTime")
         name = it.get("name") or nfo_name
-        # has_fileinfo: 电影的 <fileinfo> 是否已有内容 —— 前端据此决定「更新 NFO」要不要
-        # 带 probe=1 现场补探测(剧集 tvshow.nfo 本来就不写 fileinfo → 恒 True 不触发)。
+        # has_fileinfo: 电影的 <fileinfo> 状态 —— 前端据此决定「更新 NFO」要不要带 probe=1。
+        # 三态: true=有 / false=确知为空(才触发探测) / null=读不到现有 NFO(**不**触发,
+        # 免得每次都跑一遍注定失败的探测; 更新时会被 502 闸门拦下, 见 _rebuild_nfo)。
+        # 剧集 tvshow.nfo 本来就不写 fileinfo → 恒 true 不触发。
         has_fileinfo = True
         if kind == "movie":
             video = _largest_video(_safe_subfiles(cfg, folder_path))
-            has_fileinfo = bool(_fileinfo(cfg, folder_path, name, video))
+            has_fileinfo = {"ok": True, "empty": False, "unreadable": None}.get(
+                _fileinfo_state(cfg, folder_path, name, video), None)
         return {"exists": True, "updated_at": wt or "", "updated_at_text": _fmt_write_time(wt),
                 "path": it.get("fullPathName") or (folder_path + "/" + name),
                 "name": name, "note": "", "has_fileinfo": has_fileinfo}
@@ -458,6 +494,19 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
             nfo_name = nfo_name  # tvshow.nfo
     nfo_path = folder_path.rstrip("/") + "/" + nfo_name
 
+    # 闸门: NFO 文件**在**(列目录看到了)但内容**读不到** → 拒绝重建。
+    # 否则 _fileinfo/_original_filename 会因为"读不到"返回 None, 把库里已有的
+    # <fileinfo>/<original_filename>/<source> 一起抹成空标签(静默丢数据)。
+    # 读通道只有两条: 本地挂载(local_root) / WebDAV GET(需 account_root 覆盖该目录)。
+    # 读一次现有 NFO 文本, 后面闸门 / ID 校验 / 本机状态保留都用它(避免列目录抖动时
+    # 三次读取拿到三种结果)。
+    existing_text = _existing_nfo_text(cfg, folder_path, [nfo_name]) if existing else None
+    if existing and existing_text is None:
+        raise HTTPException(
+            502, f"读不到现有 NFO 的内容({nfo_name}): 本地挂载与 WebDAV 都取不到 —— "
+                 "为避免抹掉 <fileinfo>/<original_filename>/<source>, 已拒绝覆盖。"
+                 "请把 webdav.account_root 改成 '/' 或给容器挂上媒体目录后重试")
+
     meta = _build_meta(cfg, kind, tmdb_id)
     if not meta:
         raise HTTPException(502, "无法获取元数据(TMDB 直连未返回, 不回退本地缓存)")
@@ -465,7 +514,7 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
     # 非阻塞冲突提示: 更新端点 ID 已钉死(来自 URL/本地缓存),不存在整理侧"反查错配"
     # 的根因,故冲突时【不拒写】,仅记日志 + 在响应带 warning 字段提醒用户 TMDB 可能与库内不一致
     warning = ""
-    ex_ids = _nfo_ids_from_text(_existing_nfo_text(cfg, folder_path, [nfo_name]))
+    ex_ids = _nfo_ids_from_text(existing_text or "")
     new_imdb = (meta.get("imdb_id") or "").strip().lower()
     new_tmdb = str(meta.get("tmdb_id") or "").lower()
     if ex_ids:
@@ -480,15 +529,23 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
     if organize.org_cfg(cfg).get("wikidata", True):
         cache = os.path.join(PROJECT_ROOT, "state", "wikidata_cache.json")
         wikidata = nfo_mod.wikidata_id(meta.get("imdb_id"), cache_file=cache)
-    dateadded = time.time()
-    probed, probe_error = False, ""
+    # 本机状态(dateadded / 观看记录): 从现有 NFO 读回, 刷新元数据时**原样保留** ——
+    # 老代码每次更新都写 time.time(), 结果"加入时间"变成今天、观看状态被清零。
+    state = nfo_mod.read_local_state(existing_text or "")
+    dateadded = state.get("dateadded") or time.time()
+    probed, probe_error, probe_attempted = False, "", False
+    has_fileinfo = True          # 剧集 tvshow.nfo 不写 <fileinfo> → 恒 true(见 nfo_info)
 
     if kind == "tv":
         xml = nfo_mod.build_tvshow_nfo(meta, wikidata=wikidata,
-                                       dateadded=dateadded)
+                                       dateadded=dateadded,
+                                       watched=state.get("watched") or None,
+                                       playcount=state.get("playcount") or None,
+                                       lastplayed=state.get("lastplayed") or None)
     else:
         streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
         if probe and not streamdetails:
+            probe_attempted = True    # 真的跑了一次探测(probed=false 才是失败)
             streamdetails, probe_error = _probe_fileinfo(cfg, folder_path, video)
             probed = bool(streamdetails)
             if probed:
@@ -505,12 +562,27 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
         source = mediainfo.guess_source(orig) if orig else ""
         xml = nfo_mod.build_movie_nfo(meta, info=None, streamdetails=streamdetails,
                                       source=source, original_filename=orig,
-                                      dateadded=dateadded, wikidata=wikidata)
+                                      dateadded=dateadded, wikidata=wikidata,
+                                      watched=state.get("watched") or None,
+                                      playcount=state.get("playcount") or None,
+                                      lastplayed=state.get("lastplayed") or None)
+
+    if kind != "tv":
+        # 写完后的 <fileinfo> 状态: 前端据此判断"已有流信息、不用再提示探测失败"
+        # —— probed=false 曾把"本来就有 / 没必要探"和"探了失败"混成一个信号(审查 P2)。
+        has_fileinfo = bool(streamdetails)
 
     written = cd2.write_file(cfg, nfo_path, xml, base_dir=PROJECT_ROOT)
-    it = cd2.find_file_by_path(cfg, folder_path, nfo_name)
-    wt = it.get("writeTime") if it else ""
+    # 取 writeTime 只是给前端显示"上次更新时间"; 列目录抖一下不该让**已成功写入**
+    # 的整单变成失败(2026-09-26 审查) → 取不到就返回空, 下次 info 会重新读到。
+    try:
+        it = cd2.find_file_by_path(cfg, folder_path, nfo_name)
+        wt = it.get("writeTime") if it else ""
+    except Exception as e:  # noqa: BLE001
+        wt = ""
+        warning = (warning + " | " if warning else "") + f"写入成功,但读取更新时间失败: {str(e)[:120]}"
     return {"ok": True, "path": nfo_path, "name": nfo_name,
             "bytes": written, "updated_at": wt or "",
             "updated_at_text": _fmt_write_time(wt), "warning": warning,
-            "probed": probed, "probe_error": probe_error}
+            "probed": probed, "probe_error": probe_error,
+            "probe_attempted": probe_attempted, "has_fileinfo": has_fileinfo}

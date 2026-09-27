@@ -68,9 +68,17 @@ async def media_title(kind: str, tmdb_id: int, body: TitleBody,
     finally:
         s.close()
 
-    # 让 title 与最终口径一致(设了 = 覆盖值; 清了 = 自动链路重算的结果)
+    # 让 title 与最终口径一致(设了 = 覆盖值; 清了 = 自动链路重算的结果)。
+    # ⚠ TMDB 直连失败【不算保存失败】: custom_title/title 已经落库, 这时再抛 502
+    # 会让前端报"保存失败"而库里其实已改, 用户反复点(2026-09-26 审查 P1)。
     title = new_title
-    meta = _build_meta(cfg, kind, tmdb_id)
+    warning = ""
+    try:
+        meta = _build_meta(cfg, kind, tmdb_id)
+    except Exception as e:  # noqa: BLE001 HTTPException 也一并降级成 warning
+        meta = None
+        detail = getattr(e, "detail", None) or str(e)
+        warning = f"标题已保存, 但 TMDB 直连刷新失败: {str(detail)[:160]}"
     if meta and (meta.get("title") or "").strip():
         title = meta["title"].strip()
         s = SessionLocal()
@@ -81,8 +89,19 @@ async def media_title(kind: str, tmdb_id: int, body: TitleBody,
                 s.commit()
         finally:
             s.close()
+    elif not title:
+        # 清覆盖 + TMDB 挂了 → 回读本地行(上面刚拨回原名), 别返回空标题
+        s = SessionLocal()
+        try:
+            obj = repo.get_tmdb_media_by_id(s, kind, tmdb_id)
+            title = ((obj.title if obj else "") or "").strip()
+        finally:
+            s.close()
 
-    return {"ok": True, "title": title, "custom_title": new_title}
+    # 标题变了 → 执行期元数据缓存立刻失效, 否则 10 分钟内整理会用旧标题写 NFO
+    organize.invalidate_full_meta(kind, tmdb_id)
+
+    return {"ok": True, "title": title, "custom_title": new_title, "warning": warning}
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +248,11 @@ async def media_rename(kind: str, tmdb_id: int, dry_run: bool = False,
         raise HTTPException(400, "kind 仅支持 movie / tv")
 
     def _q():
-        meta = _build_meta(cfg, kind, tmdb_id)
+        # dry_run = 只算不改: 标题兜底也必须【只读】 —— 否则预览一次就把
+        # title/title_checked 钉进库、并消耗掉豆瓣"每条一次"的核对标记(2026-09-26 审查)
+        meta = _build_meta(cfg, kind, tmdb_id, title_read_only=dry_run)
         if not meta:
-            raise HTTPException(502, "无法获取元数据(TMDB 不可达且本地无缓存)")
+            raise HTTPException(502, "无法获取元数据(TMDB 直连未返回, 不回退本地缓存)")
         title = (meta.get("title") or "").strip()
         if not title:
             raise HTTPException(400, "标题为空,无法重命名")
@@ -317,12 +338,18 @@ async def media_rename(kind: str, tmdb_id: int, dry_run: bool = False,
             finally:
                 s.close()
 
+            # ⚠ 目录/视频/字幕/Jellyfin 路径到这里**已经全改完了**。
+            # NFO 重建失败若再往外抛 404/502, 前端会报「重命名失败」, 用户以为没动
+            # 而重试(第二次 409) —— 实际是"改名成功、NFO 待补"。降级成 warning。
+            nfo_warning = ""
             try:
                 nfo = _rebuild_nfo(cfg, kind, tmdb_id, new_dir, nfo_name, new_name)
-            except HTTPException:
-                raise
-            except Exception:  # noqa: BLE001
+            except HTTPException as e:
                 nfo = None
+                nfo_warning = f"已改名, 但 NFO 未重建: {getattr(e, 'detail', e)}"
+            except Exception as e:  # noqa: BLE001
+                nfo = None
+                nfo_warning = f"已改名, 但 NFO 未重建: {str(e)[:160]}"
 
         return {"ok": True, "dry_run": dry_run, "dir": new_dir,
                 "dir_renamed": dir_changed, "dir_conflict": dir_conflict,
@@ -330,6 +357,8 @@ async def media_rename(kind: str, tmdb_id: int, dry_run: bool = False,
                 "files": [{"from": a, "to": b} for a, b in renamed],
                 "skipped": skipped, "nfo_renamed": nfo_renamed,
                 "jellyfin_paths_updated": remapped,
-                "nfo": (nfo or {}).get("path", ""), "warning": (nfo or {}).get("warning", "")}
+                "nfo": (nfo or {}).get("path", ""),
+                "warning": "; ".join(x for x in [(nfo or {}).get("warning", ""),
+                                                 ("" if dry_run else nfo_warning)] if x)}
 
     return await run_in_threadpool(_q)
