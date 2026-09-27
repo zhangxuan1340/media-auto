@@ -4,6 +4,7 @@
 读操作供 API / 脚本查询本地库。
 """
 from datetime import datetime
+import json
 
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
@@ -173,6 +174,8 @@ def upsert_tmdb_seasons(session, tmdb_id, seasons):
 
     ⚠️ tmdb.all_seasons() 用的键是 ``episodes``(整数集数), 这里同时兼容 ``episode_count``,
     否则剧集每季集数会全写成 0(缺失对比直接失效)。
+    ⚠️ 集数变了 → 已缓存的集号(episode_numbers)作废: TMDB 加集后旧集号缺新增的那几集,
+    会把"新出的集"误判成缺失;清空后下次开详情会重新回填。
     """
     for s in seasons:
         obj = (
@@ -184,7 +187,14 @@ def upsert_tmdb_seasons(session, tmdb_id, seasons):
             obj = TmdbSeason(tmdb_id=tmdb_id, season_number=s["number"])
             session.add(obj)
         obj.name = s.get("name", "")
-        obj.episode_count = s.get("episode_count", s.get("episodes", 0)) or 0
+        new_cnt = s.get("episode_count", s.get("episodes", 0)) or 0
+        if obj.episode_numbers and obj.episode_count != new_cnt:
+            try:
+                if len(json.loads(obj.episode_numbers or "[]") or []) != new_cnt:
+                    obj.episode_numbers = ""   # 过期 → 下次开详情重新回填
+            except Exception:  # noqa: BLE001
+                obj.episode_numbers = ""
+        obj.episode_count = new_cnt
         obj.air_date = s.get("air_date", "")
         obj.in_production = bool(s.get("in_production"))
     session.flush()
