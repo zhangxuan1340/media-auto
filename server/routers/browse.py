@@ -463,6 +463,28 @@ async def trending(kind: str, window: str = Query("week"),
 # ---------------------------------------------------------------------------
 # 浏览 / 筛选
 # ---------------------------------------------------------------------------
+# tmdb_media 全量行缓存: 浏览页每翻一页都要把整表 ORM 拉出来(电影 4157 行冷查询
+# ~1.2s), 滚动加载下一页时这就是主要卡顿 → 缓存复用, 失效戳 = (count, max(synced_at)):
+# 同步任务新增/更新/删除必改其一 → 一变就重建, 其余请求 ~ms 级直接复用(比纯 TTL 更准)。
+# ⚠️ 行必须在本次会话里"最后"查询(其后不 commit/rollback), 否则属性会被过期,
+# 离开会话后再读会 DetachedInstanceError。
+_TMDB_MEDIA_ROWS = {}
+
+
+def _tmdb_media_rows(session, kind):
+    from sqlalchemy import func
+    from db.models import TmdbMedia
+    cnt, mx = (session.query(func.count(TmdbMedia.id), func.max(TmdbMedia.synced_at))
+               .filter(TmdbMedia.kind == kind).one())
+    stamp = (cnt, str(mx))
+    hit = _TMDB_MEDIA_ROWS.get(kind)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    rows = repo.get_tmdb_media(session, kind=kind, q="", limit=100000)
+    _TMDB_MEDIA_ROWS[kind] = (stamp, rows)
+    return rows
+
+
 @router.get("/browse")
 async def browse(kind: str = Query("movie"), q: str = Query(""),
                  genre: int = Query(0), year: int = Query(0),
@@ -556,7 +578,9 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
             if not meta["_cached"] or \
                     str(genre) not in (cached[tid].genres or "").split(","):
                 continue
-        if hide_complete and complete and in_lib:
+        # "隐藏已完整作品"只作用于「全部」: 显式选了 库内/完整 却因为这个开关被清空
+        # (旧行为)等于筛选器失效, 选了也没东西可看。
+        if hide_complete and status == "all" and complete and in_lib:
             continue
         if status == "missing" and in_lib:
             continue
@@ -1057,8 +1081,65 @@ async def browse_years(kind: str = Query("movie")):
 # 缺失页(电影未拥有 + 剧集分集级缺失)
 # ---------------------------------------------------------------------------
 @router.get("/missing")
-async def missing(kind: str = Query("tv"), cfg: dict = Depends(get_config)):
-    """缺失页。kind=tv: 分集级缺失(精确到 SxxExx); kind=movie: 不在库的电影。"""
+async def missing(kind: str = Query("tv"), offset: int = Query(0, ge=0),
+                  limit: int = Query(50, ge=1, le=200),
+                  cfg: dict = Depends(get_config)):
+    """缺失页(**分页**): {items,total,missingSum,unknownCount,offset,limit}。
+
+    kind=tv: 分集级缺失(精确到 SxxExx); kind=movie: 不在库的电影。
+    整表按 kind 缓存 30s 再切片 —— 全量重算(tv 逐剧 2200+ 次季查询 + 逐集对比,
+    实测 ~1s)在滚动加载时每页都要付一次, 体验就是"一拉就卡"。
+    """
+    payload = await run_in_threadpool(_missing_payload, kind)
+    # 有剧还缺 TMDB 真实集号 → 后台补(不阻塞本请求; 稳态 0 请求)。
+    # 没有真实集号的剧在本轮只显示"编号未同步", 不报缺/多。
+    await _kick_numbers_hydration(cfg)
+    return {"items": payload["items"][offset:offset + limit],
+            "total": payload["total"],
+            "missingSum": payload["missingSum"],
+            "unknownCount": payload["unknownCount"],
+            "offset": offset, "limit": limit}
+
+
+# 缺失页整表缓存: kind → (stamp, payload)。滚动加载靠它切片 —— 全量重算(tv 逐剧
+# 2200+ 次季查询 + 逐集对比, 实测 ~1.4s)在每一页都付一次的话, 滚动就是"一拉就卡"。
+# 失效靠 stamp 而不是 TTL: 无写入时永远不重算, 一旦同步/回填/改设置立刻反映(毫秒级查询)。
+_MISSING_CACHE = {}
+
+
+def _missing_stamp(s, kind):
+    """会改变缺失清单的全部写入的失效戳(几条聚合查询, 毫秒级)。"""
+    from sqlalchemy import func
+    from db.models import JfEpisode, Media, MediaType, TmdbBlocklist, TmdbMedia, TmdbSeason
+    mt = MediaType.MOVIE if kind == "movie" else MediaType.TV
+    tm = s.query(func.count(TmdbMedia.id), func.max(TmdbMedia.synced_at)) \
+          .filter(TmdbMedia.kind == kind).one()
+    se = s.query(func.count(TmdbSeason.id), func.max(TmdbSeason.synced_at)).one()
+    ep = s.query(func.count(JfEpisode.id), func.max(JfEpisode.synced_at)).one()
+    bl = s.query(func.count(TmdbBlocklist.id)).filter(TmdbBlocklist.kind == kind).scalar()
+    md = s.query(func.count(Media.id), func.max(Media.updated_at)) \
+          .filter(Media.media_type == mt).one()
+    return (tm, se, ep, bl, md,
+            repo.get_setting(s, "hide_complete", "false"),
+            repo.get_setting(s, "check_missing_s0", "false"))
+
+
+def _missing_payload(kind):
+    s = SessionLocal()
+    try:
+        stamp = _missing_stamp(s, kind)
+    finally:
+        s.close()
+    hit = _MISSING_CACHE.get(kind)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    payload = _build_missing(kind)
+    _MISSING_CACHE[kind] = (stamp, payload)
+    return payload
+
+
+def _build_missing(kind):
+    """缺失页全量卡片 + 汇总(原 /missing 的主体逻辑, 只是挪出来以便缓存)。"""
     def _q():
         s = SessionLocal()
         try:
@@ -1075,7 +1156,7 @@ async def missing(kind: str = Query("tv"), cfg: dict = Depends(get_config)):
                         continue
                     out.append(_media_card(r, False, False, False))
                 out.sort(key=lambda x: (x["inProduction"], x["title"]))
-                return out
+                return {"items": out, "total": len(out), "missingSum": 0, "unknownCount": 0}
             # tv: 分集级
             eps_ready = _jf_episodes_ready(s)
             s_map = _series_item_to_tmdb(s)
@@ -1115,14 +1196,13 @@ async def missing(kind: str = Query("tv"), cfg: dict = Depends(get_config)):
                                               "numbersSynced": nsync,
                                               "episodesSynced": True}))
             out.sort(key=lambda x: (-(x["missingCount"] or 0), x["inLibrary"], x["title"]))
-            return out
+            return {"items": out, "total": len(out),
+                    # 汇总给页头: 缺失 N 集 + N 部集号待同步(未同步时 missingCount 为 None)
+                    "missingSum": sum((x.get("missingCount") or 0) for x in out),
+                    "unknownCount": sum(1 for x in out if x.get("missingCount") is None)}
         finally:
             s.close()
-    result = await run_in_threadpool(_q)
-    # 有剧还缺 TMDB 真实集号 → 后台补(不阻塞本请求; 稳态 0 请求)。
-    # 没有真实集号的剧在本轮只显示"编号未同步", 不报缺/多。
-    await _kick_numbers_hydration(cfg)
-    return result
+    return _q()
 
 
 _hydrate_task = None   # 全局: 同一时刻只跑一个后台回填任务
