@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """生成 PWA 图标(server/static/icons/): icon-192 / icon-512 / apple-touch-icon-180。
    风格对齐 iOS 26: 大圆角 + 蓝紫对角渐变底 + 白色媒体(播放+胶片)符号 + 柔和高光 + 玻璃内描边。
-   用隔离环境 Pillow 运行:
+   用装了 Pillow 的解释器运行:
      python3 scripts/gen_icons.py
 """
 from pathlib import Path
