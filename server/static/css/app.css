@@ -510,6 +510,11 @@
   .qgold{display:inline-flex;align-items:center;gap:3px;flex:none;font-size:10px;font-weight:700;padding:1.5px 8px;border-radius:6px;
     background:linear-gradient(135deg,#ffd60a,#ff9f0a);color:#6b4b00;border:1px solid rgba(255,159,10,.4);
     box-shadow:0 1px 4px rgba(255,159,10,.3),inset 0 1px 0 rgba(255,255,255,.5);margin-right:7px;letter-spacing:.3px;vertical-align:1px}
+  /* 前排发布组徽章: 命中「种子抓取规则」配置的组(FRDS/Beitai…), 排序与自动推送都优先 */
+  .qgrp{display:inline-flex;align-items:center;gap:3px;flex:none;font-size:10px;font-weight:700;padding:1.5px 8px;border-radius:6px;
+    background:linear-gradient(135deg,rgba(48,209,88,.20),rgba(10,132,255,.14));color:var(--ok);
+    border:1px solid rgba(48,209,88,.45);box-shadow:0 1px 3px rgba(48,209,88,.18);
+    margin-right:7px;letter-spacing:.3px;vertical-align:1px}
   .leech{color:var(--muted);font-weight:500}
   .res .s .sz{display:inline-flex;align-items:center;gap:3px}
   .res .s .sz .icn{width:12px;height:12px}

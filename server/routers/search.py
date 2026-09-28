@@ -14,8 +14,9 @@
 
 排序(sort 参数):
   - relevance     引擎原序(默认), 按页直取最快, 不拉全量
-  - quality       质量优先: 按种子名打分(2160p>HDR>H.265/AV1>Atmos>简繁英字幕>国语…),
-                  高分在前, 同分按大小→种子数; 拉全量排序+120s 缓存
+  - quality       质量优先: **前排发布组(种子抓取规则 search.group_priority)整批排最前**
+                  (组序=配置顺序), 组内/其余再按质量分(2160p>HDR>H.265/AV1>Atmos>简繁英字幕>国语…),
+                  同分按大小→种子数; 拉全量排序+120s 缓存(改配置立即换 key 重排)
   - size_desc/size_asc  全局大小排序: 拉全量(上限 200 条)排序后按 limit 切片分页,
                         同查询+排序结果缓存 120s, 「加载更多」不重拉
   - seeders_desc  全局种子数排序; Next-Web 源无 seeders, 该源下退化为原序(缺失值排末尾)
@@ -109,13 +110,74 @@ def is_golden(name, cfg=None):
     或属于 config `search.golden_groups` 里的自压发布组(默认金标, 不依赖文件名)。"""
     n = (name or "").upper()
     return bool(golden_by(name, cfg) or (_ZH_SUB.search(n) and _GUOYU.search(n)))
+
+
+# ---------------------------------------------------------------------------
+# 前排发布组(种子抓取规则): 用户 2026-09-28 要求 FRDS / Beitai / 各大 PT 站的组
+# "前排"—— 详情页「质量优先」搜索与追踪自动推送都先选它们。
+# 配置 `search.group_priority`(顺序 = 优先级, 一项一个组名, 大小写不敏感):
+#   - 键不存在(老库) → 用下面的默认列表;
+#   - 显式空数组      → 关闭前排规则。
+# ---------------------------------------------------------------------------
+DEFAULT_GROUP_PRIORITY = ["FRDS", "Beitai", "HHD", "CHD", "OurBits", "Pter",
+                          "MTeam", "TTG", "SSD", "HDChina", "DreamHD", "CHDBits", "Wiki"]
+
+
+def group_priority_list(cfg):
+    """前排组列表: 按配置顺序, 去空白、大小写不敏感去重(保留首次出现的写法)。"""
+    sec = (cfg or {}).get("search") or {}
+    raw = sec["group_priority"] if "group_priority" in sec else DEFAULT_GROUP_PRIORITY
+    if isinstance(raw, str):
+        raw = [raw]
+    out, seen = [], set()
+    for g in raw or []:
+        g = str(g or "").strip()
+        k = g.upper()
+        if g and k not in seen:
+            seen.add(k)
+            out.append(g)
+    return out
+
+
+_grp_re_cache = {}
+
+
+def _group_re(g):
+    """组名匹配式: 两侧不紧挨字母/数字 —— `CHDRip` 不算组 `CHD`、`SSDX` 不算 `SSD`,
+    而 `-Beitai` / `[FRDS]` / ` FRDS ` 都能中(组名先转大写再比, 大小写不敏感)。"""
+    k = g.upper()
+    rx = _grp_re_cache.get(k)
+    if rx is None:
+        rx = re.compile(r"(?<![A-Z0-9])" + re.escape(k) + r"(?![A-Z0-9])")
+        _grp_re_cache[k] = rx
+    return rx
+
+
+def group_rank(name, cfg):
+    """种子名命中的前排组序号(0 = 最靠前), 没命中返回 None。"""
+    n = (name or "").upper()
+    if not n:
+        return None
+    for i, g in enumerate(group_priority_list(cfg)):
+        if _group_re(g).search(n):
+            return i
+    return None
+
+
 _SORT_CAP = 200          # 全局排序时最多拉取条数(防止热门词全量过大)
 _SORT_CACHE_TTL = 120    # 全量排序结果缓存秒数(同一查询+排序, "加载更多"不重拉)
 _sort_cache = {}         # key -> (ts, sorted_items)
 
 
-def _sort_key(q, sort, source):
-    return f"{source}|{sort}|{q.strip().lower()}"
+def _rule_fingerprint(cfg):
+    """排序规则指纹(前排组 + 金标组): 改了配置就换 key, 不用等 120s 缓存过期。"""
+    sec = (cfg or {}).get("search") or {}
+    golden = [str(g or "").strip().lower() for g in (sec.get("golden_groups") or [])]
+    return "|".join(g.lower() for g in group_priority_list(cfg)) + "#" + ",".join(golden)
+
+
+def _sort_key(q, sort, source, cfg=None):
+    return f"{source}|{sort}|{q.strip().lower()}|{_rule_fingerprint(cfg)}"
 
 
 def _cache_get(key):
@@ -138,9 +200,11 @@ def _cache_put(key, items):
 def _apply_sort(items, sort, cfg=None):
     """就地排序(全局)。relevance 不动; 缺失值的排到末尾, 不报错。"""
     if sort == "quality":
-        # 质量分降序; 同分按大小降序(同分辨率里大文件=更高码率/Remux 更优);
-        # 再同分按 seeders(Next-Web 源无 seeders → 缺失排末尾, 同值保持原序)
+        # 前排组(种子抓取规则)先按配置顺序整批排最前, 组内/其余再比质量:
+        # 质量分降序 → 同分按大小降序(同分辨率里大文件=更高码率/Remux 更优)
+        # → 再同分按 seeders(Next-Web 源无 seeders → 缺失排末尾, 同值保持原序)
         items.sort(key=lambda r: (
+            _group_rank_key(r.get("name"), cfg),
             quality_score(r.get("name"), cfg),
             r.get("size") or 0,
             r.get("seeders") is not None, r.get("seeders") or 0,
@@ -153,6 +217,35 @@ def _apply_sort(items, sort, cfg=None):
         # 有 seeders 的按值降序排前, seeders=None(Next-Web 源) 的排最后
         items.sort(key=lambda r: (r.get("seeders") is not None, r.get("seeders") or 0), reverse=True)
     return items
+
+
+def _group_rank_key(name, cfg):
+    """排序用的前排组键: (是否前排, 序号取负) —— reverse=True 下越大越靠前,
+    所以 (1, 0) 的 FRDS 排在 (1, -1) 的 Beitai 前, 非前排组统一 (0, 0) 垫底。"""
+    pr = group_rank(name, cfg)
+    if pr is None:
+        return (0, 0)
+    return (1, -pr)
+
+
+def _annotate_group(items, cfg):
+    """就地给 items 追加 groupRank(前排组序号, 未命中 None) / groupName(命中的组名),
+    供前端「前排」徽章与双查询合并后的同规则重排使用。"""
+    names = group_priority_list(cfg)
+    for it in items:
+        pr = group_rank(it.get("name"), cfg)
+        it["groupRank"] = pr
+        it["groupName"] = names[pr] if pr is not None else None
+    return items
+
+
+def _annotate_quality(items, cfg):
+    """就地回传质量分/金标/前排组: 双查询合并后前端按同规则重排, 徽章渲染。"""
+    for it in items:
+        it["qualityScore"] = quality_score(it.get("name"), cfg)
+        it["golden"] = is_golden(it.get("name"), cfg)
+        it["goldenBy"] = golden_by(it.get("name"), cfg)  # 命中自压组名 → 前端标注"自压"
+    return _annotate_group(items, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -340,11 +433,11 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
 
     # ---- 非 relevance: 拉全量 → 全局排序 → 按 limit 切片分页 ----
     if sort != "relevance":
-        key = _sort_key(q, sort, source)
+        key = _sort_key(q, sort, source, cfg)   # cfg 进 key: 改前排组/金标组不等缓存过期
         all_items = _cache_get(key)
         try:
             if all_items is None:
-                all_items = _apply_sort(await _fetch_all(source, cfg, q, _SORT_CAP), sort)
+                all_items = _apply_sort(await _fetch_all(source, cfg, q, _SORT_CAP), sort, cfg)
                 _cache_put(key, all_items)
         except Exception as e:  # noqa: BLE001
             label = "Bitmagnet-Next-Web" if source == "next_web" else "Bitmagnet"
@@ -353,12 +446,11 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         start = (page - 1) * limit
         page_items = all_items[start:start + limit]
         has_more = start + limit < len(all_items)
+        # 回传前端: 双查询合并后按同规则重排, 前排/金标徽章渲染
         if sort == "quality":
-            # 质量分+金标回传前端: 双查询合并后按同规则重排, 金标徽章渲染
-            for it in page_items:
-                it["qualityScore"] = quality_score(it.get("name"), cfg)
-                it["golden"] = is_golden(it.get("name"), cfg)
-                it["goldenBy"] = golden_by(it.get("name"), cfg)  # 命中自压组名 → 前端标注"自压"
+            _annotate_quality(page_items, cfg)
+        else:
+            _annotate_group(page_items, cfg)
         _annotate_pushed(page_items)
         return {
             "source": source, "items": page_items, "hasMore": has_more,
@@ -376,5 +468,6 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         label = "Bitmagnet-Next-Web" if source == "next_web" else "Bitmagnet"
         raise HTTPException(status_code=502, detail=f"{label} 请求失败: {e}")
 
+    _annotate_group(items, cfg)   # 前排徽章在相关性排序下也照常显示
     _annotate_pushed(items)
     return {"source": source, "items": items, "hasMore": has_more, "nextPage": next_page, "sort": sort}

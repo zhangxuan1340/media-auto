@@ -523,16 +523,28 @@ async function openSearchOnly(q){
   searchMagnets(q, q);
 }
 
-// 2026-09 三版: 默认「质量优先」—— 2160p/HDR/H.265/字幕/国语 加分高的种子排前(用户指定);
-// 相关性=引擎原序(最快, 不拉全量), 大小/种子数=全局排序
-const MAG_SORTS = [['quality','质量优先 4K/HDR/字幕'],['relevance','相关性(最快)'],['size_desc','大小 ↓ 从大到小'],['size_asc','大小 ↑ 从小到大'],['seeders_desc','种子 ↓ 从多到少']];
+// 2026-09 四版: 默认「质量优先」—— 前排发布组(通用 → 种子抓取规则 search.group_priority)整批最前,
+// 组内再比 2160p/HDR/H.265/字幕/国语 加分; 相关性=引擎原序(最快, 不拉全量), 大小/种子数=全局排序
+const MAG_SORTS = [['quality','质量优先(前排组先)'],['relevance','相关性(最快)'],['size_desc','大小 ↓ 从大到小'],['size_asc','大小 ↑ 从小到大'],['seeders_desc','种子 ↓ 从多到少']];
 
 // ---- 磁力多查询: 中文标题搜一遍 + 英文(原名)标题搜一遍, 合并去重 ----
 // 单查中文片名常只命中中文站点/已洗码资源, 英文原名能命中发布组原盘(英文命名), 双查并集更全更准。
 function _magKey(r){ return r.infoHash || ((r.name||'')+'|'+(r.size||'')); }
 function _magSortCmp(sort){
   // 与后端 _apply_sort 同规则(seeders 缺失排末尾); relevance 返回空比较器
-  if(sort==='quality') return (a,b)=>((b.qualityScore||0)-(a.qualityScore||0))||((b.size||0)-(a.size||0));
+  if(sort==='quality') return (a,b)=>{
+    // 前排组先(通用 → 种子抓取规则, 顺序 = 优先级), 组内/其余再按质量分 → 大小 → 种子数
+    const at=a.groupRank==null?0:1, bt=b.groupRank==null?0:1;
+    if(at!==bt) return bt-at;
+    if(at===1 && a.groupRank!==b.groupRank) return a.groupRank-b.groupRank;
+    const qs=(b.qualityScore||0)-(a.qualityScore||0);
+    if(qs) return qs;
+    const sz=(b.size||0)-(a.size||0);
+    if(sz) return sz;
+    const an=(a.seeders==null), bn=(b.seeders==null);
+    if(an!==bn) return an?1:-1;
+    return (b.seeders||0)-(a.seeders||0);
+  };
   if(sort==='size_desc') return (a,b)=>(b.size||0)-(a.size||0);
   if(sort==='size_asc') return (a,b)=>(a.size||0)-(b.size||0);
   if(sort==='seeders_desc') return (a,b)=>{
@@ -578,6 +590,11 @@ function _magSortHtml(box){
   return `<select class="mag-sort" onchange="changeMagSort(this)">`
     + MAG_SORTS.map(([v,l])=>`<option value="${v}"${v===cur?' selected':''}>${l}</option>`).join('') + `</select>`;
 }
+function _grpBadge(r){
+  // 前排发布组徽章(种子抓取规则): 通用页配置的组, 排序与自动推送都优先
+  if(!r || r.groupRank == null) return '';
+  return `<span class="qgrp" title="前排发布组 — 管理 → 通用 → 种子抓取规则配置(顺序 = 优先级);「质量优先」排序与追踪自动推送都先选它">前排${r.groupName?` · ${esc(r.groupName)}`:''}</span>`;
+}
 async function searchMagnets(q, title, boxSel, limit, extra){
   limit = limit || 30;  // 默认拉 30 条(站点每页 10 条, 后端翻 3 页); 双查询并行, 首屏更快; 「加载更多」续翻
   extra = extra || {};
@@ -597,7 +614,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
     box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
       <div class="res"><div class="info">
-        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${esc(r.name||'')}</div>
+        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name)}
         ${_pushBadge(r)}
         <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 2160p/HDR/H.265/字幕/国语 加分, 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
@@ -654,7 +671,7 @@ async function loadMoreMagnets(btn){
     const base = box._res.length;  // 追加项的推送索引基数
     const html = res.map((r,i)=>`
       <div class="res"><div class="info">
-        <div class="n">${esc(r.name||'')}</div>
+        <div class="n">${_grpBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name)}
         ${_pushBadge(r)}
         <div class="s"><span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>

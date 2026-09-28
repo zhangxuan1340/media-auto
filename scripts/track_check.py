@@ -248,12 +248,23 @@ def _passes(size_bytes, name, settings):
     return True
 
 
-def _pick_best(items):
-    """已过筛选的磁力里挑最优: 种子数优先(无则 0), 再按体积大者优先。"""
+def _pick_best(items, cfg=None):
+    """已过筛选的磁力里挑最优: 前排组(种子抓取规则)优先, 再种子数, 再体积大者。
+
+    前排组规则与详情页搜索共用 `server.routers.search.group_priority_list`(顺序 = 优先级),
+    所以详情页怎么排, 追踪自动推送就怎么挑; 配置为空数组 = 回到纯种子数口径。
+    """
     if not items:
         return None
-    return sorted(items, key=lambda x: (x.get("seeders") or 0, x.get("size") or 0),
-                  reverse=True)[0]
+    from server.routers.search import group_rank   # 惰性导入: 避免模块加载期牵连 server
+
+    def key(x):
+        pr = group_rank(x.get("name"), cfg)
+        return (0 if pr is None else 1,
+                -pr if pr is not None else 0,   # reverse 下 -pr 越大越靠前 → 序号小的先
+                x.get("seeders") or 0,
+                x.get("size") or 0)
+    return sorted(items, key=key, reverse=True)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -331,13 +342,14 @@ async def _detect_show_new(cfg, track):
 # ---------------------------------------------------------------------------
 async def _handle_items(cfg, settings, to_folder, base_dir, push_enabled,
                         kind, title, items, log):
-    """对已搜到的磁力列表: 筛选(片源/分辨率/发布组/大小)→ 挑最优 → (可选)推 CD2。
+    """对已搜到的磁力列表: 筛选(片源/分辨率/发布组/大小)→ 挑最优(前排组优先)→ (可选)推 CD2。
 
     返回 (pushed: bool, note: str)。pushed=True 表示已推 CD2。
     """
     if not items:
         return False, "无磁力"
-    hit = _pick_best([it for it in items if _passes(it.get("size"), it.get("name"), settings)])
+    hit = _pick_best([it for it in items if _passes(it.get("size"), it.get("name"), settings)],
+                     cfg)
     if not hit:
         return False, f"{len(items)} 条磁力, 无符合筛选的({_rule_summary(settings)})"
     if not push_enabled:
