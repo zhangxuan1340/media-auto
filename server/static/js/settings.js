@@ -180,13 +180,15 @@ const CFG_GROUPS = [
     {p: 'tmdb.language', label: '语言'},
     {p: 'tmdb.hosts', label: 'Host 候选', type: 'list', desc: '每行一个(不带协议), 按顺序尝试'},
   ]},
-  {title: '磁力搜索源', desc: '两个源相互独立, 都启用时按「优先源」选择。',
+  {title: '磁力搜索源', desc: '两个源相互独立, 都启用时按「优先源」选择。地址旁可切 http/https, 或点「检测」自动找出能连通的协议。',
    fields: [
     {p: 'bitmagnet.enabled', label: 'Bitmagnet(原生 GraphQL)', type: 'checkbox', desc: '有 seeders/leechers 与 TMDB 元数据'},
-    {p: 'bitmagnet.url', label: 'Bitmagnet 地址'},
+    {p: 'bitmagnet.url', label: 'Bitmagnet 地址', probe: 'graphql',
+     desc: 'GraphQL 端点, 如 http://192.168.1.100:3333/graphql'},
     {p: 'bitmagnet.limit', label: '返回条数', type: 'number'},
     {p: 'bitmagnet_next_web.enabled', label: 'Bitmagnet-Next-Web', type: 'checkbox', desc: '改版站 REST 源, 通常更快'},
-    {p: 'bitmagnet_next_web.base', label: '站点 Base'},
+    {p: 'bitmagnet_next_web.base', label: '站点 Base', probe: 'rest',
+     desc: '改版站根地址, 如 https://your-site.example.com(不内置站点)'},
     {p: 'bitmagnet_next_web.limit', label: '返回条数', type: 'number'},
     {p: 'search.primary', label: '优先源', type: 'select',
      options: [['next_web', 'next_web(更快)'], ['native', 'native(原生)']]},
@@ -273,6 +275,19 @@ function _cfgField(f){
   }else if(f.type === 'list'){
     const txt = Array.isArray(v) ? v.join('\n') : (v == null ? '' : String(v));
     input = `<textarea class="cfg-in cfg-list" rows="3" data-cfg="${f.p}" data-kind="list" ${on}>${esc(txt)}</textarea>`;
+  }else if(f.probe){
+    // 带协议探测的地址框: 输入 + http/https 切换 + 「检测」自动找能连通的协议
+    const val = v == null ? '' : String(v);
+    input = `<div class="cfg-probe">
+      <input class="cfg-in" type="text" data-cfg="${f.p}" value="${esc(val)}"
+        placeholder="http(s)://主机[:端口][/路径]" ${on} autocomplete="off"
+        onblur="cfgAutoProbe('${f.p}','${f.probe}')">
+      <div class="cfg-seg">
+        <button type="button" onclick="cfgScheme('${f.p}','http')">http</button>
+        <button type="button" onclick="cfgScheme('${f.p}','https')">https</button>
+      </div>
+      <button type="button" class="mbtn sm" onclick="cfgProbe('${f.p}','${f.probe}',this)">检测</button>
+    </div>`;
   }else{
     const type = f.type === 'number' ? 'number' : (f.type === 'password' ? 'password' : 'text');
     const val = v == null ? '' : (Array.isArray(v) ? v.join(',') : String(v));
@@ -281,6 +296,45 @@ function _cfgField(f){
   }
   return `<div class="cfg-field"><span class="cfg-lab">${esc(f.label)}</span>${input}${desc}</div>`;
 }
+// ---- 地址框的协议处理(http/https 切换 + 自动探测) ----
+function _probeEl(p){
+  return document.querySelector(`#manageBody [data-cfg="${p}"]`);
+}
+// 手动切协议: 把输入框的协议头换掉(没写协议就补上)
+function cfgScheme(p, scheme){
+  const el = _probeEl(p); if(!el) return;
+  const raw = (el.value || '').trim().replace(/^https?:\/\//i, '');
+  el.value = raw ? `${scheme}://${raw}` : `${scheme}://`;
+  _cfgTouch();
+}
+// 失焦时若没写协议头 → 自动按 https → http 检测(写了就尊重用户的选择, 不动)
+function cfgAutoProbe(p, kind){
+  const el = _probeEl(p); if(!el) return;
+  const raw = (el.value || '').trim();
+  if(!raw || /^https?:\/\//i.test(raw)) return;
+  cfgProbe(p, kind);
+}
+// 后端探测: 收到 HTTP 响应即算通, 返回第一个通的地址写回输入框
+async function cfgProbe(p, kind, btn){
+  const el = _probeEl(p); if(!el) return;
+  const raw = (el.value || '').trim();
+  if(!raw){ toast('先填地址再检测'); return; }
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '检测中…'; }
+  try{
+    const r = await api(`/api/search/probe?url=${encodeURIComponent(raw)}&kind=${encodeURIComponent(kind || 'rest')}`);
+    if(r.ok){
+      el.value = r.url;
+      _cfgTouch();
+      toast(`协议可用: ${r.url}`);
+    }else{
+      const detail = (r.tried || []).map(t => `${t.url} → ${t.detail}`).join('; ');
+      toast('两个协议都不通: ' + detail.slice(0, 180));
+    }
+  }catch(e){ toast('检测失败: ' + e.message); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old || '检测'; } }
+}
+
 function _cfgRender(){
   const box = $('#cfgGroups'); if(!box) return;
   if(_cfgTab < 0 || _cfgTab >= CFG_GROUPS.length) _cfgTab = 0;

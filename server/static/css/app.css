@@ -882,6 +882,13 @@
   .cfg-in:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 4px rgba(10,132,255,.14);background:var(--input-focus)}
   .cfg-in::placeholder{color:var(--muted);opacity:.6}
   textarea.cfg-in{resize:vertical;line-height:1.55;min-height:64px}
+  .cfg-probe{display:flex;gap:6px;align-items:center;min-width:0}
+  .cfg-probe .cfg-in{flex:1;min-width:0}
+  .cfg-probe .mbtn.sm{flex:none;white-space:nowrap}
+  .cfg-seg{display:inline-flex;background:var(--seg-bg);border-radius:9px;padding:3px;gap:2px;flex:none}
+  .cfg-seg button{border:0;background:transparent;padding:6px 9px;font-size:12px;font-weight:600;color:var(--muted);
+    border-radius:7px;cursor:pointer;transition:.18s var(--ease)}
+  .cfg-seg button:hover{color:var(--fg)}
   .cfg-list{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   .cfg-check{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;
     padding:7px 10px;border:1px solid var(--line);border-radius:10px;background:var(--input-bg);min-height:38px}

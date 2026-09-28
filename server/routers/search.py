@@ -2,7 +2,7 @@
 
 两个磁力源, 由配置的 enabled 开关决定用哪个(启用哪个用哪个):
   - 原生 Bitmagnet        (bitmagnet.enabled)          GraphQL, 带 seeders/leechers
-  - Bitmagnet-Next-Web    (bitmagnet_next_web.enabled) REST(如 https://your-site.example.com), 通常更快, 无 seeders/leechers
+  - Bitmagnet-Next-Web    (bitmagnet_next_web.enabled) REST(改版站), 通常更快, 无 seeders/leechers
 
 选择规则:
   - 只启用一个   → 走那一个
@@ -31,7 +31,7 @@ from server.config import get_config
 
 router = APIRouter(prefix="/api/search", tags=["bitmagnet"], dependencies=[Depends(require_auth)])
 
-# 两个源都启用时优先用哪个: "next_web"(默认, your-site.example.com 更快) 或 "native"
+# 两个源都启用时优先用哪个: "next_web"(默认, 通常更快) 或 "native"
 _DEFAULT_PRIMARY = "next_web"
 
 # 排序模式: relevance=引擎原序(默认) | size_desc=大小从大到小 | size_asc=大小从小到大 | seeders_desc=种子从多到少
@@ -268,6 +268,60 @@ async def _fetch_all(source, cfg, q, cap):
                 "seeders": r.get("seeders"), "leechers": r.get("leechers"), "magnet": magnet,
             })
         return out
+
+
+# ---------------------------------------------------------------------------
+# 协议探测(管理 → 通用 → 磁力搜索源): 输入地址后自动试 https / http
+# ---------------------------------------------------------------------------
+_PROBE_TIMEOUT = 8.0
+
+
+async def _probe_one(url: str, kind: str):
+    """探一个完整地址: 只要收到 HTTP 响应就算通(4xx 也说明协议与端口是通的)。"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, trust_env=False, verify=False,
+                                     follow_redirects=True) as c:
+            if kind == "graphql":
+                # Bitmagnet 地址本身就是端点(如 http://host:3333/graphql), POST 最小查询
+                r = await c.post(url, json={"query": "{__typename}"},
+                                 headers={"Accept": "application/json", "User-Agent": "media-auto"})
+            else:
+                # 改版站按约定提供 GET {base}/api/stats
+                r = await c.get(url.rstrip("/") + "/api/stats",
+                                headers={"Accept": "application/json", "User-Agent": "media-auto"})
+        return True, f"HTTP {r.status_code}"
+    except Exception as e:  # noqa: BLE001
+        return False, (str(e).strip() or e.__class__.__name__)[:140]
+
+
+@router.get("/probe")
+async def api_probe(url: str = Query(..., min_length=1), kind: str = Query("rest")):
+    """按给定地址逐个协议试, 返回第一个连通的完整地址。
+
+    url 可带可不带协议头: 带则先试它、再试另一个; 不带按 https → http 顺序试。
+    kind: `rest` = 改版站 `{base}/api/stats`; `graphql` = Bitmagnet 端点,
+    地址没写路径时自动补 `/graphql`。
+    """
+    if kind not in ("rest", "graphql"):
+        kind = "rest"
+    raw = (url or "").strip()
+    m = re.match(r"^(?P<scheme>https?)://(?P<rest>.+)$", raw, re.IGNORECASE)
+    rest = (m.group("rest") if m else raw).strip().rstrip("/")
+    if not rest:
+        raise HTTPException(400, "地址不能为空")
+    if kind == "graphql" and "/" not in rest:
+        rest = rest + "/graphql"      # 只给了 host[:port] → 补端点路径
+    first = m.group("scheme").lower() if m else None
+    schemes = ([first] if first else []) + [s for s in ("https", "http") if s != first]
+    tried = []
+    for scheme in schemes:
+        full = f"{scheme}://{rest}"
+        ok, detail = await _probe_one(full, kind)
+        tried.append({"url": full, "ok": ok, "detail": detail})
+        if ok:
+            return {"ok": True, "url": full, "scheme": scheme, "tried": tried}
+    return {"ok": False, "url": "", "scheme": None, "tried": tried}
 
 
 @router.get("")
