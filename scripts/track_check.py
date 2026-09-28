@@ -14,9 +14,15 @@ media-auto / track_check —— 追踪检查引擎(演员新作 / 剧集新季 �
 自动推送(可全局开/关 + 每条覆盖):
   - 全局: settings 表 track_auto_push (默认关 —— 绝不偷偷往 115 推)。
   - 每条: Track.auto_push (None=跟随全局 / True=强制开 / False=强制关)。
-  - 命中"分辨率 + 大小范围"筛选才推: 只认 4K 与 1080p, 各自有独立大小区间;
-    其它分辨率一律不推。推不动(无命中)就只记录、不推 —— 宁可让用户手动判断,
-    也不推一个可能不对的链接(与全项目"不兜底"一致)。
+  - 命中「推送筛选 + 大小范围」才推, 四个维度全过才推:
+      分辨率: track_resolutions, 可选 2160p/1080p/720p/480p;
+              **从未设置过 = 默认 2160p,1080p**(= 上线前的历史行为), 显式清空 = 全部档;
+      片源:   track_sources, 可选 REMUX/BLURAY/WEBDL/WEBRIP/HDTV/DVD; 空 = 不限;
+      发布组: track_groups, 名字尾巴 -GROUP 匹配(如 SPARK,Sai); 空 = 不限;
+      大小:   2160p/1080p 各自独立区间; 其它分辨率没有区间 = 不限大小。
+    **认不出就不推**: 分辨率认不出 → 不推; 开了片源/发布组筛选而名字里认不出 → 不推
+    (不猜, 宁可让用户手动判断, 也不推一个可能不对的链接)。
+    推不动(无命中)就只记录、不推。
 
 磁力搜索复用 server/routers/search.py 的 _pick_source / _fetch_all(双源:
 原生 Bitmagnet GraphQL / Bitmagnet-Next-Web REST), 不另写一份(去重)。
@@ -40,8 +46,17 @@ KEY_4K_MIN = "track_size_4k_min_gb"
 KEY_4K_MAX = "track_size_4k_max_gb"
 KEY_1080_MIN = "track_size_1080_min_gb"
 KEY_1080_MAX = "track_size_1080_max_gb"
+KEY_RESOLUTIONS = "track_resolutions"   # 允许的分辨率(逗号分隔); 从未设置 = 默认两档
+KEY_SOURCES = "track_sources"           # 允许的片源(REMUX/BLURAY/WEBDL/WEBRIP/HDTV/DVD); 空 = 不限
+KEY_GROUPS = "track_groups"             # 允许的发布组(如 SPARK,Sai); 空 = 不限
 
 _SEARCH_CAP = 60          # 单个标题最多拉多少条磁力参与筛选
+
+# 分辨率档位(推送筛选的可选项)。大小区间只有 2160p/1080p 两档, 其余不限大小。
+RESOLUTION_OPTIONS = ("2160p", "1080p", "720p", "480p")
+DEFAULT_RESOLUTIONS = ("2160p", "1080p")   # 从未设置过 → 保持历史行为: 只推这两档
+# 片源选项(值 = _source_of 的返回, 与 mediainfo.guess_source 同口径 + WEBRIP 细分)
+SOURCE_OPTIONS = ("REMUX", "BLURAY", "WEBDL", "WEBRIP", "HDTV", "DVD")
 
 # 4K 兜底识别: resolution_rank 只认 2160p/4320p 等像素写法, 但部分发布组直接写
 # "4K"/"UHD"(无像素数)。mediainfo 自己的 quality_from_name 认 uhd, 这里对齐补齐。
@@ -69,15 +84,84 @@ def _f(raw):
         return None
 
 
+def _csv(raw):
+    """settings 字符串 → 去空去重保序的列表(逗号分隔)。"""
+    out, seen = [], set()
+    for x in str(raw or "").split(","):
+        v = x.strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
 def get_track_settings(session):
-    """全局追踪设置: 自动推送开关 + 4K/1080p 各自大小区间(GB)。"""
+    """全局追踪设置: 自动推送开关 + 大小区间 + 片源/分辨率/发布组筛选。"""
+    size_4k = (_f(repo.get_setting(session, KEY_4K_MIN, "")),
+               _f(repo.get_setting(session, KEY_4K_MAX, "")))
+    size_1080 = (_f(repo.get_setting(session, KEY_1080_MIN, "")),
+                 _f(repo.get_setting(session, KEY_1080_MAX, "")))
+    # 分辨率: 从未设置过 → 默认两档(= 本功能上线前的历史行为); 显式清空 → 不限
+    raw_res = repo.get_setting(session, KEY_RESOLUTIONS, "__default__")
+    resolutions = list(DEFAULT_RESOLUTIONS) if raw_res == "__default__" else _csv(raw_res)
     return {
         "auto_push": repo.get_setting(session, KEY_AUTO_PUSH, "false") == "true",
-        "size_4k": (_f(repo.get_setting(session, KEY_4K_MIN, "")),
-                    _f(repo.get_setting(session, KEY_4K_MAX, ""))),
-        "size_1080": (_f(repo.get_setting(session, KEY_1080_MIN, "")),
-                      _f(repo.get_setting(session, KEY_1080_MAX, ""))),
+        "size_4k": size_4k,
+        "size_1080": size_1080,
+        "resolutions": resolutions,
+        "sources": _csv(repo.get_setting(session, KEY_SOURCES, "")),
+        "groups": _csv(repo.get_setting(session, KEY_GROUPS, "")),
+        # 大小区间按分辨率档取(720p/480p 没有档 → 不限)
+        "size": {"2160p": size_4k, "1080p": size_1080},
     }
+
+
+# 常见写法别名 → 规范值(用户手输/旧口径进来也能归一, 未列出的一律丢弃)
+_RES_ALIAS = {"4K": "2160p", "UHD": "2160p", "4320P": "2160p",
+              "1080": "1080p", "1080I": "1080p", "720": "720p", "480": "480p",
+              "480I": "480p", "576P": "480p"}
+_SOURCE_ALIAS = {"WEB-DL": "WEBDL", "WEBDL": "WEBDL", "WEB": "WEBDL",
+                 "WEB-RIP": "WEBRIP", "WEBRIP": "WEBRIP",
+                 "BLU-RAY": "BLURAY", "BLURAY": "BLURAY", "BD": "BLURAY",
+                 "BDRIP": "BLURAY", "REMUX": "REMUX", "HDTV": "HDTV", "DVD": "DVD"}
+
+
+def normalize_setting_lists(resolutions=None, sources=None, groups=None):
+    """把前端传来的三组筛选规整成可入库的逗号串(未知项丢弃, 组名去重保序)。
+
+    传 None = 不改该项; 传 "" = 清成不限。
+    """
+    def _norm(vals, allowed, alias):
+        if vals is None:
+            return None
+        canon = {a.upper(): a for a in allowed}
+        keep = []
+        for v in _csv(vals):
+            key = canon.get(v.upper()) or canon.get((alias.get(v.upper()) or "").upper())
+            if key and key not in keep:
+                keep.append(key)
+        return ",".join(keep)
+    return {
+        "resolutions": _norm(resolutions, RESOLUTION_OPTIONS, _RES_ALIAS),
+        "sources": _norm(sources, SOURCE_OPTIONS, _SOURCE_ALIAS),
+        "groups": ",".join(_csv(groups)) if groups is not None else None,
+    }
+
+
+def _rule_summary(settings):
+    """当前筛选的可读摘要(检查日志/无命中提示用)。"""
+    parts = []
+    if settings.get("resolutions"):
+        parts.append("/".join(settings["resolutions"]))
+    if settings.get("sources"):
+        parts.append("+".join(settings["sources"]))
+    if settings.get("groups"):
+        parts.append("组 " + "/".join(settings["groups"]))
+    for label, key in (("2160p", "2160p"), ("1080p", "1080p")):
+        lo, hi = settings.get("size", {}).get(key, (None, None))
+        if lo is not None or hi is not None:
+            parts.append(f"{label} {lo if lo is not None else 0}–{hi if hi is not None else '∞'}GB")
+    return " · ".join(parts) if parts else "全部分辨率(认不出仍不推)"
 
 
 def _effective_auto_push(track, settings):
@@ -88,31 +172,71 @@ def _effective_auto_push(track, settings):
 
 
 # ---------------------------------------------------------------------------
-# 分辨率 / 大小筛选
+# 分辨率 / 片源 / 发布组 / 大小筛选
 # ---------------------------------------------------------------------------
 def _resolution_class(name):
-    """文件名 → '4k' | '1080p' | None(只认这两档, 其它不推)。
+    """文件名 → '2160p' | '1080p' | '720p' | '480p' | None(认不出 → 一律不推)。
 
-    像素写法(2160p/4320p/1080p)走 mediainfo.resolution_rank;
+    像素写法(2160p/4320p/1080p/720p/576p…)走 mediainfo.resolution_rank;
     裸 4K/UHD 写法走 _4K_ALIAS_RE 兜底(见上, 与 quality_from_name 的 uhd 对齐)。
     """
     from lib import mediainfo
     w = mediainfo.resolution_rank(name or "")
     if w in (4, 5):      # 2160p / 4320p
-        return "4k"
+        return "2160p"
     if w == 0 and _4K_ALIAS_RE.search(name or ""):
-        return "4k"
-    if w == 3:           # 1080p
-        return "1080p"
-    return None
+        return "2160p"
+    return {3: "1080p", 2: "720p", 1: "480p"}.get(w)
+
+
+# WEBRIP 要与 WEB-DL 分开(用户按片源筛), 而 mediainfo.guess_source 把 webrip 并进
+# WEBDL(NFO <source> 口径) —— 这里先单独判 WEBRIP, 其余复用 guess_source 单一来源。
+_WEBRIP_RE = re.compile(r"(?<![0-9A-Za-z_])web[-. ]?rip(?![0-9A-Za-z_])", re.IGNORECASE)
+# 磁力标题里可能带扩展名, 尾巴解析发布组前先剥掉
+_EXT_RE = re.compile(r"\.(mkv|mp4|avi|ts|m2ts|wmv|mov|iso|rmvb)$", re.IGNORECASE)
+
+
+def _source_of(name):
+    """片源细分: REMUX | BLURAY | WEBDL | WEBRIP | HDTV | DVD | NONE(认不出)。"""
+    from lib import mediainfo
+    s = str(name or "")
+    if _WEBRIP_RE.search(s):
+        return "WEBRIP"
+    return mediainfo.guess_source(s)
+
+
+def _group_of(name):
+    """发布组(名字尾巴 -GROUP): 认不出返回 ''。
+
+    与 naming.RELEASE_GROUP 同一口径(去掉发布组后缀就是用它), 剥掉扩展名再匹配。
+    """
+    from lib.naming import RELEASE_GROUP
+    n = _EXT_RE.sub("", str(name or "").strip())
+    m = RELEASE_GROUP.search(n)
+    return m.group(0)[1:] if m else ""
 
 
 def _passes(size_bytes, name, settings):
-    """大小(字节)+ 分辨率是否落在该档的区间内。None 边界 = 不限。"""
+    """片源 + 分辨率 + 发布组 + 大小 —— 全部命中才推。
+
+    「认不出就不推」: 分辨率认不出 → 不推; 开了片源/发布组筛选而名字里认不出 → 不推
+    (与全项目"不兜底"一致, 宁可让用户手动判断)。边界值 None = 不限;
+    大小区间只有 2160p/1080p 两档, 其它分辨率没有区间 = 不限大小。
+    """
     cls = _resolution_class(name)
     if cls is None:
         return False
-    lo, hi = settings["size_4k"] if cls == "4k" else settings["size_1080"]
+    if settings.get("resolutions") and cls not in settings["resolutions"]:
+        return False
+    if settings.get("sources"):
+        got = _source_of(name)
+        if got == "NONE" or got not in settings["sources"]:
+            return False
+    if settings.get("groups"):
+        got = _group_of(name)
+        if not got or got.lower() not in {g.lower() for g in settings["groups"]}:
+            return False
+    lo, hi = settings.get("size", {}).get(cls, (None, None))
     try:
         gb = float(size_bytes) / (1024 ** 3)
     except (TypeError, ValueError):
@@ -207,7 +331,7 @@ async def _detect_show_new(cfg, track):
 # ---------------------------------------------------------------------------
 async def _handle_items(cfg, settings, to_folder, base_dir, push_enabled,
                         kind, title, items, log):
-    """对已搜到的磁力列表: 筛选(分辨率+大小)→ 挑最优 → (可选)推 CD2。
+    """对已搜到的磁力列表: 筛选(片源/分辨率/发布组/大小)→ 挑最优 → (可选)推 CD2。
 
     返回 (pushed: bool, note: str)。pushed=True 表示已推 CD2。
     """
@@ -215,7 +339,7 @@ async def _handle_items(cfg, settings, to_folder, base_dir, push_enabled,
         return False, "无磁力"
     hit = _pick_best([it for it in items if _passes(it.get("size"), it.get("name"), settings)])
     if not hit:
-        return False, f"{len(items)} 条磁力, 无符合分辨率/大小的"
+        return False, f"{len(items)} 条磁力, 无符合筛选的({_rule_summary(settings)})"
     if not push_enabled:
         # 干跑: 只记录会推什么, 不真推
         gb = (hit.get("size") or 0) / (1024 ** 3)
@@ -331,7 +455,8 @@ async def check_async(cfg, log=print):
             to_folder = organize.offline_root(cfg)
             base_dir = skill_root()
             tracks = s.query(Track).all()
-            log(f"追踪检查: 共 {len(tracks)} 条 (全局自动推送={'开' if settings['auto_push'] else '关'})")
+            log(f"追踪检查: 共 {len(tracks)} 条 (全局自动推送={'开' if settings['auto_push'] else '关'}"
+                f", 筛选: {_rule_summary(settings)})")
             for t in tracks:
                 try:
                     r = await _check_one(cfg, settings, t, to_folder, base_dir, log)

@@ -7,6 +7,20 @@
 let TRACK_CHECKING = false;
 // 大小范围状态(每档: 不限=空 / 自定义=最小–最大 GB)。渲染时由后端值推导, 保存时由 UI 推导。
 let TRACK_SIZE = { '4k': {min:'', max:''}, '1080': {min:'', max:''} };
+// 推送筛选可选项(与后端 track_check.RESOLUTION_OPTIONS / SOURCE_OPTIONS 同口径)
+const TF_RES = [['2160p','2160p (4K)'],['1080p','1080p'],['720p','720p'],['480p','480p']];
+const TF_SRC = [['REMUX','REMUX'],['BLURAY','BluRay'],['WEBDL','WEB-DL'],['WEBRIP','WEBRip'],
+                ['HDTV','HDTV'],['DVD','DVD']];
+// 当前筛选(读设置时由后端值填, 保存时从 DOM 推导)
+let TRACK_FILTER = { resolutions: [], sources: [], groups: [] };
+// 一组复选(片源/分辨率): 行标题 + 勾选项
+const tfRow = (label, opts, cls) => `
+    <div class="tf-row">
+      <span class="tier-label">${label}</span>
+      <div class="tf-opts">${opts.map(([v, l]) =>
+        `<label class="tf-opt"><input type="checkbox" class="${cls}" value="${v}"
+           onchange="trackFilterPreview()"><span>${l}</span></label>`).join('')}</div>
+    </div>`;
 async function loadTrack(){
   const el = $('#manageBody');
   const tier = (key, label, cls) => `
@@ -28,13 +42,29 @@ async function loadTrack(){
       <input type="checkbox" id="trackAutoPush" onchange="saveTrackSetting('auto_push', this.checked)">
       <span class="st-main">
         <span class="st-name">自动推送</span>
-        <span class="st-desc">检测到新增且命中下方大小范围时, 自动推磁力到离线下载。默认关; 单条可在追踪列表里覆盖。</span>
+        <span class="st-desc">检测到新增且命中下方「推送筛选 + 大小范围」时, 自动推磁力到离线下载。默认关; 单条可在追踪列表里覆盖。</span>
       </span>
     </label>
   </div>
   <div class="sizecard">
+    <div class="sc-head"><span class="sc-name">推送筛选</span><span style="font-size:11px;color:var(--muted)">全部命中才推</span></div>
+    <div class="sc-desc">片源 / 分辨率 / 发布组同时命中才推。名字里认不出的一律不推(不猜); 某项不勾 = 该维度不限。</div>
+    ${tfRow('分辨率', TF_RES, 'tf-res')}
+    ${tfRow('片源', TF_SRC, 'tf-src')}
+    <div class="tf-row">
+      <span class="tier-label">发布组</span>
+      <input id="trackGroups" type="text" oninput="trackFilterPreview()"
+        placeholder="留空 = 不限, 多个用逗号分隔, 如 SPARK,Sai,NTb"
+        style="flex:1;min-width:220px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:13px">
+    </div>
+    <div class="size-foot">
+      <span class="size-preview" id="filterPreview"></span>
+      <button class="mbtn" onclick="saveTrackFilter()">保存筛选</button>
+    </div>
+  </div>
+  <div class="sizecard">
     <div class="sc-head"><span class="sc-name">磁力大小范围</span><span style="font-size:11px;color:var(--muted)">单位 GB</span></div>
-    <div class="sc-desc">只推 <b>4K</b> 与 <b>1080p</b> 两档, 其它分辨率一律不推。「不限大小」= 该档不设限制;「自定义范围」= 只推最小–最大之间的磁力。</div>
+    <div class="sc-desc">大小区间只对 <b>2160p</b> 与 <b>1080p</b> 两档生效, 其它分辨率(720p/480p)不设区间。「不限大小」= 该档不设限制;「自定义范围」= 只推最小–最大之间的磁力。</div>
     ${tier('4k','4K','tier-4k')}
     ${tier('1080','1080p','tier-1080')}
     <div class="size-foot">
@@ -58,6 +88,16 @@ async function loadTrack(){
       $('#trackMin-'+k).value = TRACK_SIZE[k].min;
       $('#trackMax-'+k).value = TRACK_SIZE[k].max;
     });
+    // 推送筛选: 后端给的是数组(分辨率从未设置过时 = 默认两档), 勾选状态据此回填
+    TRACK_FILTER = {
+      resolutions: st.resolutions || [],
+      sources: st.sources || [],
+      groups: st.groups || [],
+    };
+    document.querySelectorAll('input.tf-res').forEach(i=>{ i.checked = TRACK_FILTER.resolutions.includes(i.value); });
+    document.querySelectorAll('input.tf-src').forEach(i=>{ i.checked = TRACK_FILTER.sources.includes(i.value); });
+    $('#trackGroups').value = TRACK_FILTER.groups.join(',');
+    trackFilterPreview();
     const list = await api('/api/track');
     renderTrackList(list);
   }catch(e){ $('#trackBody').innerHTML = `<div class="empty">加载失败: ${e.message}</div>`; }
@@ -135,6 +175,29 @@ async function saveTrackSize(){
   }
   if(cleared.length) params.set('clear', cleared.join(','));
   try{ await api(`/api/track/settings?${params.toString()}`,{method:'POST'}); toast('已保存大小范围'); }
+  catch(e){ toast('失败: '+e.message); }
+}
+// ---- 推送筛选(片源/分辨率/发布组): 读状态 / 预览 / 保存 ----
+function _tfChecked(cls){
+  return Array.from(document.querySelectorAll('input.'+cls)).filter(i=>i.checked).map(i=>i.value);
+}
+// 改勾选/改发布组输入即更新预览, 保存前就能看懂推送规则
+function trackFilterPreview(){
+  const el = $('#filterPreview'); if(!el) return;
+  const res = _tfChecked('tf-res'), src = _tfChecked('tf-src');
+  const grp = ($('#trackGroups').value || '').split(',').map(s=>s.trim()).filter(Boolean);
+  TRACK_FILTER = {resolutions: res, sources: src, groups: grp};
+  const label = (list, all) => list.length ? list.join('/') : all;
+  el.innerHTML = `筛选: 分辨率 <b>${label(res,'全部档')}</b> · 片源 <b>${label(src,'不限')}</b>`
+    + ` · 发布组 <b>${label(grp,'不限')}</b>`
+    + (res.some(v=>v!=='2160p' && v!=='1080p') ? `<br><span style="font-size:11px">720p/480p 没有大小区间, 见下方卡片</span>` : '');
+}
+async function saveTrackFilter(){
+  const params = new URLSearchParams();
+  params.set('resolutions', _tfChecked('tf-res').join(','));
+  params.set('sources', _tfChecked('tf-src').join(','));
+  params.set('groups', ($('#trackGroups').value || '').split(',').map(s=>s.trim()).filter(Boolean).join(','));
+  try{ await api(`/api/track/settings?${params.toString()}`,{method:'POST'}); toast('已保存推送筛选'); trackFilterPreview(); }
   catch(e){ toast('失败: '+e.message); }
 }
 async function setTrackPush(kind, refId, mode){

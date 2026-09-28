@@ -5,7 +5,7 @@
 - DELETE /api/track          移除 ?kind=&ref_id=
 - POST /api/track/check      手动触发一次检查(后台跑, 返回 job id)
 - GET  /api/track/check/status?job=   轮询检查进度
-- GET  /api/track/settings   全局设置(自动推送开关 + 4K/1080p 大小范围)
+- GET  /api/track/settings   全局设置(自动推送开关 + 4K/1080p 大小范围 + 片源/分辨率/发布组筛选)
 - POST /api/track/settings   更新设置
 - POST /api/track/auto_push  单条覆盖 ?kind=&ref_id=&auto_push=on|off|follow
 """
@@ -172,6 +172,10 @@ def _settings_dict(s):
         "size_4k_max_gb": st["size_4k"][1],
         "size_1080_min_gb": st["size_1080"][0],
         "size_1080_max_gb": st["size_1080"][1],
+        # 片源/分辨率/发布组筛选: 空数组 = 不限(分辨率从未设置过时返回默认两档)
+        "resolutions": st["resolutions"],
+        "sources": st["sources"],
+        "groups": st["groups"],
     }
 
 
@@ -192,11 +196,19 @@ async def set_settings(auto_push: bool = Query(None),
                        size_4k_max_gb: float = Query(None),
                        size_1080_min_gb: float = Query(None),
                        size_1080_max_gb: float = Query(None),
-                       clear: str = Query("")):
-    """大小范围: 传了才改; 留空想清回"不限"就放进 clear(逗号分隔键名)。"""
+                       clear: str = Query(""),
+                       resolutions: str = Query(None),
+                       sources: str = Query(None),
+                       groups: str = Query(None)):
+    """大小范围: 传了才改; 留空想清回"不限"就放进 clear(逗号分隔键名)。
+
+    片源/分辨率/发布组: resolutions=2160p,1080p / sources=BLURAY,WEBDL / groups=SPARK,Sai;
+    **传了才改**, 传空串 = 清成不限(不传则保持原值)。
+    """
     clear_keys = {k.strip() for k in clear.split(",") if k.strip()}
     keymap = {"size_4k_min": tc.KEY_4K_MIN, "size_4k_max": tc.KEY_4K_MAX,
               "size_1080_min": tc.KEY_1080_MIN, "size_1080_max": tc.KEY_1080_MAX}
+    lists = tc.normalize_setting_lists(resolutions, sources, groups)
 
     def _q():
         s = SessionLocal()
@@ -212,6 +224,11 @@ async def set_settings(auto_push: bool = Query(None),
             for name, key in keymap.items():
                 if name in clear_keys:
                     repo.set_setting(s, key, "")   # 空 = 不限
+            for key, val in ((tc.KEY_RESOLUTIONS, lists["resolutions"]),
+                             (tc.KEY_SOURCES, lists["sources"]),
+                             (tc.KEY_GROUPS, lists["groups"])):
+                if val is not None:
+                    repo.set_setting(s, key, val)  # 空串 = 不限(分辨率空 = 全部可选档)
             s.commit()
             return _settings_dict(s)
         finally:

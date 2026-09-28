@@ -161,6 +161,12 @@
   .size-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;flex-wrap:wrap}
   .size-preview{font-size:12px;color:var(--muted);line-height:1.5}
   .size-preview b{color:var(--brand-d);font-weight:600}
+  .tf-row{display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--line);
+    border-radius:12px;background:var(--surface-2);margin-bottom:8px;flex-wrap:wrap}
+  .tf-opts{display:flex;flex-wrap:wrap;gap:6px 14px}
+  .tf-opt{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;color:var(--fg)}
+  .tf-opt input{width:15px;height:15px;accent-color:var(--brand);cursor:pointer}
+  .tf-opt span{white-space:nowrap}
   .setting{display:flex;align-items:flex-start;gap:12px;padding:13px 15px;background:var(--glass);
     backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--glass-brd);
     border-radius:var(--r-m);box-shadow:var(--shadow-s);cursor:pointer;transition:.2s var(--ease)}
