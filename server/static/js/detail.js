@@ -592,7 +592,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}`)));
     if(tok !== box._reqTok) return;
     const res = _magMerge(pages, limit, sort);
-    const src = (pages[0] && pages[0].source)==='next_web' ? 'your-site.example.com' : 'Bitmagnet';
+    const src = (pages[0] && pages[0].source)==='next_web' ? 'Bitmagnet-Next-Web' : 'Bitmagnet';
     if(!res.length){ box.innerHTML=`<div class="empty">${icon('search')} ${src} 没有命中</div>`; return; }
     const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
     box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
@@ -852,7 +852,7 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
     // 中文标题 + 英文原名 各扫一遍, 合并去重(整季包常按英文原名发布, 单查中文会漏)
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=20`)));
     const res = _magMerge(pages, 20, 'relevance');
-    const src = (pages[0] && pages[0].source)==='next_web' ? 'your-site.example.com' : 'Bitmagnet';
+    const src = (pages[0] && pages[0].source)==='next_web' ? 'Bitmagnet-Next-Web' : 'Bitmagnet';
     if(!res.length){ box.innerHTML=`<div style="font-size:12px;color:var(--muted)">${src} 无「${esc(qs[0])}」命中</div>`; }
     else{
       const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';

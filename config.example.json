@@ -7,9 +7,9 @@
     "limit": 20
   },
   "bitmagnet_next_web": {
-    "_comment": "Bitmagnet-Next-Web 改版站点(如 https://your-site.example.com)的 REST 搜索源。与上面的原生 bitmagnet(GraphQL) 是两套东西,分开配置;供 scripts/diao_search.py 使用。通常更快, 但无 seeders/leechers 与 TMDB 元数据。enabled=false 可禁用,base 可换任意同类站点。",
+    "_comment": "Bitmagnet-Next-Web 改版站点(自建同类站, 如 https://your-site.example.com)的 REST 搜索源。与上面的原生 bitmagnet(GraphQL) 是两套东西,分开配置;供 scripts/diao_search.py 使用。通常更快, 但无 seeders/leechers 与 TMDB 元数据。enabled=false 可禁用,base 可换任意同类站点。",
     "enabled": true,
-    "base": "https://your-site.example.com",
+    "base": "",
     "limit": 10
   },
   "search": {

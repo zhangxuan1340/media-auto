@@ -2,7 +2,7 @@
 """
 media-auto / diao_search —— 从 Bitmagnet-Next-Web 站点提取种子信息
 =================================================================
-这一类站点(如 https://your-site.example.com)是社区改版的 Bitmagnet 前端(Bitmagnet-Next-Web,
+这一类站点(自建同类站, 如 https://your-site.example.com)是社区改版的 Bitmagnet 前端(Bitmagnet-Next-Web,
 Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接口**,
 而不是原生 Bitmagnet 的 GraphQL(/graphql)。二者是两套东西,分开配置:
 
@@ -15,7 +15,7 @@ Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接�
         files_count,files[{index,path,size,extension}],created_at,updated_at}],
         "total_count":<int|null>,"has_more":<bool>},"message":"success","status":200}
 
-  ⚠️ 分页坑(2026-09 实测 your-site.example.com):
+  ⚠️ 分页坑(2026-09 实测某改版站):
     - `page` 参数**被站点忽略**(page=1/2/5 返回完全相同的前 10 条)——只能用 `offset`。
     - `has_more` **恒为 true**(翻过实际结果数也不变)——不可信,用"本页不满 limit 条"判断到底。
     - `total_count` 恒为 null。
@@ -23,7 +23,7 @@ Next.js + 直连 Postgres + pg_trgm 索引),对外暴露的是一套 **REST 接�
   GET {base}/api/detail?hash=<info_hash>  -> {"data":{<单个 torrent>}}
   GET {base}/api/stats                    -> {"data":{size,updated_at,total_count,...}}
 
-地址优先级: 命令行 --base > 配置的 bitmagnet_next_web.base > 环境变量 DIAO_BASE > 内置默认。
+地址优先级: 命令行 --base > 配置的 bitmagnet_next_web.base > 环境变量 DIAO_BASE > 内置默认(空, 即不内置站点)。
 
 用法:
   python3 scripts/diao_search.py --query "求救信号 2026"
@@ -57,16 +57,20 @@ except Exception:  # 兜底:脱离项目目录时仍可跑
         return {}
 
 CONFIG_KEY = "bitmagnet_next_web"
-DEFAULT_BASE = "https://your-site.example.com"
+DEFAULT_BASE = ""
 UA = os.environ.get("DIAO_UA", "media-auto/1.0")
 PAGE_SIZE = 10          # 站点硬上限: limit 最大 10,超过 400
 MAX_PAGES = 20          # --all / 翻页上限,防止无限翻
 
 
 def resolve_settings(cfg, cli_base=None, cli_limit=None):
-    """按优先级解析 base 与 limit: 命令行 > 数据库配置 > 环境变量 > 内置默认。"""
+    """按优先级解析 base 与 limit: 命令行 > 数据库配置 > 环境变量 > 内置默认。
+
+    内置默认为空(不内置任何站点地址) → base 必须由配置/命令行给,
+    没给时 _get 会直接报「站点 Base 未配置」, 不拿空地址去拼 URL。
+    """
     nw = (cfg.get(CONFIG_KEY) or {})
-    base = cli_base or nw.get("base") or os.environ.get("DIAO_BASE") or DEFAULT_BASE
+    base = str(cli_base or nw.get("base") or os.environ.get("DIAO_BASE") or DEFAULT_BASE).strip()
     try:
         limit = int(cli_limit or nw.get("limit") or 0) or PAGE_SIZE
     except Exception:
@@ -75,12 +79,14 @@ def resolve_settings(cfg, cli_base=None, cli_limit=None):
 
 
 def _no_proxy_opener():
-    # ⚠️ 不走系统 HTTP 代理: Bitmagnet 源(内网 IP 或 your-site.example.com)被塞进系统代理会 502/连不上
+    # ⚠️ 不走系统 HTTP 代理: Bitmagnet 源(内网 IP 或改版站域名)被塞进系统代理会 502/连不上
     # (与 clouddrive 客户端 _clean_env、tmdb 客户端 trust_env=False 同一类坑)。
     return httputil.no_proxy_opener()
 
 
 def _get(base, path, params=None, timeout=30):
+    if not base:
+        raise RuntimeError("站点 Base 未配置: 管理 → 通用 → 磁力搜索源 → 站点 Base")
     url = base.rstrip("/") + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -190,7 +196,7 @@ def main():
     ap = argparse.ArgumentParser(description="从 Bitmagnet-Next-Web 站点提取种子信息")
     ap.add_argument("--query", "-q", help="搜索关键词")
     ap.add_argument("--base", default=None,
-                    help=f"站点根地址(默认取配置 {CONFIG_KEY}.base,再退到 {DEFAULT_BASE})")
+                    help=f"站点根地址(默认取配置 {CONFIG_KEY}.base 或环境变量 DIAO_BASE, 都没配则报错)")
     ap.add_argument("--page", type=int, default=1, help="起始页码(默认 1)")
     ap.add_argument("--limit", type=int, default=None,
                     help=f"想要的结果条数(默认取配置 {CONFIG_KEY}.limit,再退到 {PAGE_SIZE};内部按每页 10 翻页)")
