@@ -796,12 +796,12 @@ def _episode_hint(name):
     return int(m.group(1)) if m else None
 
 
-def _offline_seasons(config, plan):
+def _offline_seasons(config, plan, base_dir=None):
     """离线条目覆盖的季号集合。目录条目扫全部视频文件;散落文件取自身文件名季号。"""
     srcs = []
     if plan.get("is_dir"):
         try:
-            srcs = [f for f in scan_tree(config, plan.get("source"), base_dir=None)
+            srcs = [f for f in scan_tree(config, plan.get("source"), base_dir=base_dir)
                     if naming.ext_of(f.get("name")) in naming.VIDEO_EXT]
         except Exception:  # noqa: BLE001
             srcs = []
@@ -819,11 +819,11 @@ def _offline_seasons(config, plan):
     return seasons
 
 
-def _library_seasons(config, dir_path):
+def _library_seasons(config, dir_path, base_dir=None):
     """库内剧目录里已有的季号集合(Season N / 视频文件名 Sxx / Specials)。"""
     seasons = set()
     try:
-        for f in scan_tree(config, dir_path):
+        for f in scan_tree(config, dir_path, base_dir=base_dir):
             d = f.get("rel_dir") or ""
             for part in d.split("/"):
                 s = naming.season_of_dirname(part)
@@ -860,9 +860,9 @@ def _mark_dedup(config, p, base_dir=None):
 
     # 剧集: 先比季 —— 离线有库内没有的季 → 补季合并(merge)
     if (p.get("meta") or {}).get("kind") == "tv":
-        off_seasons = _offline_seasons(config, p)
+        off_seasons = _offline_seasons(config, p, base_dir=base_dir)
         if off_seasons:
-            missing = off_seasons - _library_seasons(config, p["existing"])
+            missing = off_seasons - _library_seasons(config, p["existing"], base_dir=base_dir)
             if missing:
                 p["status"] = "merge"
                 p["missing_seasons"] = sorted(missing)
@@ -932,12 +932,16 @@ def clean_media_names(config, plan, base_dir=None, log=print):
     例: 【高清影视之家发布 www.HDBTHD.com】误杀2[国语中字].Fireflies...-DreamHD.mkv
      →  误杀2[国语中字].Fireflies...-DreamHD.mkv
     只删「含域名的括号块」与裸域名,不动分辨率/编码/发布组这些技术标记。
-    同名冲突时跳过,避免覆盖。**会同步更新 plan 里的 name/path**,后续步骤才拿得到新名字。
+    同名冲突时跳过,避免覆盖。**会同步更新 plan 里的 name/path(含 subtitles 路径列表)**,
+    后续步骤才拿得到新名字 —— 字幕是字符串路径列表, 不回写的话下面三处消费
+    (散落文件 payload 搬运 / 剧集字幕跟随 / 电影字幕改名)会拿改名前的旧路径。
     """
     changed = []
+    sub_paths = list(plan.get("subtitles") or [])
+    remap = {}
     targets = list(plan.get("media") or [])
-    for p in (plan.get("subtitles") or []):
-        targets.append({"name": os.path.basename(p), "path": p})
+    for p in sub_paths:
+        targets.append({"name": os.path.basename(p), "path": p, "_sub": True})
     for f in targets:
         old_name = f.get("name") or ""
         path = f.get("path") or ""
@@ -956,7 +960,12 @@ def clean_media_names(config, plan, base_dir=None, log=print):
             continue
         changed.append((old_name, new_name))
         f["name"] = new_name
-        f["path"] = parent.rstrip("/") + "/" + new_name
+        new_path = parent.rstrip("/") + "/" + new_name
+        f["path"] = new_path
+        if f.get("_sub"):
+            remap[path] = new_path
+    if remap:
+        plan["subtitles"] = [remap.get(p, p) for p in sub_paths]
     return changed
 
 
@@ -1734,7 +1743,8 @@ def _apply_merge_seasons(config, plan, base_dir=None, log=print):
 
 def _merge_seasons_impl(config, plan, base_dir=None, log=print):
     """剧集补季执行: 清推广名 → 删广告 → 【逐文件】把缺失季的视频/字幕搬入库内对应季目录
-    (文件级 MoveFile Skip,绝不覆盖) → 集文件按标准名改名(字幕跟随) → 更新 tvshow.nfo。
+    (文件级 MoveFile Skip,绝不覆盖) → 集文件按标准名改名(字幕跟随) → 【搬完之后】替换
+    源 NFO → 更新库内 tvshow.nfo。
 
     ⚠️ 不用整目录 MoveFile: 实测(巴比伦柏林 2026-09-18)CD2 对「源目录名 == 库内已有目录名」
     的 MoveFile(递归) 是【嵌套】(源目录整个搬进同名目录里再套一层), 不是文件级合并 ——
@@ -1760,11 +1770,22 @@ def _merge_seasons_impl(config, plan, base_dir=None, log=print):
             log(f"    ✎  清理文件名推广块 {len(cleaned)} 个")
 
     trash = list(plan.get("ads") or []) + list(plan.get("junk") or [])
+    # 【顺序关键】与 apply_plan 同口径: 先确认 TMDB 拿得到元数据, 再决定删不删源 NFO。
+    # 反过来(先删后取)的话 TMDB 抖一下 → 源 NFO 已删、新 NFO 写不出来 —— 这是
+    # 2026-09-26 P0 的同款守卫, 补季分支原来缺(2026-09-29 补)。结果有 10 分钟缓存,
+    # 结尾写 tvshow.nfo 复用同一次(不再二次直连)。
+    # ⚠️ 光有这个守卫还不够: 删的【时机】也要往后推 —— 源 NFO 必须等"文件真的搬走了"
+    #    才替换(见 moved_any 之后那段)。原来它跟广告一起在开头删, 于是扫描失败/没有
+    #    可搬文件(全 Skip、已在库内)时, 源 NFO 已删、媒体还在源目录 → 条目变成
+    #    "有媒体没 NFO"(2026-09-29 与 apply_plan 的冲突跳过同款问题)。
+    meta_full = None
     if org_cfg(config).get("write_nfo", True) and (plan.get("meta") or {}).get("kind") == "tv":
-        trash += list(plan.get("nfos") or [])
+        meta_full = resolve_full_meta(config, plan)
+        if not meta_full:
+            log("    ⚠ TMDB 直连取不到元数据 → 保留原有 NFO(不删旧的, 也不写新的)")
     if trash:
         cd2.delete_files(config, trash, base_dir=base_dir)
-        res["deleted"] = trash
+        res["deleted"] = list(trash)
         log(f"    🗑  删除 {len(trash)} 个广告/杂项文件")
 
     existing = plan.get("existing")
@@ -1891,6 +1912,16 @@ def _merge_seasons_impl(config, plan, base_dir=None, log=print):
         res["skipped"] = "没有可补的季文件(可能已在库内),源目录保留"
         log(f"    ⚠  {res['skipped']}")
 
+    # 【顺序关键】源 NFO 只在"确实搬走之后"才替换(必须排在 _prune_empty_dirs 之前,
+    # 否则源目录留着 NFO 就不算空, 清不掉)。没搬动 → 源目录还留着媒体, 旧 NFO 原样
+    # 留着;拿不到元数据 → 写不出新的, 也别删(2026-09-29)。
+    if moved_any and meta_full and write_nfo_enabled(config):
+        nfos = list(plan.get("nfos") or [])
+        if nfos:
+            cd2.delete_files(config, nfos, base_dir=base_dir)
+            res["deleted"] = res["deleted"] + nfos
+            log(f"    🗑  替换源 NFO {len(nfos)} 个(将写入我们自己的 NFO)")
+
     # 源目录搬空后删除(离线根下, 允许删除); 先清掉被搬空的旧季包子目录
     try:
         _prune_empty_dirs(config, src.rstrip("/"), base_dir=base_dir, log=log)
@@ -1901,8 +1932,8 @@ def _merge_seasons_impl(config, plan, base_dir=None, log=print):
     except Exception:  # noqa: BLE001
         pass
 
-    # 更新 tvshow.nfo(覆盖库内旧 NFO)
-    meta = resolve_full_meta(config, plan)
+    # 更新 tvshow.nfo(覆盖库内旧 NFO) —— 用开头那次 resolve_full_meta(有缓存)
+    meta = meta_full
     if meta and write_nfo_enabled(config):
         try:
             res["nfo"] = _write_entry_nfo(config, plan, existing.rstrip("/"), meta,
@@ -2000,7 +2031,12 @@ def preview_plan_files(config, plan, base_dir=None):
 
 
 def apply_plan(config, plan, base_dir=None, log=print):
-    """执行一个计划: 清文件名推广 → 删广告 → 改名 → 移动 → 探测/改名/写 NFO。"""
+    """执行一个计划: 搬前探测 → 清文件名推广 → 删广告杂项 → 冲突判定 → 替换源 NFO
+    → 改名 → 在 /Temp 工作区整理 → 归位 /Cloud → 写 NFO。
+
+    ⚠️ 顺序约束(2026-09-29 审查): 源 NFO 的删除必须排在冲突判定**之后** ——
+    目标已存在被跳过/搬运失败时, 旧 NFO 一个字节都不该动(见 _replace_source_nfo)。
+    """
     res = {"deleted": [], "renamed": None, "moved": None, "skipped": None,
            "cleaned_names": [], "renamed_media": {}, "nfo": None, "probed": False}
 
@@ -2026,30 +2062,40 @@ def apply_plan(config, plan, base_dir=None, log=print):
             for _old, new in cleaned[:3]:
                 log(f"       → {new[:70]}")
 
-    # 1) 删广告 + 杂项(默认进回收站,可恢复)
+    # 1) 删广告 + 杂项(默认进回收站,可恢复)。
+    #    ⚠️ 旧 .nfo 的替换**不在这里做**: 那要等"确认真的要搬"之后(见 _replace_source_nfo)。
+    #    顺序问题(2026-09-29 修): 原来删源 NFO 早于目标冲突判定, status=ok 但目标已存在
+    #    (on_conflict=skip)/后续搬运失败时, 源 NFO 已删、finalize 又没跑到 → 条目没 NFO。
     trash = list(plan.get("ads") or []) + list(plan.get("junk") or [])
-    # 即将写入我们自己的 NFO 时,连同旧的 .nfo 一起替换(避免同目录两个 NFO 打架);
-    # 否则保留已有 NFO —— 不能抹掉别人的刮削结果。
-    will_write_nfo = (write_nfo_enabled(config) and bool(plan.get("meta"))
-                      and plan.get("status") == "ok")
-    if will_write_nfo:
-        # 【顺序关键】先确认 TMDB 直连拿得到元数据, 再决定删不删旧 NFO。
-        # 反过来(先删后取)的话: TMDB 抖一下 → 源 NFO 已删、新 NFO 写不出来,
-        # 条目变成"一个 NFO 都没有", 且日志里毫无提示(2026-09-26 审查 P0)。
-        # resolve_full_meta 结果有 10 分钟执行期缓存, 后面 finalize_entry 复用同一次。
-        if resolve_full_meta(config, plan):
-            trash += list(plan.get("nfos") or [])
-        else:
-            will_write_nfo = False
-            log("    ⚠ TMDB 直连取不到元数据 → 保留原有 NFO(不删旧的, 也不写新的)")
     if trash:
         cd2.delete_files(config, trash, base_dir=base_dir)
-        res["deleted"] = trash
+        res["deleted"] = list(trash)
         log(f"    🗑  删除 {len(trash)} 个广告/杂项文件")
     if plan.get("asset_files"):
         kept = "、".join(a["name"] for a in plan["asset_files"][:4])
         log(f"    ⛨  保留库内资产 {len(plan['asset_files'])} 个({kept}"
             + ("…" if len(plan["asset_files"]) > 4 else "") + ")")
+
+    def _replace_source_nfo():
+        """确认要搬了才替换源 NFO(避免同目录两个 NFO 打架)。
+
+        先确认 TMDB 直连拿得到元数据, 再决定删不删旧 NFO(反过来的话 TMDB 抖一下
+        → 源 NFO 已删、新 NFO 写不出来, 2026-09-26 审查 P0); 且只在"真的会搬"时调用,
+        冲突跳过时旧 NFO 原样保留(2026-09-29)。resolve_full_meta 有 10 分钟缓存,
+        后面 finalize_entry 复用同一次。
+        """
+        if not (write_nfo_enabled(config) and plan.get("meta")
+                and plan.get("status") == "ok"):
+            return False
+        if not resolve_full_meta(config, plan):
+            log("    ⚠ TMDB 直连取不到元数据 → 保留原有 NFO(不删旧的, 也不写新的)")
+            return False
+        nfos = list(plan.get("nfos") or [])
+        if nfos:
+            cd2.delete_files(config, nfos, base_dir=base_dir)
+            res["deleted"] = res.get("deleted") + nfos
+            log(f"    🗑  替换源 NFO {len(nfos)} 个(将写入我们自己的 NFO)")
+        return True
 
     if plan.get("status") == "merge":
         # 剧集补季: 库内已有该剧目录(可能只含别的季) → 把本条的季【并入】库内目录。
@@ -2069,9 +2115,11 @@ def apply_plan(config, plan, base_dir=None, log=print):
     on_conflict = org_cfg(config).get("on_conflict", "skip")
 
     # 2) 目标已存在?(duplicate 已在 build_plans 拦下;这里兜底未判定的 ok 计划)
+    #    ⚠️ 必须在替换源 NFO 之前判定: 跳过 = 一个字节都不该动(见 _replace_source_nfo)。
     existing = cd2.find_file_by_path(config, target_root, new_name, base_dir=base_dir)
     if existing and cd2.is_dir(existing) and plan.get("is_dir"):
         if on_conflict == "merge":
+            _replace_source_nfo()
             # 先在源目录(离线工作区, 可删)内整理好 + 清掉搬空的旧目录, 再并入库内目录
             mv = _organize_in_workspace(config, plan, plan["source"], base_dir=base_dir, log=log)
             if mv:
@@ -2096,6 +2144,9 @@ def apply_plan(config, plan, base_dir=None, log=print):
         return res
 
     src_parent = os.path.dirname(plan["source"].rstrip("/")) or "/"
+
+    # 通过了冲突判定 → 确定要搬了, 这时才替换源 NFO(跳过时旧 NFO 原样保留)
+    _replace_source_nfo()
 
     # 3) 目录: 先改名 → 在离线工作区(/Temp 离线下载目录, 可删)内整理好 → 再整体归位 /Cloud
     if plan.get("is_dir"):
@@ -2163,14 +2214,14 @@ def run(config, base_dir=None, apply=False, only=None, limit=None, log=print):
     # 预览(apply=False)全程只读: 不写 title/title_checked, 也不消耗豆瓣核对标记
     plans = build_plans(config, base_dir=base_dir, only=only, limit=limit, read_only=not apply)
     summary = {"total": len(plans), "ok": 0, "unresolved": 0, "no_media": 0,
-               "duplicate": 0, "merge": 0, "applied": 0, "cleaned": 0,
-               "dedup_cleaned": 0, "merged": 0,
+               "duplicate": 0, "merge": 0, "upgrade": 0, "applied": 0, "cleaned": 0,
+               "dedup_cleaned": 0, "merged": 0, "upgrade_cleaned": 0,
                "deleted_files": 0, "cleaned_names": 0,
                "nfo_written": 0, "media_renamed": 0, "errors": []}
 
     for p in plans:
         tag = {"ok": "✓", "unresolved": "?", "no_media": "·", "duplicate": "≡",
-               "merge": "⇄"}.get(p["status"], "?")
+               "merge": "⇄", "upgrade": "↑"}.get(p["status"], "?")
         log(f"\n{tag} {p['name']}")
         log(f"    媒体 {p['media_count']} 个 / {p['media_bytes'] / 1024 ** 3:.2f} GB"
             f"    广告杂项 {p['ad_count']} 个")
@@ -2210,7 +2261,10 @@ def run(config, base_dir=None, apply=False, only=None, limit=None, log=print):
                 for a in p["ad_files"][:5]:
                     log(f"      🗑 {a['name'][:70]}  ({a['size'] / 1024:.0f} KB)")
 
-        do_apply = apply and (p["status"] in ("ok", "duplicate", "merge")
+        # upgrade(升级版)也执行: 它跟 duplicate 一样只清广告/不归位 —— 库里已有同名
+        # 目录、/Cloud 禁删, 更好的版本不会被自动换上, 但至少广告要清掉、计数要见人
+        # (2026-09-29 修: 原来它既不执行也不进汇总, 成了没人管的死状态)。
+        do_apply = apply and (p["status"] in ("ok", "duplicate", "merge", "upgrade")
                              or (p["status"] == "unresolved" and clean_unresolved_enabled(config)))
         if do_apply:
             try:
@@ -2221,6 +2275,8 @@ def run(config, base_dir=None, apply=False, only=None, limit=None, log=print):
                     summary["dedup_cleaned"] += 1
                 elif p["status"] == "merge":
                     summary["merged"] += 1
+                elif p["status"] == "upgrade":
+                    summary["upgrade_cleaned"] += 1
                 else:
                     summary["cleaned"] += 1
                 summary["deleted_files"] += len(r.get("deleted") or [])
@@ -2249,9 +2305,14 @@ def main():
     from lib.config import load_config as _lc  # noqa: PLC0415
     config = _lc()   # 只读数据库(app_config)
 
+    if args.json and args.apply:
+        # --json 只输出计划(机器可读), 不做执行 —— 原来 --apply --json 会静默只打印,
+        # 用户以为执行了其实一个字节没动(2026-09-29 修: 直接报错, 不再默默无效果)。
+        ap.error("--json 与 --apply 不能同用: --json 只输出计划(只读), 不执行整理")
+
     if args.json:
         plans = build_plans(config, base_dir=base_dir, only=args.only, limit=args.limit,
-                           read_only=not args.apply)
+                            read_only=True)
         print(json.dumps({"offline_root": offline_root(config), "plans": plans},
                          ensure_ascii=False, indent=2))
         return 0
@@ -2270,11 +2331,13 @@ def main():
     print(f"共 {summary['total']} 个条目: 可整理 {summary['ok']} / "
           f"补季合并 {summary.get('merge', 0)} / "
           f"库中已有 {summary.get('duplicate', 0)} / "
+          f"升级版 {summary.get('upgrade', 0)} / "
           f"未匹配 {summary['unresolved']} / 无视频 {summary['no_media']}")
     if args.apply:
         print(f"已归位 {summary['applied']} 个,"
               f"补季并入 {summary.get('merged', 0)} 个,"
               f"已有跳过(仅清广告) {summary.get('dedup_cleaned', 0)} 个,"
+              f"升级版(仅清广告) {summary.get('upgrade_cleaned', 0)} 个,"
               f"仅清理未归位 {summary.get('cleaned', 0)} 个,"
               f"删除广告杂项 {summary['deleted_files']} 个文件,"
               f"清理文件名 {summary['cleaned_names']} 个")

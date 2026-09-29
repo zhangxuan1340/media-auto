@@ -11,6 +11,7 @@
 台译「不良姐妹」也算中文 —— 想要「坏姐妹」请手动改一次, 改完 custom_title 永久生效。
 """
 import re
+import time
 
 from clients.douban import client as douban
 
@@ -89,8 +90,40 @@ def pick_cn_title(translations) -> str:
     return mainland or other
 
 
+# 豆瓣联想结果的进程内短记忆(10 分钟 / 上限 512 条)。
+# 背景: 整理页预览改成只读(不写 title_checked)后, 未核对的条目每次刷新预览都会重查
+# 豆瓣 —— 记忆把重复查询挡在进程内, "每条最多查一次(由执行期落库)"的语义不变。
+_DOUBAN_MEMO = {}
+_DOUBAN_MEMO_TTL = 600
+_DOUBAN_MEMO_MAX = 512
+
+
 def douban_cn_title(query: str, year="", kind="") -> tuple:
-    """豆瓣联想 → 国内译名。返回 (title, status), status ∈ {hit, none, error}。
+    """豆瓣联想 → 国内译名(带 10 分钟进程内记忆)。返回 (title, status), status ∈ {hit, none, error}。
+
+    error 不记忆(下次照常重试); hit/none 记忆 10 分钟。
+    """
+    if not (query or "").strip():
+        return "", "none"
+    key = (query.strip().lower(), str(year or ""), str(kind or ""))
+    now = time.time()
+    hit = _DOUBAN_MEMO.get(key)
+    if hit and hit[2] > now:
+        return hit[0], hit[1]
+    zh, status = _douban_cn_title_uncached(query, year, kind)
+    if status != "error":
+        if len(_DOUBAN_MEMO) >= _DOUBAN_MEMO_MAX:
+            for k, v in list(_DOUBAN_MEMO.items()):
+                if v[2] <= now:
+                    _DOUBAN_MEMO.pop(k, None)
+            while len(_DOUBAN_MEMO) >= _DOUBAN_MEMO_MAX:
+                _DOUBAN_MEMO.pop(next(iter(_DOUBAN_MEMO)), None)
+        _DOUBAN_MEMO[key] = (zh, status, now + _DOUBAN_MEMO_TTL)
+    return zh, status
+
+
+def _douban_cn_title_uncached(query: str, year="", kind="") -> tuple:
+    """豆瓣联想 → 国内译名(直连豆瓣, 无记忆)。返回 (title, status), status ∈ {hit, none, error}。
 
     匹配打分: sub_title 与原名同源 +3 / 年份 ±1 +2 / 剧集(带 episode)+1;
     总分 < 3 视为没把握 → none(宁可不改, 也不把标题改错)。

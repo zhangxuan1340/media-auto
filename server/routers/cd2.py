@@ -70,7 +70,9 @@ class PushItem(BaseModel):
 class ApplyBody(BaseModel):
     names: list = []      # 要执行的条目名(留空且 all=false 则什么都不做)
     all: bool = False     # true = 执行全部可整理的条目
-    limit: int = 20       # 单次最多执行几个(防止一次点爆)
+    # 单次最多执行几个; 0 = 用服务端默认 100(不能默认 20: Pydantic 会把"没传"填成 20,
+    # 前端不带 limit 的「执行全部」就被静默截断 —— 2026-09-29 修)
+    limit: int = 0
 
 
 class MatchBody(BaseModel):
@@ -89,7 +91,7 @@ _JOBS = {}   # job_id -> {status: running|done|error, count, results, error, sta
 def _new_job():
     jid = uuid.uuid4().hex[:12]
     _JOBS[jid] = {
-        "status": "running", "count": 0, "results": [], "error": "",
+        "status": "running", "count": 0, "results": [], "error": "", "note": "",
         "started_at": time.time(),
     }
     # 防膨胀: 只保留最近 50 个(进程内, 重启即清)
@@ -181,6 +183,10 @@ async def api_organize_files(limit: int = 50, only: str = "", cfg: dict = Depend
         plans = await run_in_threadpool(
             organize.build_plans, cfg, skill_root(),
             (only or None), max(1, min(int(limit or 50), 200)),
+            # ⚠️ 预览必须只读: 不写 title/title_checked、不消耗豆瓣"每条一次"的核对标记
+            #    (与 CLI dry-run 同口径, organize.run 的 read_only=not apply)。漏传的话
+            #    打开/刷新整理页就等于执行了一轮写库 —— 2026-09-29 修。
+            read_only=True,
         )
     except Exception as e:  # noqa: BLE001
         # 元数据主源是 TMDB, 文案里就以 TMDB 为准
@@ -320,12 +326,16 @@ async def api_organize_set_match(body: MatchBody, cfg: dict = Depends(get_config
 
 @router.post("/organize/apply")
 async def api_organize_apply(body: ApplyBody, cfg: dict = Depends(get_config)):
-    """后台启动整理: 删广告 → 清文件名推广 → 改名 → 归位 → 写 NFO。
+    """后台启动整理: 搬前探测 → 删广告/清推广 → 改名/工作区整理 → 归位 → 写 NFO。
 
-    body.names 指定要处理的条目名; body.all=true 则处理全部可整理项(受 limit 限制)。
+    body.names 指定要处理的条目名; body.all=true 则处理全部
+    (ok/merge 归位, duplicate/upgrade 只清广告), 受 body.limit(0=默认 100, 上限 200)
+    限制, 被截断时会在 job.note 里出声。
     立即返回 job_id, 前端轮询 GET /organize/apply/{job_id} 取进度与结果。
     """
-    limit = max(1, min(int(body.limit or 20), 100))
+    # 默认上限 100(原来是 20): 前端「执行全部/执行选中」不传 limit, 20 会把用户
+    # 在确认框里数过的 N 条**静默截断**成 20 条; 传了就按传的来, 上限 200(2026-09-29 修)。
+    limit = max(1, min(int(body.limit or 100), 200))
     base = skill_root()
     jid = _new_job()
     job = _JOBS[jid]
@@ -388,10 +398,17 @@ async def api_organize_apply(body: ApplyBody, cfg: dict = Depends(get_config)):
             for p in plans:
                 # duplicate = 库里已有同名条目: 不重复归位,但仍清掉源目录里的广告
                 # merge = 剧库已有该剧但缺本条的季: 补季合并(库内已有内容不受影响)
-                if p["status"] not in ("ok", "duplicate", "merge"):
+                # upgrade = 库里已有但这条规格更高(升级版): 与 duplicate 同口径,
+                #           只清广告 —— /Cloud 禁删, 不会自动换上(2026-09-29 补,
+                #           原来它被整个丢掉, 连广告都不清、汇总里也见不到)
+                if p["status"] not in ("ok", "duplicate", "merge", "upgrade"):
                     continue
                 if body.all or p["name"] in wanted:
                     chosen.append(p)
+            if len(chosen) > limit:
+                # 截断必须出声: 否则"执行全部 57 个"只跑了 20 个, 界面只显示 20 条结果
+                job["note"] = (f"选中 {len(chosen)} 条, 超出单次上限 {limit} 条, "
+                               f"本次只处理前 {limit} 条(其余再点一次即可)")
             chosen = chosen[:limit]
             job["count"] = len(chosen)
 
@@ -449,6 +466,7 @@ async def api_organize_apply_status(job_id: str):
         "count": job["count"],            # 选中的条目总数
         "done": len(job["results"]),      # 已完成的条目数(进度)
         "error": job["error"],
+        "note": job.get("note") or "",    # 截断提示等(前端 toast)
         "results": job["results"],
     }
 

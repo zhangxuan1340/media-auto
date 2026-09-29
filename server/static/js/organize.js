@@ -48,7 +48,10 @@ async function loadOrganize(){
         ? `<button class="mbtn" onclick="applyOne(${idx}, this)">执行</button>`
         : (isMerge
           ? `<button class="mbtn" onclick="applyOne(${idx}, this)">补季</button>`
-          : `<small style="color:var(--muted)">跳过</small>`);
+          // 升级版 = 库里已有同名但这条规格更高: 不自动换(/Cloud 禁删), 仅随「执行全部」清广告
+          : (p.status==='upgrade'
+            ? `<small style="color:var(--warn)">升级版</small>`
+            : `<small style="color:var(--muted)">跳过</small>`));
       return `<tr>
         <td data-th="原目录名">${can?`<input type="checkbox" class="opick" data-i="${idx}"> `:''}${esc(p.name)} ${previewBtn}</td>
         <td data-th="正片">${fmt(p.media_bytes)} <small style="color:var(--muted)">${p.media_count} 个文件</small></td>
@@ -68,7 +71,7 @@ async function loadOrganize(){
         <button class="ghost" onclick="finishAll('all')">${icon('refresh')}刷新 Jellyfin</button>
       </div>
       <table><thead><tr><th>原目录名</th><th>正片</th><th>广告/杂项</th><th>→ 新目录名 / 库</th><th>类型 / ID</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
-      <p style="color:var(--muted);font-size:12px;margin-top:8px">规则: 删纯推广名广告 + 非视频杂项,剥掉文件名里的推广块,目录改名为 <code>标题 (年份)</code>,视频改名 <code>标题 (年份) 质量标记</code> 并写 NFO,再归位到 ${esc(data.movie_root||'/Cloud')} 或 ${esc(data.tv_root||'/Cloud')}。库里已有同名条目会显示「跳过」(原因见目标列)。删除走 CD2 回收站,可恢复。</p>
+      <p style="color:var(--muted);font-size:12px;margin-top:8px">规则: 删纯推广名广告 + 非视频杂项,剥掉文件名里的推广块,目录改名为 <code>标题 (年份)</code>,视频改名 <code>标题 (年份) 质量标记</code>,在 /Temp 工作区整理好后归位到 ${esc(data.movie_root||'/Cloud')} 或 ${esc(data.tv_root||'/Cloud')},最后写 NFO。库里已有同名条目会显示「跳过」(原因见目标列)。删除走 CD2 回收站,可恢复。</p>
       ${logsHtml}`;
     el._plans = plans;
     loadOrganizeLogs();
@@ -147,7 +150,8 @@ function _pollJob(jobId, btn, label){
       const okN = (s.results||[]).filter(x=>x.ok).length;
       const skipped = (s.results||[]).filter(x=>x.skipped).length;
       const errs = (s.results||[]).filter(x=>!x.ok);
-      toast(`完成 ${okN}/${s.count} 个${skipped?`(${skipped} 个已存在跳过)`:''}${errs.length?` / 失败 ${errs.length}`:''}`);
+      const note = s.note ? ` · ${s.note}` : '';
+      toast(`完成 ${okN}/${s.count} 个${skipped?`(${skipped} 个已存在跳过)`:''}${errs.length?` / 失败 ${errs.length}`:''}${note}`);
       if(errs.length) console.warn('整理失败明细', errs);
       await loadOrganize();
     }catch(e){
@@ -165,13 +169,18 @@ async function applySelected(btn){
   const names = _pickedNames();
   if(!names.length){ toast('请先勾选要整理的条目'); return; }
   if(!confirm(`执行整理 ${names.length} 个条目?\n将删除广告文件、重命名目录并移动到媒体库。`)) return;
-  await _apply({names}, btn, icon('play')+'执行选中');
+  // limit 必须带上: 服务端会按它截断, 不传就吃默认值 → 勾多了被静默截断
+  await _apply({names, limit:names.length}, btn, icon('play')+'执行选中');
 }
 async function applyAll(btn){
-  const n = (($('#tab-organize')._plans||[]).filter(p=>p.status==='ok'||p.status==='merge')).length;
+  // 口径与服务端 _worker 一致: ok/merge 归位, duplicate/upgrade 只清广告
+  const runSt = ['ok','merge','duplicate','upgrade'];
+  const plans = $('#tab-organize')._plans||[];
+  const n = plans.filter(p=>runSt.includes(p.status)).length;
+  const moveN = plans.filter(p=>p.status==='ok'||p.status==='merge').length;
   if(!n){ toast('没有可整理的条目'); return; }
-  if(!confirm(`执行全部 ${n} 个可整理条目?\n将删除广告文件、重命名目录并移动到媒体库。`)) return;
-  await _apply({all:true}, btn, '▶▶ 执行全部可整理');
+  if(!confirm(`执行全部 ${n} 个条目(其中 ${moveN} 个改名归位,其余仅清广告)?\n将删除广告文件、重命名目录并移动到媒体库。`)) return;
+  await _apply({all:true, limit:n}, btn, '▶▶ 执行全部可整理');
 }
 async function finishAll(mode){
   try{ const ok = await api('/api/organize/finish',{method:'POST',body:JSON.stringify({mode})}); toast(ok.msg||'已触发'); }
