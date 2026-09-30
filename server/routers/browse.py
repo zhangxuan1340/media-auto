@@ -628,6 +628,26 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
     return {"total": total, "page": page, "items": cards}
 
 
+def _region_fields(title, original_title, original_language, countries, cfg=None):
+    """详情页「地区」= organize 归类同一套口径(lib.classify, 含用户配的地区档)。
+
+    前端直接展示服务端给的 regionKey/regionLabel —— 不再自己复刻一份语言/国家映射
+    (地区档可配置后, 复刻的那份必然与后端漂移)。text 用 片名 + 原名: 关键词档(港片/
+    纪录片这类)靠标题命中, 组织整理时还会带上文件名, 这里没有文件名, 可能差一档。
+    """
+    from lib.classify import region_info
+    try:
+        ri = region_info(
+            {"title": title or "", "filename": original_title or "",
+             "language": original_language or "",
+             "countries": list(countries or [])},
+            cfg or {},
+        )
+        return {"regionKey": ri["key"], "regionLabel": ri["label"]}
+    except Exception:  # noqa: BLE001  地区显示挂了不该拖垮整个详情
+        return {"regionKey": "", "regionLabel": ""}
+
+
 def _detail_payload(s, kind, tmdb_id, cfg=None):
     """把本地缓存的一行 tmdb_media 拼成详情弹窗形状(含剧集分集缺失)。
     无缓存行返回 None。
@@ -658,6 +678,8 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
         # 港片 original_language 常是 cn; 详情页据此显示地区, organize 据此分类(防鼠胆龙威类错配)。
         "originalLanguage": m.original_language or "",
         "countries": [c for c in (m.countries or "").split(",") if c],
+        **_region_fields(m.title, m.original_title, m.original_language,
+                         [c for c in (m.countries or "").split(",") if c], cfg),
         "overview": m.overview, "poster": m.poster, "backdrop": m.backdrop,
         "vote": m.vote, "genres": [g for g in (m.genre_names or "").split(",") if g],
         "certification": m.certification, "runtime": m.runtime,
@@ -871,6 +893,9 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
         # 地区判定所需原始字段(与 organize 同口径, 见 _detail_payload 注)
         "originalLanguage": meta.get("original_language") or "",
         "countries": meta.get("countries") or [],
+        **_region_fields(meta.get("title", ""), meta.get("originalTitle", ""),
+                         meta.get("original_language") or "",
+                         meta.get("countries") or [], cfg),
         "inProduction": bool(meta.get("in_production")), "status": meta.get("status", ""),
         "inLibrary": in_lib,
         "availStatus": avail_status,

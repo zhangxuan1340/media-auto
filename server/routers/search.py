@@ -16,10 +16,15 @@
   - relevance     引擎原序(默认), 按页直取最快, 不拉全量
   - quality       质量优先: **前排发布组(种子抓取规则 search.group_priority)整批排最前**
                   (组序=配置顺序), 组内/其余再按质量分(2160p>HDR>H.265/AV1>Atmos>简繁英字幕>国语…),
-                  同分按大小→种子数; 拉全量排序+120s 缓存(改配置立即换 key 重排)
-  - size_desc/size_asc  全局大小排序: 拉全量(上限 200 条)排序后按 limit 切片分页,
+                  同分按大小→种子数; 分段窗口排序 + 120s 缓存(改配置立即换 key 重排)
+  - size_desc/size_asc  全局大小排序: 分段窗口排序后按 limit 切片分页(上限 200 条),
                         同查询+排序结果缓存 120s, 「加载更多」不重拉
   - seeders_desc  全局种子数排序; Next-Web 源无 seeders, 该源下退化为原序(缺失值排末尾)
+
+非 relevance 的"全量"是**分段窗口**(2026-09-30): 首屏只抓 max(need+30, 60) 条, 「加载更多」
+要更多时再重抓更大的窗口(到 _SORT_CAP=200 封顶), 而不是每次请求都拉满 200 条 —— 站点每页
+10 条要 2~3.5s, 老实现首屏串行翻 20 页要 12~20s, 缓存 120s 过期后点一次「加载更多」又是十几秒,
+表现就是"详情页很慢、加载更多点了没反应"。抓取本身在 scripts/diao_search.collect 里并行翻页。
 """
 import re
 import time
@@ -36,7 +41,7 @@ router = APIRouter(prefix="/api/search", tags=["bitmagnet"], dependencies=[Depen
 _DEFAULT_PRIMARY = "next_web"
 
 # 排序模式: relevance=引擎原序(默认) | size_desc=大小从大到小 | size_asc=大小从小到大 | seeders_desc=种子从多到少
-# 非 relevance 需要"全局排序", 即拉全量(带上限)排序后再切片分页, 否则只排一页没意义。
+# 非 relevance 需要"全局排序", 即抓一个分段窗口(带上限)排序后再切片分页, 否则只排一页没意义。
 _SORT_MODES = {"relevance", "quality", "size_desc", "size_asc", "seeders_desc"}
 
 # 中文字幕 / 国语 判定(单一来源: _QUALITY_RULES 与 is_golden/quality_score 共用, 避免两处漂移 ——
@@ -166,7 +171,9 @@ def group_rank(name, cfg):
 
 _SORT_CAP = 200          # 全局排序时最多拉取条数(防止热门词全量过大)
 _SORT_CACHE_TTL = 120    # 全量排序结果缓存秒数(同一查询+排序, "加载更多"不重拉)
-_sort_cache = {}         # key -> (ts, sorted_items)
+_WINDOW0 = 60            # 首屏窗口下限(至少抓这么多条, 否则一次只排一屏没意义)
+_STEP = 30               # 每页续抓增量(need+30 → 需要 90 条时抓 120)
+_sort_cache = {}         # key -> (ts, sorted_items, fetched_cap, exhausted)
 
 
 def _rule_fingerprint(cfg):
@@ -181,20 +188,48 @@ def _sort_key(q, sort, source, cfg=None):
 
 
 def _cache_get(key):
+    """命中返回 (items, fetched_cap, exhausted), 过期/未命中返回 None。"""
     v = _sort_cache.get(key)
     if not v:
         return None
-    ts, items = v
+    ts, items, cap, exhausted = v
     if time.time() - ts > _SORT_CACHE_TTL:
         _sort_cache.pop(key, None)
         return None
-    return items
+    return items, cap, exhausted
 
 
-def _cache_put(key, items):
+def _cache_put(key, items, cap=None, exhausted=None):
+    """cap = 这份 items 对应抓了多少条(用于判断要不要再抓更多); exhausted 缺省视为"已到底"。"""
     if len(_sort_cache) >= 64:
         _sort_cache.pop(next(iter(_sort_cache)), None)
-    _sort_cache[key] = (time.time(), items)
+    _sort_cache[key] = (time.time(), items,
+                        len(items) if cap is None else cap,
+                        True if exhausted is None else exhausted)
+
+
+async def _load_window(source, cfg, q, need, sort):
+    """拿一个"至少 need 条"的全局排序窗口(分段抓取), 返回 (sorted_items, exhausted)。
+
+    exhausted=True 表示站点已到底(再翻也不会有新结果)。
+    分段的意义: 老实现每个请求都拉满 _SORT_CAP=200(站点每页 10 条, 串行翻 20 页 = 12~20s),
+    首屏要等很久; 缓存 120s 过期后点一次「加载更多」又是十几秒 —— 2026-09-30 报的
+    「详情页种子很慢 / 加载更多点了没反应」就出在这里。
+    """
+    need = max(1, int(need))
+    key = _sort_key(q, sort, source, cfg)
+    hit = _cache_get(key)
+    if hit:
+        items, cap_used, exhausted = hit
+        if len(items) >= need or exhausted or cap_used >= _SORT_CAP:
+            return items, exhausted
+    target = min(_SORT_CAP, max(need + _STEP, _WINDOW0))
+    got = await _fetch_all(source, cfg, q, target)
+    items = _apply_sort(got, sort, cfg)
+    # 站点一条不剩(本页不满) → 到底; 满 target 条则认为后面还有, 下次要更多再抓
+    exhausted = len(got) < target
+    _cache_put(key, items, target, exhausted)
+    return items, exhausted
 
 
 def _apply_sort(items, sort, cfg=None):
@@ -335,7 +370,10 @@ async def _search_next_web(cfg, q, limit, page=1):
 
 
 async def _fetch_all(source, cfg, q, cap):
-    """全局排序用: 拉全量(最多 cap 条)并规整成统一 item 结构。"""
+    """抓最多 cap 条并规整成统一 item 结构(全局排序的取数原语, 也是 track_check 的入口)。
+
+    顺序抓取由 scripts/diao_search.collect 内部并行化; 返回不足 cap 条 = 站点到底。
+    """
     if source == "next_web":
         from scripts import diao_search
         base, _ = diao_search.resolve_settings(cfg)
@@ -431,21 +469,22 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
     if source is None:
         raise HTTPException(503, "两个磁力源都已禁用(bitmagnet.enabled 与 bitmagnet_next_web.enabled)")
 
-    # ---- 非 relevance: 拉全量 → 全局排序 → 按 limit 切片分页 ----
+    # ---- 非 relevance: 分段抓取 → 全局排序 → 按 limit 切片分页 ----
     if sort != "relevance":
-        key = _sort_key(q, sort, source, cfg)   # cfg 进 key: 改前排组/金标组不等缓存过期
-        all_items = _cache_get(key)
         try:
-            if all_items is None:
-                all_items = _apply_sort(await _fetch_all(source, cfg, q, _SORT_CAP), sort, cfg)
-                _cache_put(key, all_items)
+            # 只抓到"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限 200)
+            window, exhausted = await _load_window(source, cfg, q, page * limit, sort)
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
             label = "Bitmagnet-Next-Web" if source == "next_web" else "Bitmagnet"
             raise HTTPException(status_code=502, detail=f"{label} 请求失败: {e}")
 
         start = (page - 1) * limit
-        page_items = all_items[start:start + limit]
-        has_more = start + limit < len(all_items)
+        page_items = window[start:start + limit]
+        # 还有下一页: 窗口里还有没展示的, 或窗口没抓满且站点未必到底(下次抓更大窗口)
+        has_more = ((start + limit < len(window))
+                    or (not exhausted and len(window) < _SORT_CAP))
         # 回传前端: 双查询合并后按同规则重排, 前排/金标徽章渲染
         if sort == "quality":
             _annotate_quality(page_items, cfg)
@@ -455,7 +494,7 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         return {
             "source": source, "items": page_items, "hasMore": has_more,
             "nextPage": page + 1 if has_more else page, "sort": sort,
-            "totalCount": len(all_items),
+            "totalCount": len(window), "exhausted": exhausted,
         }
 
     # ---- relevance: 引擎原序, 按页直取(不拉全量, 最快) ----

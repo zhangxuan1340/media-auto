@@ -29,7 +29,7 @@ MediaAuto/
 │   ├── naming.py        # 推广块剥离 / 广告识别 / 标题年份抽取 / 命名模板 / 匹配度校验
 │   ├── titles.py        # 标题优先级(手动 > TMDB > 豆瓣 > TMDB 台/港)+ 豆瓣联想短缓存
 │   ├── episode_numbers.py # 分集集号口径: 无 TMDB 真实集号就不猜
-│   ├── mediainfo.py     # 媒体探测(mediainfo 或 WebDAV+ffprobe) → 质量标记 + <streamdetails>
+│   ├── mediainfo.py     # 媒体探测(WebDAV+ffprobe / CD2 下载链接) → 质量标记 + <streamdetails>
 │   ├── nfo.py           # tinyMediaManager 5.2.12 兼容的 NFO(电影 + tvshow)
 │   ├── jobs.py          # 6 个定时作业的定义与排期
 │   ├── sync_guard.py    # 同步/可用性状态守卫
@@ -133,8 +133,10 @@ venv/bin/python -c "import sqlite3; s=sqlite3.connect('data/media_auto.db'); d=s
    密钥显示 `••••••` 表示未修改;切页签不会丢改动,保存是一起提交的;「导出备份」导出整份 JSON。
    同页还有:夜间模式(跟随系统 19:00–07:00 / 手动浅色·深色)、隐藏已完整作品、图片本地缓存、
    S0 特别篇是否计入缺失检测。
-3. **管理 → 分类规则**:18 个分类键 → `/Cloud` 下真实目录名的映射,以及库根路径。
-   **键不可增删,只能改目录名**;改名不迁移已有内容(新目录下次整理时自动创建,已归位的自行移动)。
+3. **管理 → 分类规则**:上面是**地区档**表(每档生成 `键Movie` / `键Show` 两个分类键,可增删改归属),
+   下面是分类键 → `/Cloud` 下真实目录名的映射,以及库根路径。
+   特殊类型键(动画/纪录片/综艺/体育/音乐共 6 个)**不可增删**,只能改目录名;
+   改名不迁移已有内容(新目录下次整理时自动创建,已归位的自行移动)。
 4. **管理 → 下载**:填 qBittorrent 地址/账号,测试连接,看任务进度与「下到第几集」聚合。
 5. **整理**页签:先「预览」看计划(要删的广告、新目录名、目标库、匹配度),再勾选或「执行全部」。
 6. 需要定时动作的去 **管理 → 作业** 改排期(手动运行不改变排期)。
@@ -155,7 +157,7 @@ venv/bin/python -c "import sqlite3; s=sqlite3.connect('data/media_auto.db'); d=s
 | --- | --- |
 | 缺失 | 剧集分集缺失 / 电影未拥有,分页 + 滚动加载(整表由后端 30s 缓存切片);分集只按 TMDB 真实集号报缺,拿不到集号显示「编号未同步」,不估算 |
 | 通用 | 分组配置表单 + 夜间模式 / 隐藏完整 / 图片缓存 / S0 特别篇开关 |
-| 分类规则 | 分类键 → 目录名映射 + 库根 + 库内实际目录是否存在 |
+| 分类规则 | 地区档增删改(每档 → `键Movie`/`键Show`)+ 分类键 → 目录名映射 + 库根 + 库内实际目录是否存在 |
 | 下载 | qBittorrent 配置与连接测试、任务进度(有下载中任务时 5s 轮询)、按作品聚合 |
 | 追踪 | 演员新作 / 剧集新季追踪 + 推送筛选(片源/分辨率/发布组/大小) |
 | 本地库 | Jellyfin / TMDB 同步状态与浏览;同步统一由「作业」触发 |
@@ -178,7 +180,10 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
 - 地址支持 http/https 切换与自动探测(「管理 → 通用 → 磁力搜索源」里有「检测」按钮,
   后端 `GET /api/search/probe` 逐协议试,收到 HTTP 响应即算通)。
 - 排序:`relevance`(引擎原序)、`quality`(质量优先)、`size_desc` / `size_asc`、`seeders_desc`。
-  非 `relevance` 的模式拉全量排序后分页,同查询缓存 120s。
+  非 `relevance` 的模式按**分段窗口**抓取排序后分页:首屏只抓 `max(需要+30, 60)` 条,
+  「加载更多」要更多时再重抓更大的窗口(200 条封顶),同查询+排序结果缓存 120s。
+  站点单页只有 10 条却要 2~3.5s,所以翻页在 `scripts/diao_search.py::collect` 里按 6 路并行——
+  老实现每个请求都拉满 200 条(串行翻 20 页 = 12~20s)是"详情页磁力列表很慢"的根因。
 - **前排发布组**(管理 → 通用 → 种子抓取规则,`search.group_priority`):一行一个组名,行序 = 优先级,
   大小写不敏感;命中要求组名与标题其余部分分开(`-Beitai`、`[FRDS]`、` HHD` 算,`CHDRip` 不算 `CHD`)。
   详情页「质量优先」搜索与追踪自动推送都按这个顺序整批排最前;留空 = 关闭前排。
@@ -214,9 +219,13 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
 规则与口径:
 
 - 归位目的地是 `/Cloud/<分类>`(`organize.cloud_root`,默认 `/Cloud`)。分类走 `lib/classify.py`
-  的级联:**动画(Dm) > 纪录片(Jl) > 综艺(Xr) > 体育(Sp) > 音乐(Mu) > 地区(Cn/En/JpKr/Hk/Sea/Ot)**
-  ,类型优先于地区;地区按「语言 → 国家」判,台湾与香港同属港台(`HkMovie` / `HkShow`,没有单独的 Tw 目录)。
-  目录名可在「管理 → 分类规则」改。
+  的级联:**动画(Dm) > 纪录片(Jl) > 综艺(Xr) > 体育(Sp) > 音乐(Mu) > 地区档**
+  ,类型优先于地区。地区档默认 **中国大陆(Cn)/ 欧美(En)/ 日韩(JpKr)/ 港台(Hk)/ 东南亚(Sea)/ 其他(Ot)**,
+  每档生成 `键Movie` / `键Show` 两个分类键;档与归属在「管理 → 分类规则 → 地区档」**可增删改**
+  (想把台湾单拆成 Tw 档就是在这里加一行)。判定顺序:**关键词 → 优先国家 → 语言 → 国家 → 兜底 Ot**
+  ,所以出厂默认下台湾与香港同属港台(`HkMovie` / `HkShow`,没有单独的 Tw 目录)。
+  同一个国家/语言只能属于一个档,拆档时先把 TW 从港台档的「国家/优先」里删掉。
+  目录名同样在「管理 → 分类规则」改;改归属/删档**不迁移已归位内容**,旧目录留原地自行合并。
 - 命名默认 TMM 风格:目录 `标题 (年份)`,电影文件 `标题 (年份) 质量`
   (如 `保持沉默 (2019) 2160p h265 EAC3.mp4`)。想换成 `标题.年份.ttIMDB`,
   把 `organize.folder_template` 改成 `{title}.{year}.{imdb}` 即可。
@@ -224,10 +233,18 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
   `uniqueid`(tmdb/imdb/wikidata)、`genre`、`actor`、`crew`、`producer`、`trailer`、
   `fileinfo.streamdetails` 等。元数据来自 TMDB 反查:用目录名 + 主媒体文件名去搜,中英文名都能查
   (`Fireflies in the Sun` → 误杀2,`Gannibal` → 噬亡村)。磁力链本身不带 TMDB/IMDB,关联就靠这一步。
-- `<fileinfo>`(编码/分辨率/音轨)按顺序探测:本地 `local_root` 用 mediainfo;不行就走 `config.webdav`
-  (账号根 URL + 账号内路径 + 凭据)用 ffprobe;两条都不通才退回从文件名推断(NFO 不含该段)。
-  WebDAV 账号只授到 `/Temp`,所以探测在搬运之前完成。探测失败时整理日志会写明断在哪一环,
-  `<fileinfo/>` 才留空,不会静默失败。
+- `<fileinfo>`(编码/分辨率/音轨)按顺序探测:①`config.webdav`(账号根 URL + 账号内路径 + 凭据)
+  用 ffprobe 读(Range 只取需要的片段),ffprobe 缺失时 mediainfo CLI 兜底 → ②CD2 下载链接
+  (`GetDownloadUrlPath`,只要 gRPC token,不受 `account_root` 限制);两条都不通才退回从文件名
+  推断(NFO 不含该段)。WebDAV 账号只授到 `/Temp`,所以探测在搬运之前完成;探测失败时整理日志
+  会写明断在哪一环,`<fileinfo/>` 才留空,不会静默失败。
+  (2026-09-30 起 `clouddrive2.local_root` 本地挂载通道**已全面下线**:设置页不再有该字段,
+  探测与读 NFO 全走网络,部署不必把 `/Cloud` 挂到服务同机。)
+- 「更新 NFO」只刷新 TMDB 元数据;`<fileinfo>` / `<original_filename>` / `<source>` /
+  观看状态这些**随文件走的字段原样沿用** —— 更新前先读现有 NFO,读取通道依次是
+  ①WebDAV(受 `webdav.account_root` 范围限制,账号只开 `/Temp` 时读不到 `/Cloud`)→
+  ②CD2 下载链接(只要 gRPC token,不受账号范围限制)。文件在目录里但两条都读不到时
+  **拒绝覆盖**(502 逐条列出原因),免得把上面那些字段抹成空 —— 老版本读不到也照写,那才是真丢数据。
 - 广告文件按特征判定:去掉含域名的括号块之后没有实际片名就算广告,不做域名白名单
   (高清站域名变体多,形态却一致)。正片名里带推广前缀不算广告。非视频杂项
   (`.txt` / `.url` / `.doc` / `.pdf` 等)一并删除;`.nfo` 与海报类资产保留,字幕默认保留。
@@ -328,6 +345,11 @@ venv/bin/python scripts/verify_group_rank.py        # 前排发布组 27 用例(
 venv/bin/python scripts/verify_organize.py          # 整理沙箱, 在 /Temp 内跑, 不碰 /Cloud
 venv/bin/python scripts/verify_organize_order.py    # 整理顺序 31 用例(全打桩不连网)
 venv/bin/python scripts/verify_settings_save.py     # 设置页保存按钮 14 用例(起临时服务 + 系统 Chrome)
+venv/bin/python scripts/verify_classify_regions.py  # 地区档 74 用例(默认行为不变/校验/分类规则 API)
+venv/bin/python scripts/verify_region_rules_ui.py   # 分类规则页地区档 UI 30 用例(起临时服务 + 系统 Chrome)
+venv/bin/python scripts/verify_nfo_read.py          # 现有 NFO 两条读取通道 + 502 文案 16 用例(连真实 CD2)
+venv/bin/python scripts/verify_probe_channels.py   # <fileinfo> 探测两条通道(WebDAV/下载链接)7 用例(连真实 CD2)
+venv/bin/python scripts/verify_search_pages.py     # 磁力翻页: 并行抓取/分段窗口/加载更多 37 用例(打桩站点)
 venv/bin/python scripts/audit_jellyfin_sync.py      # 同步审计 8 项(要连 Jellyfin, 约 3min)
 node --check server/static/js/*.js                  # 前端语法
 ```

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -19,13 +20,19 @@ from server.auth import require_auth
 from server.config import get_config, save_config, skill_root
 from db.database import SessionLocal
 from db import repositories as repo
+from lib.classify import (FALLBACK_REGION, normalize_regions,
+                          validate_regions)
 
 router = APIRouter(prefix="/api", tags=["cd2"], dependencies=[Depends(require_auth)])
 
 # ---- 分类规则(管理页「分类规则」子页签) ----
-# 分类键由 lib/classify.py 的级联引擎生成, 键不可增删, 只有目录名可改。
-# 这里维护"键 → 中文名 + 分组 + 说明", 前端按分组渲染, 后端校验键白名单。
-_CATEGORY_META = {
+# 分类键两类:
+#   * 特殊类型键(Dm/Jl/Xr/Sp/Mu 前缀)由级联引擎固定生成 —— 键不可增删, 只有目录名可改;
+#   * 地区键 = <地区档键>Movie / <地区档键>Show, **随「地区档」配置变**:
+#     档可以在页面上增/删/改(如把台湾拆成单独的 Tw 档), 键由地区档现算, 白名单跟着变。
+# 这里维护"键 → 中文名 + 分组 + 说明"(地区键的中文名由档 label 现算), 前端按分组渲染,
+# 后端校验键白名单。
+_SPECIAL_META = {
     # (中文名, 分组, 说明)
     # ⚠️ 2026-09-22 移除 TsMovie/TsShow(18+ 不再按目录隔离, 改由 Jellyfin 按分级控制)。
     "DmMovie":  ("动画电影",   "special", "TMDB 动画类型 或 标题命中动画关键词"),
@@ -34,26 +41,56 @@ _CATEGORY_META = {
     "XrShow":   ("综艺",       "special", "标题命中综艺/脱口秀/真人秀等关键词"),
     "SpShow":   ("体育",       "special", "标题命中体育/赛事/电竞等关键词"),
     "MuShow":   ("音乐",       "special", "标题命中演唱会/MV/专辑等关键词"),
-    "CnMovie":  ("中国大陆电影", "region", "语言/国家 → 中国大陆"),
-    "CnShow":   ("中国大陆剧集", "region", "语言/国家 → 中国大陆"),
-    "EnMovie":  ("欧美电影",   "region", "语言/国家 → 欧美(含英法德西等)"),
-    "EnShow":   ("欧美剧集",   "region", "语言/国家 → 欧美(含英法德西等)"),
-    "JpKrMovie": ("日韩电影",  "region", "语言/国家 → 日本/韩国"),
-    "JpKrShow":  ("日韩剧集",  "region", "语言/国家 → 日本/韩国"),
-    "HkMovie":  ("港台电影",   "region", "粤语/HK/TW 优先于语言判定"),
-    "HkShow":   ("港台剧集",   "region", "粤语/HK/TW 优先于语言判定"),
-    "SeaMovie": ("东南亚电影", "region", "泰/越/印尼/马来/新加坡/菲"),
-    "SeaShow":  ("东南亚剧集", "region", "泰/越/印尼/马来/新加坡/菲"),
-    "OtMovie":  ("其他电影",   "region", "无法判定地区时的兜底"),
-    "OtShow":   ("其他剧集",   "region", "无法判定地区时的兜底"),
 }
 # 目录名白名单: 非空, 不允许路径分隔符/控制字符, 不超长
 _DIR_NAME_BAD = re.compile(r"[/\\\x00-\x1f]")
 
 
+def _region_desc(key, it):
+    """地区档 → 分类规则页的说明列(跟着配置走, 改了归属说明也跟着变)。"""
+    bits = []
+    prio = it.get("prio") or {}
+    if prio:
+        bits.append("优先 " + "/".join(
+            f"{c}={'/'.join(v) or '不限'}" for c, v in prio.items()))
+    if it.get("keywords"):
+        bits.append("关键词命中优先")
+    langs = list(it.get("languages") or [])
+    if langs:
+        bits.append("语言 " + " ".join(langs[:6]) + ("…" if len(langs) > 6 else ""))
+    cts = list(it.get("countries") or [])
+    if cts:
+        bits.append("国家 " + " ".join(cts[:10]) + ("…" if len(cts) > 10 else ""))
+    if key == FALLBACK_REGION:
+        bits.append("判不出地区时的兜底")
+    elif not bits:
+        bits.append("未配置归属")
+    return " · ".join(bits)
+
+
+def _category_meta(cfg):
+    """特殊 6 键 + 每个地区档的 Movie/Show → {分类键: (中文名, 分组, 说明)}。"""
+    meta = dict(_SPECIAL_META)
+    norm = normalize_regions((cfg or {}).get("regions"))
+    for key in norm["order"]:
+        it = norm["items"][key]
+        label = it.get("label") or key
+        desc = _region_desc(key, it)
+        meta[key + "Movie"] = (label + "电影", "region", desc)
+        meta[key + "Show"] = (label + "剧集", "region", desc)
+    return meta
+
+
+def _regions_out(cfg):
+    """给前端表格用的地区档(规范化后的 {order, items}, 缺项已补默认)。"""
+    norm = normalize_regions((cfg or {}).get("regions"))
+    return {"order": norm["order"], "items": norm["items"]}
+
+
 class CategoriesBody(BaseModel):
-    categories: dict       # {分类键: 目录名} —— 只接受白名单键
-    cloud_root: str = ""   # 媒体库根(如 /Cloud); 留空 = 不改
+    categories: dict = {}     # {分类键: 目录名} —— 只接受白名单键
+    cloud_root: str = ""      # 媒体库根(如 /Cloud); 留空 = 不改
+    regions: Optional[dict] = None   # 地区档配置; None = 不改(省略该字段的旧前端也能存)
 
 
 # ---- 请求体模型 ----
@@ -510,13 +547,14 @@ async def api_organize_finish(body: dict = Body(default={}), cfg: dict = Depends
 # ---------------------------------------------------------------------------
 def _default_categories(cfg):
     """config.categories 缺失时用分类键自身兜底(与 classify._emit 的回退一致)。"""
-    return {k: (cfg.get("categories") or {}).get(k, k) for k in _CATEGORY_META}
+    return {k: (cfg.get("categories") or {}).get(k, k) for k in _category_meta(cfg)}
 
 
 @router.get("/organize/categories")
 async def api_organize_categories_get(cfg: dict = Depends(get_config)):
-    """分类规则: 18 个分类键的目录名映射 + cloud_root + 库内实际目录(标 exists)。
+    """分类规则: 全部分类键(特殊 6 + 地区档 × 2)的目录名映射 + 地区档配置 + 库内实际目录。
 
+    键数随地区档变(默认 6 特殊 + 6 地区档 × 2 = 18);地区档页签里可增删改。
     exists 来自一次 CD2 GetSubFiles(cloud_root)(毫秒级); CD2 不可达时 exists 全为 null, 不报错。
     """
     categories = _default_categories(cfg)
@@ -535,7 +573,7 @@ async def api_organize_categories_get(cfg: dict = Depends(get_config)):
 
     existing = await run_in_threadpool(_q)
     rows = []
-    for key, (label, group, desc) in _CATEGORY_META.items():
+    for key, (label, group, desc) in _category_meta(cfg).items():
         folder = categories.get(key, key)
         rows.append({
             "key": key, "label": label, "group": group, "desc": desc,
@@ -543,7 +581,8 @@ async def api_organize_categories_get(cfg: dict = Depends(get_config)):
             "path": cloud_root + "/" + folder,
             "exists": (existing is not None) and (folder in existing),
         })
-    return {"cloud_root": cloud_root, "existing_checkable": existing is not None, "rows": rows}
+    return {"cloud_root": cloud_root, "existing_checkable": existing is not None,
+            "rows": rows, "regions": _regions_out(cfg)}
 
 
 @router.put("/organize/categories")
@@ -551,15 +590,31 @@ async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(
     """保存分类规则 → 写回 app_config 表(updated_at 热加载, 下一次整理立即生效, 无需重启)。
 
     校验(防把整理归位写坏):
-      - 分类键必须是 18 个规范键白名单(键不可自造);
+      - regions 带了就先过 lib.classify.validate_regions(结构/键名/撞车/Ot 必留/跨档重复);
+      - 分类键必须落在「特殊 6 + 当前地区档生成的键」白名单内(地区档可增删, 白名单跟着变);
       - 目录名非空 / 无路径分隔符与控制字符 / ≤64 字符;
       - cloud_root 留空不改; 要改必须以 / 开头且不含 //。
     """
+    # 1) 地区档(可选): 先校验 → 规范化 → 与本次提交的目录名一起算最终白名单
+    regions = None
+    if body.regions is not None:
+        try:
+            validate_regions(body.regions)
+        except ValueError as e:
+            raise HTTPException(400, f"地区档配置不合法: {e}")
+        norm = normalize_regions(body.regions)
+        regions = {"order": norm["order"], "items": norm["items"]}
+    final_cfg = dict(cfg)
+    if regions is not None:
+        final_cfg["regions"] = regions
+    meta = _category_meta(final_cfg)
+
     cats = dict(cfg.get("categories") or {})
     changed = 0
     for key, folder in (body.categories or {}).items():
-        if key not in _CATEGORY_META:
-            raise HTTPException(400, f"未知分类键: {key}(分类由分类引擎生成, 不能自造)")
+        if key not in meta:
+            raise HTTPException(
+                400, f"未知分类键: {key}(特殊类型键固定, 地区键只能通过「地区档」增减, 不能自造)")
         folder = (folder or "").strip()
         if not folder:
             raise HTTPException(400, f"分类 {key} 的目录名不能为空")
@@ -573,6 +628,10 @@ async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(
             cats[key] = folder
             changed += 1
 
+    # 2) 地区档变了 → 清掉已不存在的地区键的目录名(键没了, 名字留着也只是死配置)
+    if regions is not None:
+        cats = {k: v for k, v in cats.items() if k in meta}
+
     cloud_root = (cfg.get("organize") or {}).get("cloud_root") or "/Cloud"
     new_root = (body.cloud_root or "").strip()
     if new_root and new_root != cloud_root:
@@ -583,7 +642,9 @@ async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(
     # 写回配置(app_config 表; updated_at 变化 → 下一次请求热加载, 下次整理生效)
     def _write():
         data = dict(get_config())
-        data.setdefault("categories", {}).update(cats)
+        data["categories"] = cats
+        if regions is not None:
+            data["regions"] = regions
         data.setdefault("organize", {})["cloud_root"] = cloud_root
         save_config(data)
     try:
@@ -593,6 +654,14 @@ async def api_organize_categories_put(body: CategoriesBody, cfg: dict = Depends(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"写入配置失败: {e}")
 
+    region_changed = regions is not None and (cfg.get("regions") or {}) != regions
+    n_region_keys = len([k for k in meta if k not in _SPECIAL_META])
+    parts = []
+    if changed:
+        parts.append(f"{changed} 个目录变更")
+    if region_changed:
+        parts.append(f"地区档已更新(当前 {len(regions['order'])} 档 → {n_region_keys} 个地区分类键)")
+    msg = ("已保存 " + "; ".join(parts)) if parts else "没有变更(目录名与原值相同)"
     return {"ok": True, "changed": changed, "cloud_root": cloud_root,
-            "msg": (f"已保存 {changed} 个目录变更" if changed
-                    else "没有变更(目录名与原值相同)")}
+            "region_changed": region_changed, "regions": _regions_out(final_cfg),
+            "msg": msg}

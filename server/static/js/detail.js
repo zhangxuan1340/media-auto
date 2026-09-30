@@ -243,21 +243,23 @@ function renderDetailLocal(d, kind, tmdbId){
   // 2026-09: TMDB/IMDb 直接做进 facts 超链接(不再单独跳转按钮行)。
   const _tmdbUrl = d.tmdbId ? `https://www.themoviedb.org${kind==='tv'?'/tv/':'/movie/'}${d.tmdbId}` : null;
   const _imdbUrl = d.imdb_id ? `https://www.imdb.com/title/${d.imdb_id}/` : null;
-  // 地区: 与 lib/classify._region 同口径(港台优先 countries, 否则按语言/国家) ——
-  // 详情页显示地区, organize 分类也用它(防鼠胆龙威类港/国错配)。
+  // 地区: 主口径是服务端 regionKey/regionLabel(lib.classify 同一套, 含用户在
+  // 「分类规则」里配的地区档 —— 归类和显示必须同一口径, 前端复刻一份必然漂移)。
+  // 老缓存没有这两个字段时才退回本页硬编码的语言/国家映射(纯兜底)。
+  const _CNAME = {'CN':'中国','HK':'香港','TW':'台湾','US':'美国','GB':'英国','FR':'法国','DE':'德国','JP':'日本','KR':'韩国','TH':'泰国','VN':'越南','ID':'印尼','MY':'马来西亚','SG':'新加坡','PH':'菲律宾'};
   const _region = (function(){
-    const lang = (d.originalLanguage||'').toLowerCase();
     const cs = (d.countries||[]).map(c=>String(c).toUpperCase());
+    const names = [...new Set(cs.map(c=>_CNAME[c]).filter(Boolean))];
+    if (d.regionKey) return { key: d.regionKey, label: d.regionLabel || '其他', names };
+    const lang = (d.originalLanguage||'').toLowerCase();
     const LANG_REGION = {'en':'En','fr':'En','de':'En','es':'En','it':'En','pt':'En','ru':'En','nl':'En','pl':'En','sv':'En','da':'En','no':'En','fi':'En','tr':'En','el':'En','cs':'En','hu':'En','ro':'En','ja':'JpKr','ko':'JpKr','th':'Sea','vi':'Sea','id':'Sea','ms':'Sea','tl':'Sea','my':'Sea','zh':'Cn','cn':'Cn','yue':'Hk'};
     const COUNTRY_REGION = {'CN':'Cn','HK':'Hk','TW':'Hk','US':'En','GB':'En','FR':'En','DE':'En','CA':'En','AU':'En','JP':'JpKr','KR':'JpKr','TH':'Sea','VN':'Sea','ID':'Sea','MY':'Sea','SG':'Sea','PH':'Sea'};
     const NAME = {'Cn':'国片','En':'欧美','JpKr':'日韩','Hk':'港片','Sea':'东南亚','Ot':'其他'};
-    const CNAME = {'CN':'中国','HK':'香港','TW':'台湾','US':'美国','GB':'英国','FR':'法国','DE':'德国','JP':'日本','KR':'韩国','TH':'泰国','VN':'越南','ID':'印尼','MY':'马来西亚','SG':'新加坡','PH':'菲律宾'};
     let key = 'Ot';
     if (lang==='yue' || cs.includes('HK') || cs.includes('TW')) key = 'Hk';
     else if (LANG_REGION[lang]) key = LANG_REGION[lang];
     else { for (const c of cs){ if (COUNTRY_REGION[c]){ key = COUNTRY_REGION[c]; break; } } }
-    const names = [...new Set(cs.map(c=>CNAME[c]).filter(Boolean))];
-  return { key, label: NAME[key]||'其他', names };
+    return { key, label: NAME[key]||'其他', names };
   })();
   const _regionVal = _region.label + (_region.names.length? ' · ' + _region.names.join('/') : '');
   const facts = [
@@ -360,7 +362,7 @@ async function updateNfo(kind, tmdbId, btn){
         if(btn) btn._hasFileinfo = true;
       } else if(r.probe_attempted){
         // 只有"真的探过且没探到"才提示失败; probed=false 也可能= 没必要探(三义混同)
-        msg += `；流信息仍为空: ${r.probe_error || '本地挂载与 WebDAV 都读不到该文件'}`;
+        msg += `；流信息仍为空: ${r.probe_error || 'WebDAV 与 CD2 下载通道都读不到该文件'}`;
       } else {
         // 现在已有 <fileinfo>(或非电影) → 不用再探, 也别报假错误
         if(btn) btn._hasFileinfo = (kind === 'tv') ? true : (r.has_fileinfo !== false);
@@ -603,6 +605,21 @@ async function searchMagnets(q, title, boxSel, limit, extra){
   const sort = box._sort || 'quality';   // 默认质量优先(用户指定: 2160p/HDR/字幕/国语靠前)
   box._sort = sort;
   const tok = (box._reqTok = (box._reqTok||0) + 1);  // 排序/查询竞态: 旧响应直接丢弃
+  window._magBox = box;
+  // 竞态与反馈(2026-09-30 报障「种子页很慢、加载更多点了没反应」):
+  //   ① 上一轮的按钮/结果立刻清掉 —— 留在页面上的旧按钮还能点, 点了会拿旧页号去追加、
+  //      随后又被本轮结果覆盖, 用户看到的就是"点了没反应";
+  //   ② _loading 让首屏没回来时「加载更多」直接忽略;
+  //   ③ 8 秒还没回 → 换文案提示站点慢, 免得干转圈像卡死。
+  box._loading = true;
+  box._loadingMore = false;
+  box._emptyStreak = 0;
+  clearTimeout(box._slowT);
+  box.innerHTML = `<div class="empty"><span class="spin"></span><span class="magSpinTxt">搜索磁力中…</span></div>`;
+  box._slowT = setTimeout(() => {
+    const t = box.querySelector('.magSpinTxt');
+    if(t) t.textContent = '站点较慢,仍在加载(可换「相关性」排序, 那个不抓全量)…';
+  }, 8000);
   // 查询组: 中文标题一遍 + 英文(原名)标题一遍(+年份+季标记), 并行拉取合并去重
   const qs = _magQueries(extra.title || q, extra.originalTitle, extra.year, extra.seasonTag, extra.englishTitle);
   try{
@@ -612,7 +629,10 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     const src = (pages[0] && pages[0].source)==='next_web' ? 'Bitmagnet-Next-Web' : 'Bitmagnet';
     if(!res.length){ box.innerHTML=`<div class="empty">${icon('search')} ${src} 没有命中</div>`; return; }
     const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
-    box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
+    // 窗口状态: 后端分段抓取(首屏 60 条), totalCount=已抓条数, exhausted=站点到底
+    box._total = Math.max(0, ...pages.map(p => (p && p.totalCount) || 0));
+    box._exhausted = pages.every(p => p && p.exhausted === true);
+    box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
       <div class="res"><div class="info">
         <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name)}
@@ -631,10 +651,26 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     box._extra = extra;
     box._pages = pages.map(p => (p && p.nextPage) ? p.nextPage : 2);  // 每查询独立的下一页号
     box._more  = pages.map(p => !!(p && p.hasMore));                  // 每查询是否还有更多
-    window._magBox = box;
-  }catch(e){ if(tok === box._reqTok) box.innerHTML=`<div class="empty">搜索失败: ${e.message}</div>`; }
+  }catch(e){
+    if(tok === box._reqTok) box.innerHTML=`<div class="empty">搜索失败: ${e.message}</div>`;
+  }finally{
+    // 无论成功/失败/无命中都把"搜索中"状态收掉(旧响应不许动新一轮的状态)
+    if(tok === box._reqTok){ box._loading = false; clearTimeout(box._slowT); }
+  }
 }
-// 切换排序: 清空已加载, 按新排序重查第 1 页(非 relevance 后端拉全量排序后切片, 带缓存)
+// 头部「共 N 条」: 只在站点已到底时给真总数(否则 totalCount 只是"已抓多少", 会误导)
+function _magTotal(box){
+  return (box._exhausted && box._total && box._total > (box._res||[]).length)
+    ? ` · 共 ${box._total} 条` : '';
+}
+// 到底/去重后无新内容: 把按钮换成一行说明, 不要"点了没反应"式的静默消失
+function _magEnd(box, btn){
+  const n = (box._res||[]).length;
+  const wrap = btn && btn.closest('div');
+  if(wrap) wrap.innerHTML = `<span class="mag-end">没有更多了 · 已载 ${n} 条</span>`;
+  else if(btn) btn.remove();
+}
+// 切换排序: 清空已加载, 按新排序重查第 1 页(非 relevance 后端分段抓取排序后切片, 带缓存)
 function changeMagSort(sel){
   const box = window._magBox || $('#resBox');
   if(!box || !box._q) return;
@@ -644,6 +680,10 @@ function changeMagSort(sel){
 async function loadMoreMagnets(btn){
   const box = window._magBox || $('#resBox');
   if(!box || !box._q || !box._pages){ return; }
+  // 首屏还没回来 / 上一次还在拉 → 不接第二次点击(否则页号错乱、结果被覆盖 = "点了没反应")
+  if(box._loading || box._loadingMore){ return; }
+  box._loadingMore = true;
+  const tok = box._reqTok;
   btn.disabled = true; btn.textContent = '加载中…';
   try{
     const sort = box._sort || 'quality';
@@ -655,9 +695,13 @@ async function loadMoreMagnets(btn){
         ? api(`/api/search?q=${encodeURIComponent(x)}&limit=${box._limit}&page=${box._pages[i]}&sort=${sort}`)
         : Promise.resolve({items:[], hasMore:false, nextPage:(box._pages && box._pages[i]) || 2})
     ));
+    box._loadingMore = false;
+    if(tok !== box._reqTok){ return; }   // 期间换了查询/排序 → 新一轮自己渲染, 这里丢弃
     // 回写各查询的最新翻页状态, 供下一次点击使用
     box._pages = pages.map((p, i) => (p && p.nextPage) ? p.nextPage : ((box._pages && box._pages[i]) || 2));
     box._more  = pages.map(p => !!(p && p.hasMore));
+    box._exhausted = pages.every(p => p && p.exhausted === true);
+    box._total = Math.max(box._total || 0, ...pages.map(p => (p && p.totalCount) || 0));
     const seen = new Set(box._res.map(_magKey));
     const res = [];
     for(const p of pages) for(const r of (p.items||[])){
@@ -667,7 +711,19 @@ async function loadMoreMagnets(btn){
     }
     // 排序模式: 追加块内部按序排(与已展示块的全局衔接在极少数跨查询交错下可能有微小偏差, 可接受)
     if(sort && sort!=='relevance') res.sort(_magSortCmp(sort));
-    if(!res.length){ btn.remove(); return; }
+    if(!res.length){
+      // 整页都是已展示过的去重项: 后面可能还有 → 自动续翻(最多 2 次), 否则给个明确结尾
+      if(box._more.some(Boolean) && (box._emptyStreak||0) < 2){
+        box._emptyStreak = (box._emptyStreak||0) + 1;
+        btn.disabled = false; btn.textContent = '加载更多…';
+        toast('这一页与已展示的重复,自动接着加载');
+        setTimeout(()=>{ if(document.contains(btn) && !box._loading) loadMoreMagnets(btn); }, 500);
+        return;
+      }
+      _magEnd(box, btn);
+      return;
+    }
+    box._emptyStreak = 0;
     const base = box._res.length;  // 追加项的推送索引基数
     const html = res.map((r,i)=>`
       <div class="res"><div class="info">
@@ -681,11 +737,15 @@ async function loadMoreMagnets(btn){
     const headTxt = box.querySelector('.magHead .magHeadTxt');
     if(headTxt){
       const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
-      headTxt.innerHTML = `来源: ${srcLabel(headTxt)} · 已载 ${box._res.length} 条${qTag}`;
+      headTxt.innerHTML = `来源: ${srcLabel(headTxt)} · 已载 ${box._res.length} 条${_magTotal(box)}${qTag}`;
     }
-    if(!box._more.some(Boolean)){ btn.remove(); }
+    if(!box._more.some(Boolean)) _magEnd(box, btn);
     else { btn.disabled = false; btn.textContent = '加载更多…'; }
-  }catch(e){ btn.disabled = false; btn.textContent = '重试加载'; }
+  }catch(e){
+    box._loadingMore = false;
+    btn.disabled = false; btn.textContent = '重试加载';
+    toast('加载失败: ' + e.message);
+  }
 }
 function srcLabel(headTxt){
   const t = headTxt.innerHTML;

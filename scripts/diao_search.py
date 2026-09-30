@@ -61,6 +61,7 @@ DEFAULT_BASE = ""
 UA = os.environ.get("DIAO_UA", "media-auto/1.0")
 PAGE_SIZE = 10          # 站点硬上限: limit 最大 10,超过 400
 MAX_PAGES = 20          # --all / 翻页上限,防止无限翻
+_WORKERS = 6            # collect() 默认并行页数(每页 2~3.5s; 实测 4 路 5.6~7.8s / 6 路 3.3~5.5s 拿 60 条)
 
 
 def resolve_settings(cfg, cli_base=None, cli_limit=None):
@@ -143,32 +144,85 @@ def search(base, keyword, offset=0, limit=PAGE_SIZE):
     return torrents, bool(d.get("has_more")), d.get("total_count"), (d.get("keywords") or [])
 
 
-def collect(base, keyword, want=PAGE_SIZE, start_offset=0, max_pages=MAX_PAGES):
-    """按 offset 翻页收集最多 want 条。
+def collect(base, keyword, want=PAGE_SIZE, start_offset=0, max_pages=MAX_PAGES,
+            workers=_WORKERS):
+    """按 offset 翻页收集最多 want 条(**多页并行拉**)。
+
     返回 (torrents, total_count, keywords, has_more, end_offset)。
+
+    为什么并行(2026-09-30): 站点每页只有 10 条, 单页往返实测 2~3.5s, 串行翻 6 页就要
+    12s —— 详情页磁力列表「很慢」的根因就在这。offset 之间互不依赖, 按 workers 路并发
+    (默认 6 路)后 6 页 1 波 ≈ 2~6s。某页失败不致命: 拿已到手的部分返回, 全失败才抛。
 
     has_more = 最后一页是否"满页"(满页 = 后面很可能还有; 不满/空 = 到底)。
     end_offset = 实际翻到的 offset, 供调用方续翻(换算下一页)。
     按 hash 去重(站点排序在两次请求间可能微调, 去重保证续翻不重复)。
     """
-    out, seen, offset, tc, kw, full = [], set(), int(start_offset or 0), None, None, False
-    for _ in range(max_pages):
-        if len(out) >= want:
+    want = max(1, int(want))
+    n_pages = min(max(1, int(max_pages)), (want + PAGE_SIZE - 1) // PAGE_SIZE)
+    start = max(0, int(start_offset or 0))
+    offsets = [start + i * PAGE_SIZE for i in range(n_pages)]
+    lanes = max(1, min(int(workers or 1), len(offsets)))
+
+    out, seen, tc, kw, end, full = [], set(), None, None, start, False
+    errs = []
+    i = 0
+    while i < len(offsets):
+        # 一波并发取 lanes 页, 组装够了就不再发下一波(省请求)
+        wave = offsets[i:i + lanes]
+        got = {}
+        if lanes == 1:
+            for off in wave:
+                try:
+                    got[off] = search(base, keyword, offset=off, limit=PAGE_SIZE)
+                except Exception as e:  # noqa: BLE001
+                    got[off] = e
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=lanes) as ex:
+                futs = {ex.submit(search, base, keyword, off, PAGE_SIZE): off
+                        for off in wave}
+                for fut in as_completed(futs):
+                    off = futs[fut]
+                    try:
+                        got[off] = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        got[off] = e
+        stop = False
+        for off in wave:                     # 按 offset 升序组装, 保持引擎原序
+            res = got.get(off)
+            if res is None or isinstance(res, Exception):
+                if isinstance(res, Exception):
+                    errs.append(res)
+                stop = True                   # 这一页断了 → 用已拿到的部分
+                break
+            chunk, _m, _tc, _kw = res
+            if _tc is not None:
+                tc = _tc
+            if _kw:
+                kw = _kw
+            if not chunk:                     # 空页 = 到底
+                end = off
+                full = False
+                stop = True
+                break
+            for t in chunk:
+                if t["hash"] and t["hash"] in seen:
+                    continue
+                if t["hash"]:
+                    seen.add(t["hash"])
+                out.append(t)
+            end = off + len(chunk)
+            full = len(chunk) >= PAGE_SIZE
+            if len(out) >= want or not full:
+                stop = True
+                break
+        if stop:
             break
-        chunk, _more, tc, kw = search(base, keyword, offset=offset, limit=PAGE_SIZE)
-        for t in chunk:
-            if t["hash"] and t["hash"] in seen:
-                continue
-            if t["hash"]:
-                seen.add(t["hash"])
-            out.append(t)
-        if not chunk:
-            break  # 空页 = 到底
-        full = len(chunk) >= PAGE_SIZE
-        offset += len(chunk)
-        if not full:
-            break  # 不满页 = 到底
-    return out[:want], tc, kw, (full and len(out) >= want), offset
+        i += len(wave)
+    if not out and errs:
+        raise errs[0]
+    return out[:want], tc, kw, (full and len(out) >= want), end
 
 
 def detail(base, info_hash):

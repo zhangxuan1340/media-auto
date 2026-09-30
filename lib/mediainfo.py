@@ -5,12 +5,13 @@
 `mediainfo --Output=JSON`(本机已装),取值与 TMM 最接近。
 
 两条探测通道(probe() 自动依次尝试,都不行就退回"从文件名推断"):
-  1) 本地挂载: config.clouddrive2.local_root = CD2 根 "/" 对应的本地路径,
-     例如 CD2 `/Cloud/CnMovie/x.mkv` -> `/Volumes/Cloud/115/Cloud/CnMovie/x.mkv`。
-     只读文件头部,17GB 的 mp4 实测约 7 秒。**程序只使用已存在的路径,绝不自行挂载。**
-  2) CD2 自带 WebDAV(默认入口 /dav): 先用 ffprobe 直接读 http(s)(Range 只取需要的片段),
+  1) CD2 自带 WebDAV(默认入口 /dav): 先用 ffprobe 直接读 http(s)(Range 只取需要的片段),
      ffprobe 没装/失败再让 mediainfo CLI 直读同一 URL 兜底(它也走 libcurl, 认 URL 内嵌 Basic 凭据)。
-     配置见 config.webdav; 两条都不通会在日志里写明断在哪一环。
+     配置见 config.webdav; 断在哪一环会写进日志。
+  2) CD2 下载链接(GetDownloadUrlPath → ffprobe 读): 只要 gRPC token, 与 WebDAV 账号范围
+     (account_root)无关 —— 账号只开 /Temp 时, 库内 /Cloud 文件也探得到。
+  ⚠️ 2026-09-30 起**不再支持本地挂载探测**(clouddrive2.local_root 已全面下线):
+     探测与读 NFO 都只走网络通道, 部署无需把 /Cloud 挂到服务同机。
 
 自测: python3 lib/mediainfo.py <本地视频文件>
 """
@@ -169,39 +170,6 @@ def _find_cli():
     return None
 
 
-def _local_roots(config):
-    """返回候选本地挂载点列表(CD2 根 "/" 对应的本地路径)。
-
-    允许配成字符串或数组。程序【只使用已存在的路径】,绝不会去挂载 ——
-    这是刻意的: 挂载属于系统操作,不该由本工具做。
-    """
-    cfg = config or {}
-    raw = ((cfg.get("clouddrive2") or {}).get("local_root")
-           or (cfg.get("organize") or {}).get("local_root")
-           or cfg.get("local_root"))
-    if not raw:
-        return []
-    items = raw if isinstance(raw, (list, tuple)) else [raw]
-    return [str(p).rstrip("/") for p in items if str(p).strip()]
-
-
-def local_path(cd2_path, config=None, base_dir=None):
-    """CD2 路径 -> 本地路径(仅当该本地挂载点已存在时)。
-
-    例: local_root=/Volumes/Cloud/115, cd2_path=/Cloud/CnMovie/x.mkv
-        -> /Volumes/Cloud/115/Cloud/CnMovie/x.mkv
-    返回 None 表示无法映射(本地挂载不在/未配置) —— 调用方应退回文件名推断。
-    """
-    if not cd2_path:
-        return None
-    rel = "/" + str(cd2_path).lstrip("/")
-    for root in _local_roots(config):
-        cand = root + rel
-        if os.path.exists(cand):
-            return cand
-    return None
-
-
 def _note(err_out, msg):
     """把失败原因累积到 err_out(list),调用方据此在日志里说明断在哪一环。"""
     if err_out is not None:
@@ -238,9 +206,9 @@ def probe_file(path, timeout=180, err_out=None):
 
 
 # ---------------------------------------------------------------------------
-# WebDAV 通道(CD2 自带)
+# WebDAV 通道(CD2 自带)—— 探测/读文件的主通道
 # ---------------------------------------------------------------------------
-# 没有本地挂载时,用 CD2 的 WebDAV(默认 /dav)直接读。MediaInfo CLI 不吃 URL,
+# 用 CD2 的 WebDAV(默认 /dav)直接读。MediaInfo CLI 不吃 URL,
 # 但 ffprobe 支持 http/https —— 它会自己用 Range 请求只取需要的片段
 # (mp4 的 moov、mkv 的 header),不会把 17GB 全下下来,所以很快。
 def webdav_conf(config):
@@ -289,7 +257,7 @@ def _auth_header(config):
 def webdav_get_text(cd2_path, config=None, timeout=30):
     """通过 CD2 WebDAV(GET)读取文本文件内容(如 NFO / .nfo)。
 
-    用于「本地挂载不可用时,仍能读到现有文件内容」—— 例如手动更新 NFO 时要保留
+    用于「账号范围覆盖不到之外的场景仍能读到现有文件内容」—— 例如手动更新 NFO 时要保留
     原 NFO 里的 <fileinfo> 段(媒体流信息无法从 TMDB 元数据推导,只能从现有文件抽)。
     返回解码后的文本; 任意环节失败(未配置 / 路径不在 WebDAV 账号范围 / 网络错误)返回 None。
     """
@@ -489,23 +457,41 @@ _FF_AUDIO_ALIAS = {
 }
 
 
-def probe_url(url, config=None, timeout=180, err_out=None):
-    """用 ffprobe 探测一个 http(s) 资源(CD2 WebDAV)。失败返回 None。"""
+def probe_url(url, config=None, timeout=180, err_out=None, headers=None,
+              webdav_auth=True, verify_tls=True):
+    """用 ffprobe 探测一个 http(s) 资源。失败返回 None。
+
+    webdav_auth=True → 附上 WebDAV 的 Authorization 与 user-agent(探 WebDAV URL 用);
+                       下载链接是 token 自鉴权, 传 False 免得把 WebDAV 凭据带给别的站点。
+    headers          → 额外请求头(CD2 下载链接返回的 additionalHeaders), 与上面合成一次 -headers
+                       (ffmpeg 的 -headers 只吃一个值, 分开传会互相覆盖)。
+    verify_tls=False → 跳过证书校验(clouddrive2.insecure, 自签证书)。
+    """
     cli = _ffprobe_cli()
     if not cli:
         _note(err_out, "ffprobe 未安装/未找到")
         return None
     if not url:
-        _note(err_out, "WebDAV URL 为空")
+        _note(err_out, "探测 URL 为空")
         return None
     cmd = [cli, "-v", "quiet", "-print_format", "json",
            "-show_format", "-show_streams"]
-    auth = _auth_header(config)
-    if auth:
-        cmd += ["-headers", f"Authorization: {auth}\r\n"]
-    ua = (webdav_conf(config).get("user_agent") or "").strip()
-    if ua:
-        cmd += ["-user_agent", ua]
+    hdrs = []
+    if webdav_auth:
+        auth = _auth_header(config)
+        if auth:
+            hdrs.append(f"Authorization: {auth}")
+        ua = (webdav_conf(config).get("user_agent") or "").strip()
+        if ua:
+            hdrs.append(f"User-Agent: {ua}")
+    for h in (headers or []):
+        h = str(h).strip().strip("\r\n")
+        if h and h not in hdrs:
+            hdrs.append(h)
+    if hdrs:
+        cmd += ["-headers", "".join(f"{h}\r\n" for h in hdrs)]
+    if not verify_tls:
+        cmd += ["-tls_verify", "0"]          # 自签证书(clouddrive2.insecure)
     cmd.append(url)
     env = dict(os.environ)
     for k in ("http_proxy", "https_proxy", "all_proxy",
@@ -552,20 +538,21 @@ def _with_basic_auth(url, config):
     return urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
 
 
-def probe_url_mediainfo(url, config=None, timeout=180, err_out=None):
-    """ffprobe 缺失/失败时的兜底: 让 mediainfo CLI 直接读 WebDAV URL。
+def probe_url_mediainfo(url, config=None, timeout=180, err_out=None, embed_auth=True):
+    """ffprobe 缺失/失败时的兜底: 让 mediainfo CLI 直接读 URL(默认 WebDAV)。
 
     产出经 normalize() 与 ffprobe 通道同构, 所以调用方拿去写 <fileinfo> 无差别 ——
     这条是为了「镜像里只装了 mediainfo、没有 ffmpeg」的部署不至于整个丢掉 fileinfo。
+    embed_auth=False(下载链接)时不把 WebDAV 账密内嵌进 URL: 那是别站的 token 鉴权。
     """
     cli = _find_cli()
     if not cli:
         _note(err_out, "mediainfo CLI 未安装/未找到")
         return None
     if not url:
-        _note(err_out, "WebDAV URL 为空")
+        _note(err_out, "探测 URL 为空")
         return None
-    target = _with_basic_auth(url, config)
+    target = _with_basic_auth(url, config) if embed_auth else url
     env = dict(os.environ)
     for k in ("http_proxy", "https_proxy", "all_proxy",
               "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
@@ -621,29 +608,36 @@ def _usable(info):
     return bool((v.get("codec") or "").strip() and (v.get("width") or 0))
 
 
-def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
-    """按 CD2 路径探测媒体信息。两条通道依次尝试:
+def _probe_via_url(url, config, timeout, reasons, headers=None,
+                   webdav_auth=True, verify_tls=True):
+    """ffprobe → mediainfo CLI 兜底地探测一个 http(s) URL, 成功返回 info(带 url), 否则 None。"""
+    info = probe_url(url, config, timeout=timeout, err_out=reasons, headers=headers,
+                     webdav_auth=webdav_auth, verify_tls=verify_tls)
+    if info and not _usable(info):
+        reasons.append("ffprobe: 结果缺视频流(moov 在尾 / Range 读不全?)")
+        info = None
+    if not info:
+        # ffprobe 没装(镜像漏建)或读不动 → 让 mediainfo CLI 直读同一 URL 兜底
+        info = probe_url_mediainfo(url, config, timeout=timeout, err_out=reasons,
+                                   embed_auth=webdav_auth)
+        if info and not _usable(info):
+            reasons.append("mediainfo: 结果缺视频流(moov 在尾 → 只读到时长)")
+            info = None
+    return info
 
-      1) 本地挂载(local_root) -> MediaInfo CLI  —— 取值与 TMM 最一致
-      2) CD2 WebDAV            -> ffprobe over HTTP  —— 免挂载(主通道)
-      都不可用返回 None(调用方退回"从文件名推断质量标记"),并把**失败原因**
-      交给 log(若提供)—— 否则 <fileinfo> 为空时看不出到底断在哪一环。
+
+def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
+    """按 CD2 路径探测媒体信息。两条通道依次尝试(2026-09-30 起 local_root 已下线):
+
+      1) CD2 WebDAV   -> ffprobe over HTTP(Range 只取需要的片段), mediainfo CLI 兜底
+      2) CD2 下载链接  -> ffprobe over HTTP(只要 gRPC token, 不受 webdav.account_root 限制)
+
+    都不可用返回 None(调用方退回"从文件名推断质量标记"),并把**失败原因**
+    交给 log(若提供)—— 否则 <fileinfo> 为空时看不出到底断在哪一环。
     """
     reasons = []
-    lp = local_path(cd2_path, config, base_dir)
-    if lp:
-        info = probe_file(lp, timeout=timeout, err_out=reasons)
-        if info and _usable(info):
-            info["source"] = "local"
-            info["local_path"] = lp
-            return info
-        if info:
-            reasons.append("本地通道: 解析结果缺视频流(编码/宽度), 视为无效")
-    else:
-        roots = _local_roots(config)
-        reasons.append("本地通道: 未配置 local_root" if not roots
-                       else f"本地通道: {roots[0]} 下找不到 {cd2_path}(挂载没进容器?)")
 
+    # --- 1) CD2 WebDAV(主通道, 要 user/password 或 authorization) ---
     wd = webdav_conf(config)
     if not wd.get("enabled", True):
         reasons.append("WebDAV: webdav.enabled=false")
@@ -655,19 +649,34 @@ def probe(cd2_path, config=None, base_dir=None, timeout=180, log=None):
             reasons.append(f"WebDAV: 路径 {cd2_path} 不在 account_root="
                            f"{wd.get('account_root')!r} 范围内(如账号只开到 /Temp)")
         else:
-            info = probe_url(url, config, timeout=timeout, err_out=reasons)
-            if info and not _usable(info):
-                reasons.append("ffprobe: 结果缺视频流(moov 在尾 / Range 读不全?)")
-                info = None
-            if not info:
-                # ffprobe 没装(镜像漏建)或读不动 → 让 mediainfo 直读同一 URL 兜底
-                info = probe_url_mediainfo(url, config, timeout=timeout, err_out=reasons)
-                if info and not _usable(info):
-                    reasons.append("mediainfo: 结果缺视频流(moov 在尾 → 只读到时长)")
-                    info = None
+            info = _probe_via_url(url, config, timeout, reasons)
             if info:
                 info["source"] = "webdav"
                 return info
+
+    # --- 2) CD2 下载链接(只要有 gRPC token, account_root 管不到它) ---
+    try:
+        from clients.clouddrive import client as _cd2
+        urls, why = _cd2.download_urls(config, cd2_path, base_dir=base_dir,
+                                       timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        urls, why = [], str(e)[:160]
+    if not urls:
+        reasons.append(f"下载链接: {why or '拿不到'}")
+    else:
+        verify_tls = not ((config or {}).get("clouddrive2") or {}).get("insecure")
+        per_url = []
+        for url, hdrs in urls:
+            one = []
+            hlist = [f"{k}: {v}" for k, v in (hdrs or {}).items()]
+            info = _probe_via_url(url, config, timeout, one, headers=hlist,
+                                  webdav_auth=False, verify_tls=verify_tls)
+            if info:
+                info["source"] = "download"
+                return info
+            per_url.append(one[-1] if one else "读不到")
+        reasons.append("下载链接: " + " / ".join(dict.fromkeys(
+            e.split(" ← ")[0][:80] for e in per_url[:3])))
 
     if log:
         log(f"    ⚠ <fileinfo> 探测失败,写空标签 — " + " | ".join(reasons))
@@ -827,7 +836,7 @@ def quality_from_name(name):
     """只靠文件名推质量标记,如 `Remain.Silent.2019.2160p.WEB-DL.H265.10bit.DDP5.1`
     → `2160p h265 EAC3`(与 MediaInfo 实探结果一致)。
 
-    用途: 本地挂载不可用(探测拿不到)时兜底,保证文件名仍有质量标记。
+    用途: 两条探测通道都拿不到时兜底,保证文件名仍有质量标记。
     """
     if not name:
         return ""

@@ -869,6 +869,103 @@ def write_file(config, path, content, base_dir=None, chunk_size=WRITE_CHUNK):
 
 
 # ---------------------------------------------------------------------------
+# 读文件内容 / 拿下载链接(网络通道)
+# ---------------------------------------------------------------------------
+# proto 里只有 WriteToFile(写), **没有 ReadFile/GetFileContent(读)** —— GetSubFiles 只回
+# 目录项与元数据, 拿不到字节。要读回一个已存在文件的全部内容只有两条路:
+#   1) WebDAV(受 webdav.account_root 范围限制: 账号只开 /Temp 就读不到 /Cloud)
+#   2) GetDownloadUrlPath → HTTP GET(**只要 gRPC token**, 与账号范围都无关)
+# 第 2 条是唯一不依赖部署环境的通道, 2026-09-30 为「更新 NFO 读不到现有内容」加上;
+# 本地挂载(clouddrive2.local_root)已于同日全面下线, 不再作为读文件方式。
+READ_MAX_BYTES = 4 * 1024 * 1024          # 文本类文件(NFO)够用, 也防误下一个大文件
+
+
+def _download_urls(config, path, preview=True, base_dir=None, timeout=None):
+    """GetDownloadUrlPath → [(url, headers), ...]。
+
+    返回的 downloadUrlPath 是模板: /static/{SCHEME}/{HOST}/{PREVIEW}/path?token=…
+    (见 proto 注释), 需按真实站点替换占位符 —— gRPC 候选地址有多个(外网/内网),
+    这里逐个给出来, 由调用方按序试。
+    返回 (列表, 失败原因);列表为空时原因非空。
+    """
+    cd2 = config.get("clouddrive2", {}) or {}
+    res = _grpcurl(config, "GetDownloadUrlPath",
+                   {"path": path, "preview": bool(preview), "lazy_read": False,
+                    "get_direct_url": False}, timeout=timeout, base_dir=base_dir)
+    if not isinstance(res, dict):
+        return [], "CD2 没有返回下载链接"
+    hdrs = {str(k): str(v) for k, v in (res.get("additionalHeaders") or {}).items()}
+    direct = str(res.get("directUrl") or "").strip()
+    if direct:
+        return [(direct, hdrs)], ""
+    tpl = str(res.get("downloadUrlPath") or "").strip()
+    if not tpl:
+        return [], "CD2 返回的下载链接为空"
+    if tpl.startswith("http://") or tpl.startswith("https://"):
+        return [(tpl, hdrs)], ""
+    out = []
+    for target, use_tls, _insecure, _authority in _target_candidates(cd2):
+        scheme = "https" if use_tls else "http"
+        url = (tpl.replace("{SCHEME}", scheme)
+                  .replace("{HOST}", target)
+                  .replace("{PREVIEW}", "true" if preview else "false"))
+        if not url.startswith("http"):
+            url = f"{scheme}://{target}/" + url.lstrip("/")
+        out.append((url, hdrs))
+    return out, ("" if out else "没有可用的 CD2 站点地址(clouddrive2.hosts)")
+
+
+def download_urls(config, path, preview=True, base_dir=None, timeout=None):
+    """公开版 _download_urls: 供 lib.mediainfo 的「CD2 下载链接」探测通道用。
+
+    返回 ([(url, headers), ...], 失败原因)。路径不存在/没配 hosts 时列表为空、原因非空。
+    """
+    return _download_urls(config, path, preview=preview, base_dir=base_dir,
+                          timeout=timeout)
+
+
+def _http_get(url, headers=None, timeout=30, verify_tls=True):
+    """GET 一小段内容。绕开系统代理(本地/自建地址常被代理挡), insecure 时跳过证书校验。"""
+    import ssl
+    import urllib.request
+    handlers = [urllib.request.ProxyHandler({})]      # 不吃 http_proxy, 与 gRPC 直连一致
+    if not verify_tls:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url, headers=headers or {})
+    with opener.open(req, timeout=timeout) as resp:
+        return resp.read(READ_MAX_BYTES + 1)
+
+
+def read_file_text(config, path, timeout=None, max_bytes=READ_MAX_BYTES, base_dir=None):
+    """走 CD2 下载链接读回文本文件(**只读**)。
+
+    返回 (text|None, 失败原因)。text 为 None 时原因可用于日志/错误文案。
+    只凭 gRPC token, 也不受 WebDAV account_root 范围限制。
+    """
+    cd2 = config.get("clouddrive2", {}) or {}
+    if not timeout:
+        timeout = cd2.get("timeout") or 30
+    urls, why = _download_urls(config, path, base_dir=base_dir, timeout=timeout)
+    if not urls:
+        return None, why or "拿不到下载链接"
+    errs = []
+    for url, hdrs in urls:
+        try:
+            raw = _http_get(url, hdrs, timeout=timeout,
+                            verify_tls=not cd2.get("insecure"))
+            if len(raw) > max_bytes:
+                return None, f"文件超过 {max_bytes} 字节上限"
+            return raw.decode("utf-8", errors="replace"), ""
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"{url.split('/')[2]}: {str(e).splitlines()[0][:70]}")
+    return None, " / ".join(errs) or "下载失败"
+
+
+# ---------------------------------------------------------------------------
 # 状态判定
 # ---------------------------------------------------------------------------
 # 官方枚举(protojson 输出枚举名):

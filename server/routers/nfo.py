@@ -28,6 +28,9 @@ from clients.tmdb import client as tmdb
 from lib import mediainfo, naming, nfo as nfo_mod, titles
 from scripts import organize
 
+# "调用方没传文本"哨兵(None 是"读不到"这一有效结果, 不能当缺省用)
+_UNSET = object()
+
 router = APIRouter(prefix="/api", tags=["nfo"], dependencies=[Depends(require_auth)])
 
 
@@ -263,29 +266,63 @@ def _build_meta(config, kind, tmdb_id, *, title_read_only: bool = False):
     return meta
 
 
-def _existing_nfo_text(config, folder_path, names):
+def _existing_nfo_text(config, folder_path, names, why=None):
     """读【现有 NFO 文件】的纯文本(只读, 不探测媒体)。
 
-    通道: 本地挂载读 → WebDAV GET 读。都读不到(文件当前不可读)返回 None。
-    这是 NFO 更新时抽取"文件属性类"字段(<fileinfo> / <original_filename>)的唯一来源 ——
-    更新只刷新 TMDB 元数据, 这些随文件走的属性应当原样沿用。"""
-    for nm in names:
-        lp = mediainfo.local_path(folder_path.rstrip("/") + "/" + nm, config)
-        if lp and os.path.exists(lp):
-            try:
-                with open(lp, encoding="utf-8") as f:
-                    return f.read()
-            except Exception:  # noqa: BLE001
-                pass
-    if mediainfo.webdav_conf(config).get("base"):
+    两条通道依次试, 任一条读到就返回; 全失败返回 None:
+      1) WebDAV   —— 受 webdav.account_root 范围限制(账号只开 /Temp 就读不到 /Cloud)
+      2) CD2 下载链接 —— gRPC GetDownloadUrlPath → HTTP GET,**只要 gRPC token**,
+         不受账号范围限制(2026-09-30 加: 前一条断时不至于直接拒更新)
+    ⚠️ 本地挂载(clouddrive2.local_root)通道已随配置一起下线(2026-09-30),
+       读 NFO 只走网络, 部署不再要求把 /Cloud 挂到服务同机。
+
+    why(list|None): 逐条记下"这条通道为什么没读到", 由调用方拼进错误文案,
+    避免用户只看到"读不到"却不知道该修哪一项。
+
+    这是 NFO 更新时抽取"文件属性类"字段(<fileinfo> / <original_filename> /
+    <source> / 观看状态)的唯一来源 —— 更新只刷新 TMDB 元数据, 这些字段应当原样沿用。"""
+    folder = folder_path.rstrip("/")
+    rel = "/" + folder.lstrip("/")
+
+    # --- 1) WebDAV 读(受 account_root 范围限制) ---
+    wd = mediainfo.webdav_conf(config)
+    if not wd.get("base"):
+        if why is not None:
+            why.append("WebDAV: 未配置 webdav.base")
+    else:
+        out_of_range = mediainfo.webdav_url(folder + "/" + names[0], config) is None
         for nm in names:
-            cd2_path = folder_path.rstrip("/") + "/" + nm
             try:
-                txt = mediainfo.webdav_get_text(cd2_path, config)
+                txt = mediainfo.webdav_get_text(folder + "/" + nm, config)
                 if txt:
                     return txt
             except Exception:  # noqa: BLE001
                 pass
+        if why is not None:
+            if out_of_range:
+                why.append(f"WebDAV: account_root={wd.get('account_root')!r} 不覆盖 {rel}"
+                           "(账号只开 /Temp 就读不到 /Cloud)")
+            else:
+                why.append("WebDAV: 请求失败(地址/账号/网络)")
+
+    # --- 2) CD2 下载链接读(只要 token, 与挂载/账号范围无关) ---
+    errs = []
+    for nm in names:
+        try:
+            txt, err = cd2.read_file_text(config, folder + "/" + nm)
+        except Exception as e:  # noqa: BLE001
+            txt, err = None, str(e)[:120]
+        if txt:
+            return txt
+        if err:
+            errs.append(f"{nm}: {err}")
+    if why is not None and errs:
+        seen, uniq = set(), []
+        for e in errs:
+            if e not in seen:
+                seen.add(e)
+                uniq.append(e)
+        why.append("CD2 下载通道: " + (" / ".join(uniq))[:300])
     return None
 
 
@@ -308,27 +345,29 @@ def _nfo_ids_from_text(txt):
     return ids
 
 
-def _fileinfo_state(config, folder_path, nfo_name, video):
+def _fileinfo_state(config, folder_path, nfo_name, video, text=_UNSET):
     """现有 NFO 的 <fileinfo> 三态: 'ok' / 'empty'(读到了但没有流信息) / 'unreadable'。
 
     **必须**区分 empty 与 unreadable: 两者都表现为"抽不出 <fileinfo>", 但后果完全不同 ——
     empty 是"这条没探测过"(该补), unreadable 是"读不到现有文件"(此时若照常重建,
     会把库里已有的 <fileinfo>/<original_filename>/<source> 抹成空标签)。
-    读通道: 本地挂载 → WebDAV GET, 都不通则 unreadable。"""
-    names = []
-    if video:
-        names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
-    names.append(nfo_name)
-    txt = _existing_nfo_text(config, folder_path, names)
-    if txt is None:
+    读通道: WebDAV GET → CD2 下载链接(本地挂载已下线), 都不通则 unreadable。
+    text = 已读到的 NFO 文本可直接传入, 免得同一文件反复走两条通道。"""
+    if text is _UNSET:
+        names = []
+        if video:
+            names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
+        names.append(nfo_name)
+        text = _existing_nfo_text(config, folder_path, names)
+    if text is None:
         return "unreadable"
-    mm = re.search(r"<fileinfo>.*?</fileinfo>", txt, re.S)
+    mm = re.search(r"<fileinfo>.*?</fileinfo>", text, re.S)
     if mm and re.search(r"<streamdetails>", mm.group(0)):
         return "ok"
     return "empty"
 
 
-def _fileinfo(config, folder_path, nfo_name, video):
+def _fileinfo(config, folder_path, nfo_name, video, text=_UNSET):
     """电影 NFO 的 <fileinfo> 段: 只【保留】现有 NFO 里已有的, 绝不重新探测媒体。
 
     设计依据: NFO「更新」刷新的是 TMDB 元数据(类型/分类/ID/演员导演), 而 <fileinfo>
@@ -336,35 +375,38 @@ def _fileinfo(config, folder_path, nfo_name, video):
     刷新元数据时应当原样沿用, 不该重新推导 —— 重新推导既无意义, 又会在读不到
     现有文件/无探测工具的环境里把流信息弄丢。
 
-    因此只从【现有 NFO 文件】把 <fileinfo>...</fileinfo> 抽出来原样回填(本地挂载读 →
-    WebDAV GET 读)。读不到 → 返回 None —— **调用方必须先用 _fileinfo_state 区分
-    "读不到"与"没有"**, 读不到时禁止重建(见 _rebuild_nfo 的闸门)。
-    若想给老 NFO 补 <fileinfo>, 应走整理(organize)重新探测或 probe=1, 而不是裸更新。"""
-    names = []
-    if video:
-        names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
-    names.append(nfo_name)
-    txt = _existing_nfo_text(config, folder_path, names)
-    if txt:
-        mm = re.search(r"<fileinfo>.*?</fileinfo>", txt, re.S)
+    因此只从【现有 NFO 文件】把 <fileinfo>...</fileinfo> 抽出来原样回填(WebDAV GET 读 →
+    CD2 下载链接读)。读不到 → 返回 None —— **调用方必须先用
+    _fileinfo_state 区分"读不到"与"没有"**, 读不到时禁止重建(见 _rebuild_nfo 的闸门)。
+    若想给老 NFO 补 <fileinfo>, 应走整理(organize)重新探测或 probe=1, 而不是裸更新。
+    text = 已读到的 NFO 文本(调用方已读过一遍时传入, 与闸门保持同一份)。"""
+    if text is _UNSET:
+        names = []
+        if video:
+            names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
+        names.append(nfo_name)
+        text = _existing_nfo_text(config, folder_path, names)
+    if text:
+        mm = re.search(r"<fileinfo>.*?</fileinfo>", text, re.S)
         if mm:
             return mm.group(0)
     return None
 
 
-def _original_filename(config, folder_path, nfo_name, video):
+def _original_filename(config, folder_path, nfo_name, video, text=_UNSET):
     """电影 NFO 的 <original_filename>: 只【保留】现有 NFO 里已有的(与整理一致 ——
     整理写的是改名前的原始发布名)。读不到则回退当前视频名(新建 NFO 时)。
 
     不能用"当前视频名"硬填: 库内视频已被 TMM 改名(如 '1921 (2021) 1080p AC3.mkv'),
     那不是"原始文件名"。所以优先沿用现有 NFO 里 organize 写下的那份。"""
-    names = []
-    if video:
-        names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
-    names.append(nfo_name)
-    txt = _existing_nfo_text(config, folder_path, names)
-    if txt:
-        mm = re.search(r"<original_filename>(.*?)</original_filename>", txt, re.S)
+    if text is _UNSET:
+        names = []
+        if video:
+            names.append(os.path.splitext(video.get("name"))[0] + ".nfo")
+        names.append(nfo_name)
+        text = _existing_nfo_text(config, folder_path, names)
+    if text:
+        mm = re.search(r"<original_filename>(.*?)</original_filename>", text, re.S)
         if mm:
             return mm.group(1).strip()
     return None
@@ -373,8 +415,8 @@ def _original_filename(config, folder_path, nfo_name, video):
 def _probe_fileinfo(config, folder_path, video):
     """现场探测一次媒体文件, 返回 (<fileinfo> XML 片段, 原因)。
 
-    只给【现有 NFO 没有 <fileinfo> 的存量条目】用 —— 整理时 WebDAV 通常只开 /Temp,
-    入库后想补流信息就只能靠 local_root 挂载或 WebDAV 覆盖到 /Cloud。
+    只给【现有 NFO 没有 <fileinfo> 的存量条目】用 —— 先 WebDAV(账号覆盖到该目录时),
+    不行再走 CD2 下载链接(只要 gRPC token, 不受 account_root 限制)。
     读不到返回 (None, 可读原因), 调用方原样带回给前端, 不写空标签也写不出假数据。
     """
     if not video or not video.get("name"):
@@ -391,7 +433,7 @@ def _probe_fileinfo(config, folder_path, video):
     except Exception as e:  # noqa: BLE001
         return None, str(e)[:200]
     if not info:
-        return None, (" / ".join(n for n in notes if n)[:300] or "本地挂载与 WebDAV 都读不到该文件")
+        return None, (" / ".join(n for n in notes if n)[:300] or "WebDAV 与 CD2 下载通道都读不到该文件")
     return mediainfo.streamdetails_xml(info, indent="  "), ""
 
 
@@ -446,7 +488,7 @@ async def nfo_update(kind: str, tmdb_id: int, probe: bool = False,
     """手动重新生成 NFO 并写回 /Cloud(走 cd2.write_file 的中转+Overwrite, 不删任何东西)。
 
     刷新的是 TMDB 元数据(类型/分类/ID/演员导演); <fileinfo> 默认【沿用现有 NFO】里
-    已有的(本地挂载读 → WebDAV GET 读), 读不到则留空, 绝不擅自改写已有的流信息 ——
+    已有的(WebDAV GET 读 → CD2 下载链接读), 读不到则留空, 绝不擅自改写已有的流信息 ——
     流信息是媒体物理属性, 应由整理(organize)负责。probe=1 时额外一次机会: 现有 NFO
     压根没有 <fileinfo> 的存量条目, 现场探测一次补上(读不到照旧留空, 并带回原因)。
     返回写入结果 + 新的更新时间 + {probed, probe_error}。"""
@@ -497,15 +539,20 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
     # 闸门: NFO 文件**在**(列目录看到了)但内容**读不到** → 拒绝重建。
     # 否则 _fileinfo/_original_filename 会因为"读不到"返回 None, 把库里已有的
     # <fileinfo>/<original_filename>/<source> 一起抹成空标签(静默丢数据)。
-    # 读通道只有两条: 本地挂载(local_root) / WebDAV GET(需 account_root 覆盖该目录)。
+    # 读通道有两条: WebDAV GET(需 account_root 覆盖该目录) /
+    # CD2 下载链接(GetDownloadUrlPath, 只要 token) —— 全断才拒, 并把逐条原因带回去。
+    # (本地挂载 local_root 通道 2026-09-30 已全面下线)
     # 读一次现有 NFO 文本, 后面闸门 / ID 校验 / 本机状态保留都用它(避免列目录抖动时
     # 三次读取拿到三种结果)。
-    existing_text = _existing_nfo_text(cfg, folder_path, [nfo_name]) if existing else None
+    why = []
+    existing_text = _existing_nfo_text(cfg, folder_path, [nfo_name], why=why) if existing else None
     if existing and existing_text is None:
+        detail = "; ".join(f"{i + 1}) {r}" for i, r in enumerate(why)) or "没有读到任何通道的返回"
         raise HTTPException(
-            502, f"读不到现有 NFO 的内容({nfo_name}): 本地挂载与 WebDAV 都取不到 —— "
-                 "为避免抹掉 <fileinfo>/<original_filename>/<source>, 已拒绝覆盖。"
-                 "请把 webdav.account_root 改成 '/' 或给容器挂上媒体目录后重试")
+            502, f"读不到现有 NFO 的内容({nfo_name}): {detail} —— "
+                 "为避免抹掉 <fileinfo>/<original_filename>/<source> 与观看状态, 已拒绝覆盖。"
+                 "可选处理: 确认 CD2 的 Web 页面能打开(下载通道走同一地址);"
+                 "或把 webdav.account_root 改成 '/' 后重试")
 
     meta = _build_meta(cfg, kind, tmdb_id)
     if not meta:
@@ -543,7 +590,9 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
                                        playcount=state.get("playcount") or None,
                                        lastplayed=state.get("lastplayed") or None)
     else:
-        streamdetails = _fileinfo(cfg, folder_path, nfo_name, video)
+        # 已有 NFO 时直接复用闸门读到的那一份(同一文件不再重复走两条通道)
+        streamdetails = _fileinfo(cfg, folder_path, nfo_name, video,
+                                  text=existing_text if existing else _UNSET)
         if probe and not streamdetails:
             probe_attempted = True    # 真的跑了一次探测(probed=false 才是失败)
             streamdetails, probe_error = _probe_fileinfo(cfg, folder_path, video)
@@ -554,7 +603,8 @@ def _rebuild_nfo(cfg, kind, tmdb_id, folder_path, nfo_name, folder_name, probe=F
                 print(f"    ⚠ NFO 存量补探测失败: {probe_error}")
         # <original_filename> 沿用现有 NFO 里的(整理写的是改名前原始发布名),
         # 读不到才回退当前视频名(新建 NFO 场景)
-        orig = _original_filename(cfg, folder_path, nfo_name, video)
+        orig = _original_filename(cfg, folder_path, nfo_name, video,
+                                  text=existing_text if existing else _UNSET)
         if not orig:
             orig = video.get("name") if video else ""
         # 片源用【改名前】的原始发布名猜: 当前视频名已是 '标题 (年份) 2160p h265',

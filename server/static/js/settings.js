@@ -52,10 +52,10 @@ function switchManageSub(sub){
 }
 
 // ---- 分类规则: 分类键 → 目录名 映射(现管理页可视化) ----
-// 分类键由 lib/classify.py 级联引擎生成, 键不可增删, 只能改目录名 + 媒体库根。
-// 保存写回数据库 app_config(热加载, 无需重启, 下次整理立即生效)。
-// ⚠️ 改目录名【不迁移已有内容】: 新目录在下次整理时自动创建, 已归位内容需自行移动。
-let _catData = null;   // {cloud_root, existing_checkable, rows:[{key,label,group,desc,folder,exists}]}
+// 分类键两类: 特殊类型键(Dm/Jl/Xr/Sp/Mu)固定, 只能改目录名; 地区键 = <地区档>Movie/Show,
+// 随下面的「地区档」表增删改。保存写回数据库 app_config(热加载, 无需重启, 下次整理生效)。
+// ⚠️ 改目录名/改地区档【不迁移已有内容】: 新目录在下次整理时自动创建, 已归位内容需自行移动。
+let _catData = null;   // {cloud_root, existing_checkable, rows:[...], regions:{order,items}}
 let _catDirty = {};    // key -> 新目录名(未保存的 diff)
 async function loadCategoryRules(){
   const el = $('#manageBody');
@@ -63,6 +63,7 @@ async function loadCategoryRules(){
   try{
     _catData = await api('/api/organize/categories');
     _catDirty = {};
+    _rgInit();
     _catRender();
   }catch(e){
     _catData = null;
@@ -106,10 +107,17 @@ function _catInput(inp){
 }
 function _catUpdateBar(){
   const bar = $('#catBar'); if(!bar) return;
-  const n = Object.keys(_catDirty).length;
+  const nc = Object.keys(_catDirty).length;
+  const rg = _rgChanged();
+  const n = nc + (rg ? 1 : 0);
   bar.style.display = n ? 'flex' : 'none';
   const m = bar.querySelector('.cat-barmsg');
-  if(m) m.innerHTML = `${icon('alert')}${n} 处变更未保存 — 保存后对下次整理生效(无需重启)`;
+  if(m){
+    const parts = [];
+    if(nc) parts.push(`${nc} 个目录名`);
+    if(rg) parts.push('地区档');
+    m.innerHTML = `${icon('alert')}${parts.join(' + ')} 变更未保存 — 保存后对下次整理生效(无需重启)`;
+  }
 }
 function _catRender(){
   const el = $('#manageBody');
@@ -120,6 +128,7 @@ function _catRender(){
     <p class="cat-note">内容先按「类型优先」级联判定分类, 再归位到 <code>${esc(_catRoot())}</code> 下的对应目录。
       目录名可直接编辑(回车无效, 需点保存); <b>改名不迁移已有内容</b> —— 新目录在下次整理时自动创建, 已归位的媒体需自行移动。
       ${!_catData.existing_checkable?'<span class="badge warn">云盘不可达, 库内状态暂无法检测</span>':''}</p>`;
+  html += _rgRender();
   for(const [g, title] of groups){
     const rows = _catData.rows.filter(r=>r.group===g);
     html += `<table><tbody><tr class="cat-group"><td colspan="4" data-th="">${icon('folder')}${title} <small>(${rows.length})</small></td></tr>`
@@ -135,19 +144,203 @@ function _catRender(){
 }
 function catReset(){
   _catDirty = {};
+  _rgInit();
   if(_catData) _catRender();
 }
 async function catSave(){
   if(!_catData) return;
   const btn = $('#catSaveBtn'); if(btn) btn.disabled = true;
   try{
-    const r = await api('/api/organize/categories', {method:'PUT', body: JSON.stringify({categories: _catDirty})});
+    const body = {categories: _catDirty};
+    if(_rgChanged()){
+      body.regions = _rgWork;
+      // 地区档变了 → 分类键集合跟着变; 为将消失的键改的目录名没有意义, 一并丢掉
+      const valid = new Set(['DmMovie','DmShow','JlShow','XrShow','SpShow','MuShow'].concat(_rgKeys()));
+      const keep = {};
+      Object.entries(_catDirty).forEach(([k, v]) => { if(valid.has(k)) keep[k] = v; });
+      body.categories = keep;
+    }
+    const r = await api('/api/organize/categories', {method:'PUT', body: JSON.stringify(body)});
     toast(r.msg || '已保存');
     await loadCategoryRules();
   }catch(e){
     toast('保存失败: ' + e.message);
     if(btn) btn.disabled = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 地区档(上面那张表): 归属可改 + 可新增/删除档 —— 每档生成 <键>Movie / <键>Show 两个分类键
+// 判定顺序(后端 lib.classify._region): 关键词 → 优先国家 → 语言 → 国家 → 兜底 Ot
+// ---------------------------------------------------------------------------
+let _rgWork = null;      // {order:[...], items:{...}} 未保存的工作副本(服务端规范化过的)
+let _rgNew = new Set();  // 本次会话新增、还没保存的档(键可编辑; 保存后就变成普通档)
+const _RG_SPECIAL = ['Dm', 'Jl', 'Xr', 'Sp', 'Mu'];
+const _RG_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,14}$/;
+
+function _rgClone(o){ try { return JSON.parse(JSON.stringify(o)); } catch { return null; } }
+function _rgInit(){
+  _rgWork = (_catData && _catData.regions && _catData.regions.items)
+    ? _rgClone(_catData.regions) : null;
+  _rgNew = new Set();
+}
+function _rgChanged(){
+  if(!_rgWork) return false;
+  const base = (_catData && _catData.regions) || null;
+  return JSON.stringify(_rgWork) !== JSON.stringify(base);
+}
+function _rgKeys(){   // 当前工作副本会生成的分类键(地区部分)
+  const out = [];
+  if(_rgWork) for(const k of _rgWork.order) out.push(k + 'Movie', k + 'Show');
+  return out;
+}
+function _rgPrioText(prio){
+  return Object.entries(prio || {})
+    .map(([c, ls]) => (ls && ls.length ? c + '=' + ls.join('/') : c)).join(' ');
+}
+function _rgPrioParse(s){
+  // "HK TW=zh/cn/yue" → {HK:[], TW:['zh','cn','yue']}; 逗号/空白都当分隔
+  const out = {};
+  String(s || '').replace(/\s*=\s*/g, '=').split(/[\s,]+/).filter(Boolean).forEach(t => {
+    const i = t.indexOf('=');
+    const c = (i < 0 ? t : t.slice(0, i)).trim().toUpperCase();
+    if(!c) return;
+    out[c] = i < 0 ? [] : t.slice(i + 1).split(/[\/,]+/).filter(Boolean)
+      .map(x => x.toLowerCase());
+  });
+  return out;
+}
+function _rgSplitCodes(s){ return String(s || '').split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean); }
+function _rgSplitWords(s){ return String(s || '').split(',').map(x => x.trim()).filter(Boolean); }
+function _rgKeyErr(k){
+  if(!_RG_KEY_RE.test(k)) return '字母开头, 只能含字母/数字/下划线, ≤15 字符';
+  if(_RG_SPECIAL.includes(k)) return '与特殊类型(动画/纪录片/综艺/体育/音乐)撞车';
+  if(_rgWork && _rgWork.order.filter(x => x === k).length > 1) return '键重复';
+  return '';
+}
+function _rgRow(k, idx, n){
+  const it = (_rgWork && _rgWork.items[k]) || {};
+  const isNew = _rgNew.has(k);
+  const ot = k === 'Ot';
+  const cells = [
+    ['键', `<input class="cat-in rg-key${isNew && _rgKeyErr(k) ? ' rg-bad' : ''}" type="text" value="${esc(k)}"
+       ${isNew ? '' : "readonly title='档键保存后不可改(改键等于换一个分类目录)'"}
+       maxlength="15" autocomplete="off" data-k="${esc(k)}" data-f="_key" oninput="_rgInput(this)">
+       <small class="rg-keys">${esc(k)}Movie / ${esc(k)}Show</small>`],
+    ['档名', `<input class="cat-in" type="text" value="${esc(it.label || '')}" maxlength="30" autocomplete="off"
+       data-k="${esc(k)}" data-f="label" placeholder="如 港台" oninput="_rgInput(this)">`],
+    ['显示名', `<input class="cat-in" type="text" value="${esc(it.display || '')}" maxlength="30" autocomplete="off"
+       data-k="${esc(k)}" data-f="display" placeholder="详情页地区名, 空=用档名" oninput="_rgInput(this)">`],
+    ['语言', `<input class="cat-in" type="text" value="${esc((it.languages || []).join(' '))}" autocomplete="off"
+       data-k="${esc(k)}" data-f="languages" placeholder="zh cn yue" oninput="_rgInput(this)">`],
+    ['国家', `<input class="cat-in" type="text" value="${esc((it.countries || []).join(' '))}" autocomplete="off"
+       data-k="${esc(k)}" data-f="countries" placeholder="CN TW HK" oninput="_rgInput(this)">`],
+    ['关键词', `<input class="cat-in" type="text" value="${esc((it.keywords || []).join(', '))}" autocomplete="off"
+       data-k="${esc(k)}" data-f="keywords" placeholder="港片, 香港电影" oninput="_rgInput(this)">`],
+    ['优先', `<input class="cat-in" type="text" value="${esc(_rgPrioText(it.prio))}" autocomplete="off"
+       data-k="${esc(k)}" data-f="prio" placeholder="HK TW=zh/cn/yue" oninput="_rgInput(this)">
+       <small class="rg-keys">先于语言判; = 后是允许的语言</small>`],
+  ];
+  const ops = `<td data-th="操作" class="rg-ops">
+      <button class="ghost sm" onclick="_rgMove('${esc(k)}',-1)" ${idx === 0 ? 'disabled' : ''}>上</button>
+      <button class="ghost sm" onclick="_rgMove('${esc(k)}',1)" ${idx === n - 1 ? 'disabled' : ''}>下</button>
+      <button class="ghost sm" onclick="_rgDel('${esc(k)}')" ${ot ? 'disabled' : ''}>${ot ? '兜底' : icon('trash') + '删'}</button>
+    </td>`;
+  return `<tr class="${isNew ? 'cat-dirty' : ''}" data-k="${esc(k)}">`
+    + cells.map(([th, c]) => `<td data-th="${th}">${c}</td>`).join('') + ops + '</tr>';
+}
+function _rgRender(){
+  if(!_rgWork) return '';
+  const order = _rgWork.order || [];
+  const heads = ['键', '档名', '显示名', '语言', '国家', '关键词', '优先'];
+  return `
+    <h3 class="set-h">地区档 <small class="rg-sub">(${order.length} 档 → ${order.length * 2} 个地区分类键)</small></h3>
+    <p class="cat-note">地区档决定「按国家/地区」那组分类键: 每档生成 <code>键Movie</code> / <code>键Show</code>。
+      判定顺序:<b>关键词</b> → <b>优先国家</b>(= 后写允许的语言, 空=不限) → <b>语言</b> → <b>国家</b> → 兜底 <code>Ot</code>。
+      语言/国家空格分隔, 关键词用逗号分隔。同一个国家或语言<b>只能属于一个档</b> ——
+      把台湾单拆一档时, 先把 TW 从港台档的「国家」和「优先」里删掉, 再填到新档。
+      改归属或删档<b>不迁移已归位内容</b>, 旧目录留原地由你决定怎么并。</p>
+    <table class="rg-table">
+      <thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}<th>操作</th></tr></thead>
+      <tbody>${order.map((k, i) => _rgRow(k, i, order.length)).join('')}</tbody>
+    </table>
+    <div class="rg-add"><button class="ghost sm" onclick="_rgAdd()">+ 新增地区档</button>
+      <span class="rg-hint">新增后保存, 才会在下面的目录映射里出现对应行</span></div>`;
+}
+function _rgInput(inp){
+  if(!_rgWork) return;
+  const k = inp.dataset.k, f = inp.dataset.f;
+  const it = _rgWork.items[k];
+  if(f === '_key'){
+    const v = inp.value.trim();
+    inp.classList.toggle('rg-bad', !!v && !!_rgKeyErr(v) && v !== k);
+    if(!v || v === k || !it || _rgKeyErr(v)) return;
+    // 只有本次新增的档能改键(改了立刻换掉模型里的键)
+    if(!_rgNew.has(k)) return;
+    delete _rgWork.items[k];
+    _rgWork.items[v] = it;
+    _rgWork.order = _rgWork.order.map(x => (x === k ? v : x));
+    _rgNew.delete(k); _rgNew.add(v);
+    const tr = inp.closest('tr');
+    if(tr){
+      tr.dataset.k = v;
+      inp.dataset.k = v;
+      tr.querySelectorAll('[data-k]').forEach(el => { el.dataset.k = v; });
+      const kd = tr.querySelector('.rg-keys');
+      if(kd) kd.textContent = `${v}Movie / ${v}Show`;
+      tr.querySelectorAll('.rg-ops button').forEach(b => {
+        b.setAttribute('onclick', b.getAttribute('onclick').replace(`('${k}'`, `('${v}'`));
+      });
+    }
+    _catUpdateBar();
+    return;
+  }
+  if(!it) return;
+  if(f === 'prio') it.prio = _rgPrioParse(inp.value);
+  else if(f === 'languages' || f === 'countries') it[f] = _rgSplitCodes(inp.value);
+  else if(f === 'keywords') it[f] = _rgSplitWords(inp.value);
+  else it[f] = String(inp.value).trim();
+  _catUpdateBar();
+}
+function _rgMove(k, dir){
+  if(!_rgWork) return;
+  const o = _rgWork.order, i = o.indexOf(k), j = i + dir;
+  if(i < 0 || j < 0 || j >= o.length) return;
+  [o[i], o[j]] = [o[j], o[i]];
+  _catRender();
+}
+function _rgDel(k){
+  if(!_rgWork || k === 'Ot') return;
+  const i = _rgWork.order.indexOf(k);
+  if(i < 0) return;
+  const folderKeys = [k + 'Movie', k + 'Show'].filter(x => _catDirty[x]);
+  const tip = folderKeys.length
+    ? `删除地区档 ${k}? 本页里为它改过的目录名(${folderKeys.join(' / ')})会一并放弃。`
+    : `删除地区档 ${k}? 生成的 ${k}Movie / ${k}Show 分类键会消失, 已归位到这些目录的内容不会被移动。`;
+  if(!window.confirm(tip)) return;
+  _rgWork.order.splice(i, 1);
+  delete _rgWork.items[k];
+  _rgNew.delete(k);
+  folderKeys.forEach(x => delete _catDirty[x]);
+  _catRender();
+}
+function _rgAdd(){
+  if(!_rgWork) return;
+  let n = 1, k = 'R1';
+  while(_rgWork.order.includes(k) || _RG_SPECIAL.includes(k) || !_RG_KEY_RE.test(k)){
+    n++; k = 'R' + n;
+    if(n > 99) return;
+  }
+  let label = '新地区', i = 2;
+  while(Object.values(_rgWork.items).some(x => (x.label || '') === label)){
+    label = '新地区' + i; i++;
+  }
+  _rgWork.order.push(k);
+  _rgWork.items[k] = {label, display: '', languages: [], countries: [], keywords: [], prio: {}};
+  _rgNew.add(k);
+  _catRender();
+  const tr = document.querySelector(`.rg-table tr[data-k="${k}"]`);
+  if(tr) tr.querySelector('.rg-key, input').focus();
 }
 
 // ---- 通用: 全局开关 + config 全量编辑 ----
@@ -211,9 +404,8 @@ const CFG_GROUPS = [
     {p: 'clouddrive2.insecure', label: '自签证书 insecure', type: 'checkbox'},
     {p: 'clouddrive2.timeout', label: '超时(秒)', type: 'number'},
     {p: 'clouddrive2.no_delete_paths', label: '禁止删除的路径', type: 'list', desc: '每行一个; 只允许往里移动'},
-    {p: 'clouddrive2.local_root', label: '本地挂载点', type: 'list', desc: '每行一个; 仅用于 MediaInfo 探测写 NFO'},
   ]},
-  {title: 'WebDAV', desc: 'CD2 自带 WebDAV, 无本地挂载时用它读文件探测媒体信息。',
+  {title: 'WebDAV', desc: 'CD2 自带 WebDAV: 读文件 / 探测媒体信息写 <fileinfo> 的主通道。',
    fields: [
     {p: 'webdav.enabled', label: '启用', type: 'checkbox'},
     {p: 'webdav.base', label: '地址'},

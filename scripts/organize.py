@@ -237,12 +237,6 @@ def tv_file_template(config):
     return org_cfg(config).get("tv_file_template") or naming.TV_FILE_TEMPLATE
 
 
-def local_root(config):
-    """CD2 根 "/" 对应的本地挂载点(探测媒体信息用)。"""
-    return (org_cfg(config).get("local_root")
-            or config.get("clouddrive2", {}).get("local_root"))
-
-
 # ---------------------------------------------------------------------------
 # 扫描
 # ---------------------------------------------------------------------------
@@ -996,7 +990,7 @@ def _probe_source_media(config, plan, base_dir=None, log=None):
     """探测条目里最大的视频文件 —— **用它在离线目录里的原始路径**。
 
     为什么必须移动前探测: WebDAV 账号只开到 `/Temp`,文件一旦搬到 `/Cloud` 就够不到了
-    (本地挂载不存在时尤其致命),于是 `<fileinfo>` 会整个丢失。
+    (本地挂载通道 2026-09-30 已下线, 下载链接通道可作兜底), 于是 `<fileinfo>` 会整个丢失。
     所以先探、把结果缓存进 plan,归位后直接复用。
     """
     media = plan.get("media") or []
@@ -1685,16 +1679,17 @@ def finalize_entry(config, plan, final_dir, meta, base_dir=None, log=print,
                     or (plan.get("media") or [{}])[0].get("name") or "")
                 log(f"    ⚠ 探测成功但算不出质量标记 → 退回文件名推断: {quality or '(无)'}")
             v = info.get("video") or {}
-            ch = {"local": "本地挂载", "webdav": "WebDAV"}.get(info.get("source") or "", info.get("source") or "")
+            ch = {"webdav": "WebDAV", "download": "CD2 下载"}.get(
+                info.get("source") or "", info.get("source") or "")
             log(f"    🔎 探测[{ch}]: {quality}  ({v.get('resolution_label')} {v.get('codec_label')}"
                 f" {int(info.get('duration') or 0) // 60} 分钟)")
         else:
-            # 本地挂载与 WebDAV 都不可用 → 退回从文件名推质量标记(结果通常一致),
+            # WebDAV 与 CD2 下载链接都不可用 → 退回从文件名推质量标记(结果通常一致),
             # 只是 NFO 里没有 <fileinfo> 段
             quality = mediainfo.quality_from_name(
                 plan.get("origin_filename")
                 or (plan.get("media") or [{}])[0].get("name") or "")
-            log(f"    ⚠ 未探测到媒体信息(本地挂载与 WebDAV 都不可用) —— 质量标记改用文件名推断: "
+            log(f"    ⚠ 未探测到媒体信息(WebDAV 与 CD2 下载通道都不可用) —— 质量标记改用文件名推断: "
                 f"{quality or '(无)'}; NFO 不含 <fileinfo>")
     else:
         quality = mediainfo.quality_from_name(plan.get("origin_filename") or "")
@@ -2046,7 +2041,7 @@ def apply_plan(config, plan, base_dir=None, log=print):
         plan["origin_filename"] = biggest.get("name") or ""
 
     # 0-pre) 媒体探测 —— **必须在搬运之前**。WebDAV 账号只开到 /Temp,
-    #   搬到 /Cloud 后文件就探测不到了(没有本地挂载时 <fileinfo> 会丢失)。
+    #   搬到 /Cloud 后账号就读不到该文件(本地挂载通道已下线, 全靠下载链接兜底)。
     #   只探 status=ok 的计划: unresolved/duplicate/无媒体这些到 2038 行就早退,
     #   探了也是白等 5~10 秒; merge 由 _merge_seasons_impl 自己探(也在搬之前)。
     if (org_cfg(config).get("probe_media", True) and not plan.get("_probe_info")

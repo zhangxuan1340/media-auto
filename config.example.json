@@ -55,12 +55,10 @@
     "cloud_account_id": "",
     "timeout": 30,
     "offline_by_path_timeout": 180,
-    "offline_max_pages": 5,
-    "_local_comment": "可选: CD2 根 \"/\" 对应的本地路径(本地盘/已挂载的 SMB 等),仅用于 mediainfo 探测媒体信息以写 NFO 的 <fileinfo>。支持数组(按顺序取第一个存在的)。程序【不会】自动挂载;都不存在时退回用文件名推断质量标记,NFO 不含 <fileinfo>。",
-    "local_root": []
+    "offline_max_pages": 5
   },
   "webdav": {
-    "_comment": "CD2 自带 WebDAV(默认入口 /dav),在没有本地挂载时用来读文件探测媒体信息(<fileinfo>)。用 ffprobe 走 HTTP + Range,只取需要的片段,不会整文件下载。",
+    "_comment": "CD2 自带 WebDAV(默认入口 /dav): 读文件 / 探测媒体信息写 <fileinfo> 的主通道。用 ffprobe 走 HTTP + Range,只取需要的片段,不会整文件下载; ffprobe 缺失时 mediainfo CLI 兜底。库内 /Cloud 文件若不在账号根路径下, 探测会自动改走 CD2 下载链接通道。",
     "enabled": true,
     "base": "https://your-cd2-host:5002/dav",
     "_account_root": "该 WebDAV 账号的根对应 CD2 上的哪个路径。例如账号开给 Temp,就填 /Temp;填 \"/\" 表示整个根。只有落在这个前缀下的 CD2 路径才会尝试用它。",
@@ -99,7 +97,7 @@
     "write_nfo": true,
     "_rename_media_file": "电影视频文件是否改名(仅单个视频文件时生效,多个不动,避免误伤)。",
     "rename_media_file": true,
-    "_probe_media": "用 MediaInfo 探测编码/分辨率/音轨,写进 NFO 的 <fileinfo> 并生成质量标记。需要 clouddrive2.local_root 指向一个已存在的本地路径(程序不会自动挂载)。",
+    "_probe_media": "探测编码/分辨率/音轨,写进 NFO 的 <fileinfo> 并生成质量标记。先走 WebDAV, 账号覆盖不到时改走 CD2 下载链接(都不通则退回用文件名推断, NFO 不含 <fileinfo>)。",
     "probe_media": true,
     "_wikidata": "按 IMDb id 反查 wikidata Q-id 写进 uniqueid(走 Wikidata SPARQL, 失败自动跳过)。",
     "wikidata": true,
