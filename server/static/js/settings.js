@@ -381,6 +381,11 @@ function _cfgTouch(){
     bar.style.display = 'flex';
     const m = bar.querySelector('.cat-barmsg');
     if(m) m.innerHTML = `${icon('alert')}有未保存的配置变更 — 保存后立即热加载生效(无需重启)`;
+    // 保存按钮在 cfgSave() 里会被置灰到"保存成功/失败"为止; 失败路径会复位, 但成功路径
+    // 走的是 _cfgLoad() 重绘表单, 按钮本身不重绘 → 一直灰着。这里"只要又有编辑就放行",
+    // 保证上一次保存之后还能再存第二次(2026-09-29 修: 加了组点不了保存配置)。
+    const b = bar.querySelector('#cfgSaveBtn');
+    if(b) b.disabled = false;
   }
 }
 // 把表单里的值写进 data(点路径 → 值, 类型按字段声明转换)
@@ -418,6 +423,9 @@ async function cfgSave(){
     const r = await api('/api/config', {method: 'PUT', body: JSON.stringify({config: data})});
     toast(r.msg || '已保存');
     await _cfgLoad();
+    // 成功也要放回可点状态: cfgBar 是静态 HTML(不会被 _cfgLoad 重绘), 置灰后留着会
+    // 让"下次编辑"出现一个点不动的保存按钮(2026-09-29 修)。
+    if(btn) btn.disabled = false;
   }catch(e){
     toast('保存失败: ' + e.message);
     if(btn) btn.disabled = false;
