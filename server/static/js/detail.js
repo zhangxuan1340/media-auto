@@ -635,9 +635,9 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
       <div class="res"><div class="info">
         <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
-        ${_qualityTags(r.name)}
+        ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
-        <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 2160p/HDR/H.265/字幕/国语 加分, 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
+        <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(i, `pushMagnet(${i}, this)`, `pushQbit(${i}, this)`, r)}</div></div>`).join('')
       + (pages.some(p=>p.hasMore) ? `<div style="text-align:center;margin-top:10px"><button class="ghost" id="magMore" onclick="loadMoreMagnets(this)">加载更多…</button></div>` : '');
     // 记住查询组、排序与各查询的下一页号/是否还有, 供「加载更多」按后端 nextPage 续翻后合并去重。
@@ -728,7 +728,7 @@ async function loadMoreMagnets(btn){
     const html = res.map((r,i)=>`
       <div class="res"><div class="info">
         <div class="n">${_grpBadge(r)}${esc(r.name||'')}</div>
-        ${_qualityTags(r.name)}
+        ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
         <div class="s"><span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(base+i, `pushMagnet(${base+i}, this)`, `pushQbit(${base+i}, this)`, r)}</div></div>`).join('');
@@ -811,14 +811,19 @@ async function pushSeasonQbit(tmdbId, btn, i, season){
 function fmt(b){ if(b==null) return '—'; b=+b; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(1)+' '+u[i]; }
 // 从磁力/资源名提取质量徽章(分辨率/编码/HDR/发布组), 让种子列表一眼分优劣。
 // 返回徽章 HTML 串(无特征时返回空)。
-function _qualityTags(name){
+function _qualityTags(name, r){
   const n = (name||''); const up = n.toUpperCase();
   const tags = [];
-  // 分辨率(优先级 2160 > 1080 > 720 > 480)
-  if(/2160P|UHD|4K|2160/.test(up)) tags.push(['2160p','q-uhd']);
-  else if(/1080P|1080I|FHD|1080/.test(up)) tags.push(['1080p','q-fhd']);
-  else if(/720P|720I|720/.test(up)) tags.push(['720p','q-hd']);
-  else if(/480P|480/.test(up)) tags.push(['480p','q-sd']);
+  // 分辨率 — 与后端 search.py::resolution 同规则: 出现 2160 才算 4K;
+  // 只写 4K/UHD 却同时写了 1080(如《...【4K.SDR1080p】》)按 1080p 算,
+  // 否则标签骗人(显示 2160p)、分数也骗人(拿满 48 分压过真 1080p)。
+  const has2160 = /2160[PU]?|3840X?2160/.test(up);
+  const has4k = /4K|UHD/.test(up);
+  const has1080 = /1080[PI]|FHD|1080/.test(up);
+  if(has2160 || (has4k && !has1080)) tags.push(['2160p','q-uhd']);
+  else if(has1080) tags.push(['1080p','q-fhd']);
+  else if(/720[PI]?|720/.test(up)) tags.push(['720p','q-hd']);
+  else if(/480[PU]?|480|\bSD\b/.test(up)) tags.push(['480p','q-sd']);
   // 编码
   if(/AVC|H264|H\.?264|x264/.test(up)) tags.push(['H.264','q-codec']);
   else if(/AV1|AV1/.test(up)) tags.push(['AV1','q-codec']);
@@ -832,8 +837,10 @@ function _qualityTags(name){
   // 发布组(末尾括号/点号分隔的最后一段, 2~3 个单词)
   const m = n.match(/(?:\.|\b)([A-Z][A-Z0-9]{1,20}(?:\s?[A-Z][A-Z0-9]{1,20}){0,2})$/);
   if(m && !/^(WEB|HDTV|BluRay|BRRip|DVDRip|HDR|HDR10|H265|H264|HEVC|AVC|x265|x264)$/.test(m[1].trim())) tags.push([m[1].trim(),'q-group']);
+  // 体积可疑(与后端 search.py::_size_adjust 同口径): 名字吹 4K 却只有几十 MB
+  if(r && r.sizeSuspect) tags.push(['体积可疑','q-bad','体积与名字标称的分辨率对不上(如 4K 只有几十 MB), 质量分已扣分']);
   if(!tags.length) return '';
-  return `<div class="qtags">${tags.map(([t,c])=>`<span class="qtag ${c}">${t}</span>`).join('')}</div>`;
+  return `<div class="qtags">${tags.map(([t,c,ti])=>`<span class="qtag ${c}"${ti?` title="${ti}"`:''}>${t}</span>`).join('')}</div>`;
 }
 // 种子/下载数徽章(图标化, 数字直观)
 function _seedTags(r){
@@ -937,7 +944,7 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
       box.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${src} · ${res.length} 条${qTag} · 词: ${esc(qShow)}</div>` + res.map((r,i)=>`
         <div class="res res-compact"><div class="info">
           <div class="n">${esc(r.name||'')}</div>
-          ${_qualityTags(r.name)}
+          ${_qualityTags(r.name, r)}
           ${_pushBadge(r)}
           <div class="s"><span class="sz">${fmt(r.size)}</span>${_seedTags(r)}</div></div>
           <div class="res-btns">${_pushButtons(i, `pushSeasonMagnet(${tmdbId},this,${i},'${season}')`, `pushSeasonQbit(${tmdbId},this,${i},'${season}')`, r)}</div></div>`).join('');

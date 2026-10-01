@@ -216,7 +216,7 @@ def main():
             for x in base:
                 y = dict(x)
                 y["groupRank"] = s.group_rank(x["name"], cfg)
-                y["qualityScore"] = s.quality_score(x["name"], cfg)
+                y["qualityScore"] = s.quality_score(x["name"], cfg, x.get("size"))
                 out.append(y)
             return out
 

@@ -484,6 +484,8 @@
   .overview-more .icn{width:13px;height:13px}
   /* 磁力质量徽章(分辨率/编码/HDR/音频/发布组) */
   .qtags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+  .qtag.q-bad{background:linear-gradient(135deg,rgba(255,55,95,.18),rgba(255,159,10,.14));color:var(--err);
+    border:1px solid rgba(255,55,95,.35)}
   .qtag{display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;letter-spacing:.2px;line-height:1.5}
   /* 推送标记徽章: 已推 CD2(绿)/ 已推 Qbit(蓝), 与下方禁用按钮呼应 */
   .ptags{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}

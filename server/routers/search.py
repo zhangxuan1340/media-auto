@@ -53,9 +53,9 @@ _GUOYU = re.compile(r"国语|国配")
 # 质量评分: 用户要求"2160p 往前排、H.265/x265 往前排、HDR 往前排、有字幕往前排、有国语往前排"。
 # 每项独立加分(可叠加), 总分降序 = 质量优先。权重按"稀缺度"排:
 # 分辨率 > HDR > 编码 > 音频 > 字幕 > 音轨语言。发布组原盘(BluRay)略优于 WEB(同源画质更稳)。
+# 分辨率与体积另算(见 resolution()/_size_adjust()): 分辨率要"名副其实", 体积要"撑得住"。
 _QUALITY_RULES = [
-    # (正则, 加分) — 全部在 name 大写后匹配
-    (re.compile(r"2160P|UHD|4K|2160"), 48),        # 4K 分辨率
+    # (正则, 加分) — 全部在 name 大写后匹配(分辨率不在这里, 单独判定)
     (re.compile(r"HDR10\+|HDR10P"), 12),           # HDR10+
     (re.compile(r"HDR10|HDR"), 10),                # HDR
     (re.compile(r"AV1"), 12),                      # AV1(高效, 4K 主流)
@@ -64,18 +64,80 @@ _QUALITY_RULES = [
     (re.compile(r"ATMOS"), 6),                     # 杜比全景声
     (re.compile(r"DTS-?HD|TRUEHD|TRUE.?HD"), 5),   # 高解析音频
     (re.compile(r"DTS"), 3),
-    (re.compile(r"1080P|1080I|FHD|1080"), 9),      # 1080p
-    (re.compile(r"720P|720"), 3),                  # 720p
-    (re.compile(r"1080I"), 0),
     (_ZH_SUB, 6),                                  # 中文字幕
     (re.compile(r"ENG|EN\b|英文"), 3),             # 英文字幕
     (_GUOYU, 6),                                   # 国语音轨
     (re.compile(r"原声"), 1),
     (re.compile(r"DVDRip|WEB-?DL|WEBRip|WEB"), 0), # 不加分(基准)
-    (re.compile(r"480P|480|SD\b"), -8),            # 标清罚分
     (re.compile(r"SAMP|样本"), -20),               # 样片罚分
     (re.compile(r"10bit|10-BIT"), 2),
 ]
+
+# ---------------------------------------------------------------------------
+# 分辨率判定: 2026-09-30 报障「明明很多低质量的变成了高质量」——
+#   老实现按 `2160P|UHD|4K|2160` 一律 +48, 像《痴迷(2026)【4K.SDR1080p】》这种
+#   "4K 压制的 1080p" 也拿满 48 分, 把真 1080p 蓝光压在下面。
+#   现在: 出现 2160P/3840x2160 → uhd; 只出现 4K/UHD 但同时写了 1080 → 按 1080 算。
+# ---------------------------------------------------------------------------
+_RES_UHD = re.compile(r"2160[PU]?|3840X?2160")
+_RES_4K = re.compile(r"4K|UHD")
+_RES_1080 = re.compile(r"1080[PI]|FHD|1080")
+_RES_720 = re.compile(r"720[PI]?|720")
+_RES_SD = re.compile(r"480[PU]?|480|SD\b")
+_RES_W = {"uhd": 48, "fhd": 9, "hd": 3, "sd": -8}   # 与老 _QUALITY_RULES 里的分辨率权重一致
+
+
+def resolution(name):
+    """分辨率档: 'uhd'(2160p/4K)/'fhd'(1080p)/'hd'(720p)/'sd'(480p)/None(名字没写)。"""
+    n = (name or "").upper()
+    if not n:
+        return None
+    if _RES_UHD.search(n) or (_RES_4K.search(n) and not _RES_1080.search(n)):
+        return "uhd"
+    if _RES_1080.search(n):
+        return "fhd"
+    if _RES_720.search(n):
+        return "hd"
+    if _RES_SD.search(n):
+        return "sd"
+    return None
+
+
+def _size_adjust(res, size):
+    """体积合理性(缺 size 不生效)。
+
+    同分辨率按"一部两小时片该有多大"给分:真原盘/REMUX 再加, 名为 4K 却只有几十 MB
+    的(实测《痴迷(2026)》一批 54~70MB 的 "4K/REMUX")基本是短片、拼接或诱饵,
+    与真 4K 同分排前面就是"低质量被当成高质量"。
+    """
+    if not res or not size or size <= 0:
+        return 0
+    mb = size / 1048576
+    if mb < 1:
+        # <1MiB: 站点的占位/未知值(实测有的条目只回 ~100KB), 当体积样本没意义,
+        # 一律按"体积未知"处理 —— 免得把真种子误判成"名不副实"。
+        return 0
+    if res == "uhd":
+        if mb >= 30_000: return 10   # ≥30G 真原盘/REMUX
+        if mb >= 10_000: return 6    # ≥10G 正常 4K 压制/WEB
+        if mb >= 4_000: return 0
+        if mb >= 1_000: return -45   # 1~4G: 两小时 4K 撑不到这个码率(多为升频/拼接)
+        if mb >= 100: return -60     # 100M~1G: 必是短片/样本/诱饵
+        return -75                   # <100M
+    if res == "fhd":
+        if mb >= 6_000: return 6
+        if mb >= 1_500: return 0
+        if mb >= 400: return -15
+        return -35
+    if res == "hd":
+        if mb >= 600: return 3
+        if mb >= 150: return 0
+        return -20
+    return 0
+
+
+# 扣到这个量级就算"名不副实", 前端打「体积可疑」标签(与 _size_adjust 同口径)
+_SIZE_SUSPECT_AT = -35
 
 
 def golden_by(name, cfg):
@@ -94,13 +156,18 @@ def golden_by(name, cfg):
     return None
 
 
-def quality_score(name, cfg=None):
-    """种子名质量分(越高越好)。2160p/HDR/H.265/字幕/国语 都有加分, 4K HDR H.265 国语种子会排最前。"""
+def quality_score(name, cfg=None, size=None):
+    """种子名质量分(越高越好)。2160p/HDR/H.265/字幕/国语 都有加分, 4K HDR H.265 国语种子会排最前。
+
+    size 给了就叠加体积合理性(_size_adjust): 名不副实的"4K"(几十 MB)会掉到 1080p 之下。
+    """
     n = (name or "").upper()
-    s = 0
+    res = resolution(n)
+    s = _RES_W.get(res, 0)
     for pat, w in _QUALITY_RULES:
         if pat.search(n):
             s += w
+    s += _size_adjust(res, size)
     # 金标 → 额外 +20(用户 2026-09-19 要求"包含中文和国语的加金标、排序优先级更高")。
     # +20 的量级: 同档分辨率下金标稳定压过无字幕种子(战狼2 ★95→107 稳居第 1, 长津湖 ★90→110 第 1);
     # 4K 金标(≈107) > 4K 无字幕(≈79) > 1080p 金标(≈60), "下载即可看"在同画质下优先
@@ -240,7 +307,7 @@ def _apply_sort(items, sort, cfg=None):
         # → 再同分按 seeders(Next-Web 源无 seeders → 缺失排末尾, 同值保持原序)
         items.sort(key=lambda r: (
             _group_rank_key(r.get("name"), cfg),
-            quality_score(r.get("name"), cfg),
+            quality_score(r.get("name"), cfg, r.get("size")),
             r.get("size") or 0,
             r.get("seeders") is not None, r.get("seeders") or 0,
         ), reverse=True)
@@ -277,7 +344,7 @@ def _annotate_group(items, cfg):
 def _annotate_quality(items, cfg):
     """就地回传质量分/金标/前排组: 双查询合并后前端按同规则重排, 徽章渲染。"""
     for it in items:
-        it["qualityScore"] = quality_score(it.get("name"), cfg)
+        it["qualityScore"] = quality_score(it.get("name"), cfg, it.get("size"))
         it["golden"] = is_golden(it.get("name"), cfg)
         it["goldenBy"] = golden_by(it.get("name"), cfg)  # 命中自压组名 → 前端标注"自压"
     return _annotate_group(items, cfg)
@@ -286,6 +353,17 @@ def _annotate_quality(items, cfg):
 # ---------------------------------------------------------------------------
 # 推送标记: 给每个磁力附上"是否已推 CD2 / Qbit"(前端据此禁用按钮 + 显示徽章)
 # ---------------------------------------------------------------------------
+def _annotate_suspect(items):
+    """就地标记 sizeSuspect: 名不副实的体积(如 4K 只有几十 MB)。
+
+    与质量分里的 _size_adjust 同口径(扣到 _SIZE_SUSPECT_AT 即视为可疑), 前端据此给「体积可疑」标签,
+    让"名字吹 4K、体积几十 MB"的种子一眼看出来, 而不是被质量分抬到前面。
+    """
+    for it in items:
+        it["sizeSuspect"] = _size_adjust(resolution(it.get("name")), it.get("size")) <= _SIZE_SUSPECT_AT
+    return items
+
+
 def _annotate_pushed(items):
     """就地给 items 追加 pushed:{cd2,qbit}。无 hash / 查库失败则默认全 False。"""
     hashes = [(r.get("infoHash") or "").lower() for r in items if r.get("infoHash")]
@@ -490,6 +568,7 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
             _annotate_quality(page_items, cfg)
         else:
             _annotate_group(page_items, cfg)
+        _annotate_suspect(page_items)
         _annotate_pushed(page_items)
         return {
             "source": source, "items": page_items, "hasMore": has_more,
@@ -508,5 +587,6 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         raise HTTPException(status_code=502, detail=f"{label} 请求失败: {e}")
 
     _annotate_group(items, cfg)   # 前排徽章在相关性排序下也照常显示
+    _annotate_suspect(items)
     _annotate_pushed(items)
     return {"source": source, "items": items, "hasMore": has_more, "nextPage": next_page, "sort": sort}

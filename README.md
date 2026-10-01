@@ -188,6 +188,12 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
   大小写不敏感;命中要求组名与标题其余部分分开(`-Beitai`、`[FRDS]`、` HHD` 算,`CHDRip` 不算 `CHD`)。
   详情页「质量优先」搜索与追踪自动推送都按这个顺序整批排最前;留空 = 关闭前排。
   同处的**金标自压组**(`search.golden_groups`)给命中的种子默认金标,质量分 +20。
+- **质量分的两条硬约束**(2026-09-30「明明很多低质量的变成了高质量」报障后加,同处 `search.py`):
+  1. **分辨率写实**:名字出现 `2160P`/`3840x2160` 才算 4K;只写 `4K`/`UHD` 但同时写了 `1080`
+     (如《…【4K.SDR1080p】》)按 1080p 算——否则拿满 48 分,把真 1080p 蓝光压在下面,界面标签也照样显示 2160p。
+  2. **体积合理性**:按分辨率要求"该有的体积",名不副实扣分(4K:1~4G −45、100M~1G −60、<100M −75;
+     ≥10G +6、≥30G +10;1080p <400M −35)。扣到 −35 就回传 `sizeSuspect`,界面出**「体积可疑」**标签。
+     体积 <1MiB 视为站点占位/未知,不奖不罚。
 
 ## 整理离线目录
 
@@ -349,7 +355,8 @@ venv/bin/python scripts/verify_classify_regions.py  # 地区档 74 用例(默认
 venv/bin/python scripts/verify_region_rules_ui.py   # 分类规则页地区档 UI 30 用例(起临时服务 + 系统 Chrome)
 venv/bin/python scripts/verify_nfo_read.py          # 现有 NFO 两条读取通道 + 502 文案 16 用例(连真实 CD2)
 venv/bin/python scripts/verify_probe_channels.py   # <fileinfo> 探测两条通道(WebDAV/下载链接)7 用例(连真实 CD2)
-venv/bin/python scripts/verify_search_pages.py     # 磁力翻页: 并行抓取/分段窗口/加载更多 37 用例(打桩站点)
+venv/bin/python scripts/verify_search_pages.py     # 磁力翻页: 并行抓取/分段窗口/加载更多 31 用例(打桩站点)
+venv/bin/python scripts/verify_quality_score.py    # 质量分: 分辨率写实 + 体积合理性 49 用例(打桩, 不连网)
 venv/bin/python scripts/audit_jellyfin_sync.py      # 同步审计 8 项(要连 Jellyfin, 约 3min)
 node --check server/static/js/*.js                  # 前端语法
 ```
