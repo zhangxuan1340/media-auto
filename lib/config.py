@@ -24,8 +24,9 @@ _CONFIG_KEY = "config"
 _SETUP_KEY = "setup_done"
 # 已随功能退役的配置段: 保存/导入时自动剥离, 存量库里的残留也一并清掉
 _DEAD_KEYS = ("tinymediamanager", "db")
-# 退役的组内字段: (父段, 字段) —— tinyMediaManager 停用后 <tmm_locked/> 标签一并停写
-_DEAD_FIELDS = (("organize", "tmm_locked"),)
+# 退役的组内字段: (父段, 字段) —— tinyMediaManager 停用后 <tmm_locked/> 标签一并停写;
+# search.primary 在「多源合并」改造后作废(每源各自 enabled, 不再二选一)
+_DEAD_FIELDS = (("organize", "tmm_locked"), ("search", "primary"))
 
 
 def project_root():

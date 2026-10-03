@@ -24,8 +24,9 @@ media-auto / track_check —— 追踪检查引擎(演员新作 / 剧集新季 �
     (不猜, 宁可让用户手动判断, 也不推一个可能不对的链接)。
     推不动(无命中)就只记录、不推。
 
-磁力搜索复用 server/routers/search.py 的 _pick_source / _fetch_all(双源:
-原生 Bitmagnet GraphQL / Bitmagnet-Next-Web REST), 不另写一份(去重)。
+磁力搜索复用 server/routers/search.py 的 _enabled_sources / _fetch_all
+(多源: 原生 Bitmagnet GraphQL / Bitmagnet-Next-Web REST / Jackett Torznab),
+查所有启用的源并合并, 不另写一份(去重)。
 
 入口:
   - 路由(异步上下文):  await check_async(cfg, log=...)
@@ -271,25 +272,28 @@ def _pick_best(items, cfg=None):
 # 磁力搜索(复用 router/search 的双源实现)
 # ---------------------------------------------------------------------------
 async def _search_magnets(cfg, title_en, title_cn, cap=_SEARCH_CAP):
-    """按标题搜磁力(英文优先, 中文兜底, 按 infoHash 去重合并)。"""
+    """按标题搜磁力(英文优先, 中文兜底, 按 infoHash 去重合并)。
+
+    多源: 查所有启用的源并逐源容错合并(单源与旧实现等价, 某源失败不影响其它)。"""
     from server.routers import search as srouter
-    source = srouter._pick_source(cfg)
-    if source is None:
+    sources = srouter._enabled_sources(cfg)
+    if not sources:
         return []
     seen, out = set(), []
     for kw in (title_en, title_cn):
         if not kw or not kw.strip():
             continue
-        try:
-            got = await srouter._fetch_all(source, cfg, kw.strip(), cap)
-        except Exception:  # noqa: BLE001  单源失败不致命
-            continue
-        for it in got:
-            h = it.get("infoHash")
-            if not h or h in seen:
+        for source in sources:
+            try:
+                got = await srouter._fetch_all(source, cfg, kw.strip(), cap)
+            except Exception:  # noqa: BLE001  单源失败不致命
                 continue
-            seen.add(h)
-            out.append(it)
+            for it in got:
+                h = it.get("infoHash")
+                if not h or h in seen:
+                    continue
+                seen.add(h)
+                out.append(it)
     return out
 
 

@@ -1,13 +1,14 @@
 """磁力搜索路由: 按片名/剧集搜磁力
 
-两个磁力源, 由配置的 enabled 开关决定用哪个(启用哪个用哪个):
+三个磁力源, 各自由配置的 enabled 开关独立启停, 可单开一个, 也可同时开多个:
   - 原生 Bitmagnet        (bitmagnet.enabled)          GraphQL, 带 seeders/leechers
   - Bitmagnet-Next-Web    (bitmagnet_next_web.enabled) REST(改版站), 通常更快, 无 seeders/leechers
+  - Jackett               (jackett.enabled)            Torznab, 聚合 Jackett 里配置的所有站, 带 seeders
 
-选择规则:
-  - 只启用一个   → 走那一个
-  - 两个都启用   → 优先走更快的 bitmagnet_next_web(可配置 search.primary 覆盖)
-  - 两个都禁用   → 503
+多源规则:
+  - 启用若干源   → 并行查所有启用的源, 按 infoHash 合并去重, 每条带 source 来源;
+                  某源查询失败不影响其它源(全部失败才 502; 部分失败用成功的并回 warnings)
+  - 全部禁用     → 503
 
 只管搜磁力, 不做分类/TMDB 反查 —— 落库分类与 TMDB/IMDB 由 organize 阶段 本地 TMDB 缓存→TMDB 直连 完成,
 不在搜索阶段凭磁力引擎的元数据(或文件名)猜。
@@ -37,8 +38,8 @@ from server.config import get_config
 
 router = APIRouter(prefix="/api/search", tags=["bitmagnet"], dependencies=[Depends(require_auth)])
 
-# 两个源都启用时优先用哪个: "next_web"(默认, 通常更快) 或 "native"
-_DEFAULT_PRIMARY = "next_web"
+# 源标识固定顺序(多源合并时的展示顺序 / 错误信息都用它): native → next_web → jackett
+_SOURCE_ORDER = ("native", "next_web", "jackett")
 
 # 排序模式: relevance=引擎原序(默认) | size_desc=大小从大到小 | size_asc=大小从小到大 | seeders_desc=种子从多到少
 # 非 relevance 需要"全局排序", 即抓一个分段窗口(带上限)排序后再切片分页, 否则只排一页没意义。
@@ -415,15 +416,23 @@ def _enabled(cfg, key):
     return bool(sec.get("enabled", True))
 
 
-def _pick_source(cfg):
-    """返回应使用的源: 'native' | 'next_web' | None(都没启用)。"""
-    native_on = _enabled(cfg, "bitmagnet")
-    nw_on = _enabled(cfg, "bitmagnet_next_web")
-    if not native_on and not nw_on:
-        return None
-    if native_on and nw_on:
-        return (cfg.get("search") or {}).get("primary", _DEFAULT_PRIMARY) or _DEFAULT_PRIMARY
-    return "native" if native_on else "next_web"
+# 源标识 -> 配置段(每源各自一个 enabled 开关); 顺序即 _SOURCE_ORDER 的展示/合并顺序
+_SOURCE_CFG_KEY = {"native": "bitmagnet", "next_web": "bitmagnet_next_web", "jackett": "jackett"}
+_SOURCE_LABEL = {"native": "Bitmagnet", "next_web": "Bitmagnet-Next-Web", "jackett": "Jackett"}
+
+
+def _enabled_sources(cfg):
+    """返回启用的源(有序列表): 按 _SOURCE_ORDER 过滤掉未启用的。
+
+    每个源各自一个 enabled 开关 —— 可只开一个, 也可同时开多个(多源时并行查询后合并去重)。
+    段缺失(未配置)视为关, 所以老库没有 jackett 段时它天然不在列表里, 不会误触发 502。
+    """
+    return [s for s in _SOURCE_ORDER if _enabled(cfg, _SOURCE_CFG_KEY[s])]
+
+
+def _src_label(source):
+    """源标识 → 品牌名(错误信息、前端来源标签共用)。"""
+    return _SOURCE_LABEL.get(source, source)
 
 
 async def _search_native(cfg, q, limit):
@@ -468,6 +477,27 @@ async def _search_next_web(cfg, q, limit, page=1):
     return out, bool(more), next_page
 
 
+async def _search_jackett(cfg, q, limit):
+    """Jackett(Torznab)源: 一次拿最多 limit 条(all 聚合上限 1000), 无 offset 续翻。
+
+    has_more 按「返回条数 < limit」判断; next_page 恒为 1 —— Jackett 聚合不支持增量分页,
+    前端据此不再对 jackett 续翻(与原生 GraphQL 一致: 不支持 page)。
+    """
+    from scripts import jackett_search
+    items = await run_in_threadpool(jackett_search.search, cfg, q, limit)
+    out = []
+    for t in items:
+        out.append({
+            "infoHash": t.get("hash") or "",
+            "name": t.get("name"),
+            "size": t.get("size"),
+            "seeders": t.get("seeders"),
+            "leechers": t.get("leechers"),
+            "magnet": t.get("magnet"),
+        })
+    return out, len(out) < limit, 1
+
+
 async def _fetch_all(source, cfg, q, cap, start_offset=0):
     """抓最多 cap 条并规整成统一 item 结构(全局排序的取数原语, 也是 track_check 的入口)。
 
@@ -475,6 +505,14 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0):
     start_offset: Next-Web 源的翻页偏移 —— 「加载更多」续抓时从已有条数接着抓,
     不再从第 1 页整段重来(原生搜索源不支持偏移, 该参数被忽略)。
     """
+    if source == "jackett":
+        from scripts import jackett_search
+        # Jackett 聚合一次最多 limit 条(all 上限 1000), 无 offset 续抓
+        items = await run_in_threadpool(jackett_search.search, cfg, q, min(cap, 500))
+        return [{
+            "infoHash": t.get("hash") or "", "name": t.get("name"), "size": t.get("size"),
+            "seeders": t.get("seeders"), "leechers": t.get("leechers"), "magnet": t.get("magnet"),
+        } for t in items]
     if source == "next_web":
         from scripts import diao_search
         base, _ = diao_search.resolve_settings(cfg)
@@ -518,6 +556,10 @@ async def _probe_one(url: str, kind: str):
                 # Bitmagnet 地址本身就是端点(如 http://host:3333/graphql), POST 最小查询
                 r = await c.post(url, json={"query": "{__typename}"},
                                  headers={"Accept": "application/json", "User-Agent": "media-auto"})
+            elif kind == "jackett":
+                # Jackett(Torznab): GET {base}/api/v2.0/indexers/all/results/torznab 探测连通
+                r = await c.get(url.rstrip("/") + "/api/v2.0/indexers/all/results/torznab",
+                                headers={"Accept": "application/xml", "User-Agent": "media-auto"})
             else:
                 # 改版站按约定提供 GET {base}/api/stats
                 r = await c.get(url.rstrip("/") + "/api/stats",
@@ -533,9 +575,9 @@ async def api_probe(url: str = Query(..., min_length=1), kind: str = Query("rest
 
     url 可带可不带协议头: 带则先试它、再试另一个; 不带按 https → http 顺序试。
     kind: `rest` = 改版站 `{base}/api/stats`; `graphql` = Bitmagnet 端点,
-    地址没写路径时自动补 `/graphql`。
+    地址没写路径时自动补 `/graphql`; `jackett` = Torznab 端点。
     """
-    if kind not in ("rest", "graphql"):
+    if kind not in ("rest", "graphql", "jackett"):
         kind = "rest"
     raw = (url or "").strip()
     m = re.match(r"^(?P<scheme>https?)://(?P<rest>.+)$", raw, re.IGNORECASE)
@@ -556,6 +598,47 @@ async def api_probe(url: str = Query(..., min_length=1), kind: str = Query("rest
     return {"ok": False, "url": "", "scheme": None, "tried": tried}
 
 
+async def _one_page_relevance(source, cfg, q, limit, page):
+    """单个源的 relevance 一页(引擎原序)。返回 (items, has_more, next_page)。"""
+    if source == "next_web":
+        return await _search_next_web(cfg, q, limit, page=page)
+    if source == "jackett":
+        return await _search_jackett(cfg, q, limit)
+    return await _search_native(cfg, q, limit)
+
+
+def _tag_source(items, source):
+    """就地给每条打上 source 来源(前端来源标签/徽章用)。"""
+    for it in items:
+        it["source"] = source
+    return items
+
+
+def _dedup_key(it):
+    """合并去重键: 优先 infoHash(小写); 无 hash 用 名称+大小。"""
+    h = (it.get("infoHash") or "").lower()
+    if h:
+        return h
+    return (it.get("name") or "") + "|" + str(it.get("size"))
+
+
+def _merge_sources(per_items, sort, cfg):
+    """把各源的已排序列表合并成一个(去重); 单源原样返回。多源按同一全局规则重排。"""
+    if len(per_items) == 1:
+        return per_items[0][1]
+    seen, out = set(), []
+    for _src, w in per_items:
+        for it in w:
+            k = _dedup_key(it)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(it)
+    if sort != "relevance":
+        _apply_sort(out, sort, cfg)
+    return out
+
+
 @router.get("")
 async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
                      page: int = Query(1, ge=1), sort: str = "relevance",
@@ -566,26 +649,31 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
     if sort not in _SORT_MODES:
         sort = "relevance"
 
-    source = _pick_source(cfg)
-    if source is None:
-        raise HTTPException(503, "两个磁力源都已禁用(bitmagnet.enabled 与 bitmagnet_next_web.enabled)")
+    sources = _enabled_sources(cfg)
+    if not sources:
+        raise HTTPException(503, "所有磁力源都已禁用(管理 → 通用 → 磁力搜索源: 至少启用一个)")
 
-    # ---- 非 relevance: 分段抓取 → 全局排序 → 按 limit 切片分页 ----
+    # ---- 非 relevance: 各源各抓一个分段窗口 → 合并 → 全局排序 → 按 limit 切片 ----
     if sort != "relevance":
-        try:
-            # 只抓到"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限 200)
-            window, exhausted = await _load_window(source, cfg, q, page * limit, sort)
-        except HTTPException:
-            raise
-        except Exception as e:  # noqa: BLE001
-            label = "Bitmagnet-Next-Web" if source == "next_web" else "Bitmagnet"
-            raise HTTPException(status_code=502, detail=f"{label} 请求失败: {e}")
+        per_items, warnings = [], []
+        for src in sources:
+            try:
+                # 只抓"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限 200)
+                window, exhausted = await _load_window(src, cfg, q, page * limit, sort)
+                _tag_source(window, src)
+                per_items.append((src, window, exhausted))
+            except Exception as e:  # noqa: BLE001  单源失败不致命, 用其它源
+                warnings.append(f"{_src_label(src)}: {e}")
+        if not per_items:
+            raise HTTPException(status_code=502, detail="; ".join(warnings) or "磁力源请求失败")
+        window = _merge_sources([(s, w) for s, w, _e in per_items], sort, cfg)
+        exhausted = all(ex for _s, _w, ex in per_items)
 
         start = (page - 1) * limit
         page_items = window[start:start + limit]
         # 还有下一页: 窗口里还有没展示的, 或窗口没抓满且站点未必到底(下次抓更大窗口)
         has_more = ((start + limit < len(window))
-                    or (not exhausted and len(window) < _SORT_CAP))
+                    or (not exhausted and len(window) < _SORT_CAP * len(per_items)))
         # 回传前端: 双查询合并后按同规则重排, 前排/金标徽章渲染
         if sort == "quality":
             _annotate_quality(page_items, cfg)
@@ -593,23 +681,48 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
             _annotate_group(page_items, cfg)
         _annotate_suspect(page_items)
         await run_in_threadpool(_annotate_pushed, page_items)   # 查库(队列合并)不占事件循环
-        return {
-            "source": source, "items": page_items, "hasMore": has_more,
-            "nextPage": page + 1 if has_more else page, "sort": sort,
+        resp = {
+            "source": sources[0], "sources": sources, "items": page_items,
+            "hasMore": has_more, "nextPage": page + 1 if has_more else page, "sort": sort,
             "totalCount": len(window), "exhausted": exhausted,
         }
+        if warnings:
+            resp["warnings"] = warnings
+        return resp
 
-    # ---- relevance: 引擎原序, 按页直取(不拉全量, 最快) ----
-    try:
-        if source == "next_web":
-            items, has_more, next_page = await _search_next_web(cfg, q, limit, page=page)
-        else:
-            items, has_more, next_page = await _search_native(cfg, q, limit)
-    except Exception as e:  # noqa: BLE001
-        label = "Bitmagnet-Next-Web" if source == "next_web" else "Bitmagnet"
-        raise HTTPException(status_code=502, detail=f"{label} 请求失败: {e}")
+    # ---- relevance: 各源各取一页(引擎原序) → 合并去重 ----
+    per_items, warnings = [], []
+    for src in sources:
+        try:
+            items, has_more, next_page = await _one_page_relevance(src, cfg, q, limit, page)
+            _tag_source(items, src)
+            per_items.append((src, items, has_more, next_page))
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"{_src_label(src)}: {e}")
+    if not per_items:
+        raise HTTPException(status_code=502, detail="; ".join(warnings) or "磁力源请求失败")
+
+    if len(per_items) == 1:
+        # 单源: 原样取(与旧实现一致, 仅额外带 source 字段)
+        items, has_more, next_page = per_items[0][1], per_items[0][2], per_items[0][3]
+    else:
+        # 多源: 按源序合并去重(relevance 保持各源引擎原序, 首源在前)
+        seen, items = set(), []
+        for _s, its, _hm, _np in per_items:
+            for it in its:
+                k = _dedup_key(it)
+                if k in seen:
+                    continue
+                seen.add(k)
+                items.append(it)
+        has_more = any(hm for _s, _i, hm, _np in per_items)
+        next_page = max((np for _s, _i, _hm, np in per_items), default=page + 1)
 
     _annotate_group(items, cfg)   # 前排徽章在相关性排序下也照常显示
     _annotate_suspect(items)
     await run_in_threadpool(_annotate_pushed, items)            # 查库(队列合并)不占事件循环
-    return {"source": source, "items": items, "hasMore": has_more, "nextPage": next_page, "sort": sort}
+    resp = {"source": sources[0], "sources": sources, "items": items,
+            "hasMore": has_more, "nextPage": next_page, "sort": sort}
+    if warnings:
+        resp["warnings"] = warnings
+    return resp

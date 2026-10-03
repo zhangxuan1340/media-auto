@@ -210,12 +210,13 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
 
 ## 磁力搜索
 
-两个磁力源,用哪个看配置的 `enabled`(都启用时默认优先更快的 Next-Web,可用 `search.primary` 覆盖):
+三个磁力源,**各自独立开关**(`enabled`),想开哪个就勾哪个——可单开,也可多开。多开时系统并行查所有启用的源,结果按 InfoHash 去重后自动合并;某源查询失败(如未配地址)不影响其它源,全部失败才报错。管理页「磁力搜索源」里每个源一张独立卡片(启用开关 + 专属字段 + 协议「检测」)。
 
 | 源 | 配置段 | 协议 | 特点 |
 | --- | --- | --- | --- |
-| 原生 Bitmagnet | `bitmagnet` | GraphQL | 带 seeders/leechers |
+| Bitmagnet(原生) | `bitmagnet` | GraphQL | 自带 seeders/leechers 与 TMDB 元数据,适合自托管 |
 | Bitmagnet-Next-Web | `bitmagnet_next_web` | REST(改版站) | 通常更快,无 seeders |
+| Jackett | `jackett` | Torznab | 种子聚合引擎,一次聚合 Jackett 里配置的全部站点(`indexer` 默认 `all`) |
 
 - 地址支持 http/https 切换与自动探测(「管理 → 通用 → 磁力搜索源」里有「检测」按钮,后端 `GET /api/search/probe` 逐协议试,收到 HTTP 响应即算通)。
 - 排序:`relevance`(引擎原序)、`quality`(质量优先)、`size_desc` / `size_asc`、`seeders_desc`。非 `relevance` 的模式按**分段窗口**抓取排序后分页:首屏只抓 `max(需要+30, 60)` 条,「加载更多」要更多时再重抓更大的窗口(200 条封顶),同查询+排序结果缓存 120s。站点单页只有 10 条却要 2~3.5s,所以翻页在 `scripts/diao_search.py::collect` 里按 6 路并行——老实现每个请求都拉满 200 条(串行翻 20 页 = 12~20s)是「详情页磁力列表很慢」的根因。

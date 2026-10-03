@@ -599,6 +599,24 @@ function _grpBadge(r){
   if(!r || r.groupRank == null) return '';
   return `<span class="qgrp" title="前排发布组 — 管理 → 通用 → 种子抓取规则配置(顺序 = 优先级);「质量优先」排序与追踪自动推送都先选它">前排${r.groupName?` · ${esc(r.groupName)}`:''}</span>`;
 }
+// 磁力来源标签: 后端把每个源打上 source 键, 多源时一条结果可能来自不同源
+const _SRC_LABEL = {native: 'Bitmagnet', next_web: 'Bitmagnet-Next-Web', jackett: 'Jackett'};
+function _srcLabel(k){ return _SRC_LABEL[k] || k; }
+function _srcLabelFromPages(pages){
+  // 汇总本次查询实际命中的所有源(用后端 sources 数组, 兼容旧 source 单值)
+  const set = new Set();
+  (pages || []).forEach(p => {
+    const arr = (p && p.sources) ? p.sources : (p && p.source ? [p.source] : []);
+    (arr || []).forEach(s => set.add(s));
+  });
+  return set.size ? [...set].map(_srcLabel).join(' / ') : '磁力源';
+}
+function _srcBadge(r){
+  // 单条结果来源小徽章(多源合并时区分每条来自哪个源)
+  const s = r && r.source;
+  if(!s) return '';
+  return `<span class="qsrc" title="来源: ${esc(_srcLabel(s))}">${esc(_srcLabel(s))}</span>`;
+}
 async function searchMagnets(q, title, boxSel, limit, extra){
   limit = limit || 30;  // 默认拉 30 条(站点每页 10 条, 后端翻 3 页); 双查询并行, 首屏更快; 「加载更多」续翻
   extra = extra || {};
@@ -628,7 +646,8 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}`)));
     if(tok !== box._reqTok) return;
     const res = _magMerge(pages, limit, sort);
-    const src = (pages[0] && pages[0].source)==='next_web' ? 'Bitmagnet-Next-Web' : 'Bitmagnet';
+    const src = _srcLabelFromPages(pages);
+    const _multiSrc = new Set(res.map(r => r && r.source).filter(Boolean)).size > 1;
     if(!res.length){ box.innerHTML=`<div class="empty">${icon('search')} ${src} 没有命中</div>`; return; }
     const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
     // 窗口状态: 后端分段抓取(首屏 60 条), totalCount=已抓条数, exhausted=站点到底
@@ -636,7 +655,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     box._exhausted = pages.every(p => p && p.exhausted === true);
     box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
       <div class="res"><div class="info">
-        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
+        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
         <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
@@ -939,14 +958,15 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
     // 中文标题 + 英文原名 各扫一遍, 合并去重(整季包常按英文原名发布, 单查中文会漏)
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=20`)));
     const res = _magMerge(pages, 20, 'relevance');
-    const src = (pages[0] && pages[0].source)==='next_web' ? 'Bitmagnet-Next-Web' : 'Bitmagnet';
+    const src = _srcLabelFromPages(pages);
+    const _multiSrc = new Set(res.map(r => r && r.source).filter(Boolean)).size > 1;
     if(!res.length){ box.innerHTML=`<div style="font-size:12px;color:var(--muted)">${src} 无「${esc(qs[0])}」命中</div>`; }
     else{
       const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
       const qShow = qs.join(' / ');
       box.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${src} · ${res.length} 条${qTag} · 词: ${esc(qShow)}</div>` + res.map((r,i)=>`
         <div class="res res-compact"><div class="info">
-          <div class="n">${esc(r.name||'')}</div>
+          <div class="n">${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
           ${_qualityTags(r.name, r)}
           ${_pushBadge(r)}
           <div class="s"><span class="sz">${fmt(r.size)}</span>${_seedTags(r)}</div></div>

@@ -548,6 +548,9 @@
     background:linear-gradient(135deg,rgba(48,209,88,.20),rgba(10,132,255,.14));color:var(--ok);
     border:1px solid rgba(48,209,88,.45);box-shadow:0 1px 3px rgba(48,209,88,.18);
     margin-right:7px;letter-spacing:.3px;vertical-align:1px}
+  .qsrc{display:inline-flex;align-items:center;flex:none;font-size:10px;font-weight:700;padding:1.5px 7px;border-radius:6px;
+    background:rgba(120,120,128,.14);color:var(--muted);border:1px solid var(--line);
+    margin-right:7px;letter-spacing:.3px;vertical-align:1px}
   .leech{color:var(--muted);font-weight:500}
   .res .s .sz{display:inline-flex;align-items:center;gap:3px}
   .res .s .sz .icn{width:12px;height:12px}
@@ -939,6 +942,10 @@
   .cfg-gdesc{font-size:12px;color:var(--muted);line-height:1.55;margin:0 0 10px}
   .cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px 14px}
   .cfg-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+  .cfg-section{grid-column:1 / -1;margin-top:4px;padding-top:2px;border-top:1px solid var(--line)}
+  .cfg-section:first-child{margin-top:0;padding-top:0;border-top:0}
+  .cfg-section-title{font-size:13px;font-weight:700;color:var(--text)}
+  .cfg-section-hint{display:block;font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px}
   .cfg-lab{font-size:12px;font-weight:600;color:var(--text-2)}
   .cfg-fdesc{font-size:11px;color:var(--muted);line-height:1.5}
   .cfg-in{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:10px;font-size:13px;

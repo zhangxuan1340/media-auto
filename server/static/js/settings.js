@@ -373,18 +373,25 @@ const CFG_GROUPS = [
     {p: 'tmdb.language', label: '语言'},
     {p: 'tmdb.hosts', label: 'Host 候选', type: 'list', desc: '每行一个(不带协议), 按顺序尝试'},
   ]},
-  {title: '磁力搜索源', desc: '两个源相互独立, 都启用时按「优先源」选择。地址旁可切 http/https, 或点「检测」自动找出能连通的协议。',
+  {title: '磁力搜索源', desc: '三个源各自独立, 想开哪个就勾哪个, 可单开也可多开。多开时系统并行查所有启用的源, 结果按 InfoHash 去重后自动合并; 某源查失败不影响其它源。地址旁可切 http/https, 或点「检测」自动找出能连通的协议。',
    fields: [
-    {p: 'bitmagnet.enabled', label: 'Bitmagnet(原生 GraphQL)', type: 'checkbox', desc: '有 seeders/leechers 与 TMDB 元数据'},
-    {p: 'bitmagnet.url', label: 'Bitmagnet 地址', probe: 'graphql',
+    {p: '', label: 'Bitmagnet(原生 GraphQL)', type: 'section', desc: '自带 seeders/leechers 与 TMDB 元数据, 适合自托管。'},
+    {p: 'bitmagnet.enabled', label: '启用 Bitmagnet', type: 'checkbox'},
+    {p: 'bitmagnet.url', label: '地址', probe: 'graphql',
      desc: 'GraphQL 端点, 如 http://192.168.1.100:3333/graphql'},
     {p: 'bitmagnet.limit', label: '返回条数', type: 'number'},
-    {p: 'bitmagnet_next_web.enabled', label: 'Bitmagnet-Next-Web', type: 'checkbox', desc: '改版站 REST 源, 通常更快'},
+    {p: '', label: 'Bitmagnet-Next-Web(改版站 REST)', type: 'section', desc: '改版站接口, 通常更快, 适合无原生端点时。'},
+    {p: 'bitmagnet_next_web.enabled', label: '启用 Bitmagnet-Next-Web', type: 'checkbox'},
     {p: 'bitmagnet_next_web.base', label: '站点 Base', probe: 'rest',
      desc: '改版站根地址, 如 https://your-site.example.com(不内置站点)'},
     {p: 'bitmagnet_next_web.limit', label: '返回条数', type: 'number'},
-    {p: 'search.primary', label: '优先源', type: 'select',
-     options: [['next_web', 'next_web(更快)'], ['native', 'native(原生)']]},
+    {p: '', label: 'Jackett(种子聚合引擎)', type: 'section', desc: '一次聚合它在 Jackett 里配置的所有站点, 用 Torznab 接口。需在 Jackett 中先配好各站并生成 API Key。'},
+    {p: 'jackett.enabled', label: '启用 Jackett', type: 'checkbox'},
+    {p: 'jackett.base', label: '地址', probe: 'jackett',
+     desc: 'Jackett 根地址, 如 http://192.168.1.100:9091'},
+    {p: 'jackett.apikey', label: 'API Key', type: 'password', desc: 'Jackett 控制台 → Settings 中各 Indexer 对应的 API Key'},
+    {p: 'jackett.indexer', label: 'Indexer', desc: 'all = 聚合全部已配置站(默认); 也可填具体站名或 filter 表达式'},
+    {p: 'jackett.limit', label: '返回条数', type: 'number'},
   ]},
   {title: '种子抓取规则', desc: '前排发布组整批排最前: 详情页「质量优先」搜索与追踪自动推送都按这里的顺序先选; 留空 = 关闭前排。金标组则给种子加质量分 +20。',
    fields: [
@@ -462,6 +469,11 @@ function _cfgField(f){
   const v = _cfgGet(_cfgData, f.p);
   const desc = f.desc ? `<small class="cfg-fdesc">${esc(f.desc)}</small>` : '';
   const on = `oninput="_cfgTouch()" onchange="_cfgTouch()"`;
+  if(f.type === 'section'){
+    // 区块小标题: 跨整行, 把该分组拆成若干张"源卡片", 每个源独立成块
+    const hint = f.desc ? `<small class="cfg-section-hint">${esc(f.desc)}</small>` : '';
+    return `<div class="cfg-field cfg-section"><span class="cfg-section-title">${esc(f.label)}</span>${hint}</div>`;
+  }
   if(f.type === 'checkbox'){
     return `<label class="cfg-check"><input type="checkbox" data-cfg="${f.p}" ${v?'checked':''} ${on}>
       <span>${esc(f.label)}</span></label>${desc}`;
