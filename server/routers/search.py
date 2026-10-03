@@ -286,15 +286,36 @@ async def _load_window(source, cfg, q, need, sort):
     need = max(1, int(need))
     key = _sort_key(q, sort, source, cfg)
     hit = _cache_get(key)
+    base, cap0 = [], 0
     if hit:
         items, cap_used, exhausted = hit
         if len(items) >= need or exhausted or cap_used >= _SORT_CAP:
             return items, exhausted
+        base, cap0 = list(items), cap_used
     target = min(_SORT_CAP, max(need + _STEP, _WINDOW0))
-    got = await _fetch_all(source, cfg, q, target)
+    site_done = False
+    if cap0 and source == "next_web":
+        # 增量续抓: 只补 target-cap0 条。旧写法命中缓存但条数不够就整段从第 1 页重抓 ——
+        # 点一次「加载更多」把前面抓过的又抓一遍(6 次点击 ≈ 4 倍站点往返)。
+        # TypeError = _fetch_all 被门禁打桩成不带 start_offset 的旧签名 → 退回整段抓。
+        try:
+            more = await _fetch_all(source, cfg, q, target - cap0, start_offset=cap0)
+        except TypeError:
+            more = None
+        if more is not None:
+            seen = {(x.get("infoHash") or "").lower() for x in base if x.get("infoHash")}
+            got = base + [x for x in more
+                          if not x.get("infoHash") or x["infoHash"].lower() not in seen]
+            site_done = len(more) < (target - cap0)
+        else:
+            got = await _fetch_all(source, cfg, q, target)
+            site_done = len(got) < target
+    else:
+        got = await _fetch_all(source, cfg, q, target)
+        site_done = len(got) < target
     items = _apply_sort(got, sort, cfg)
     # 站点一条不剩(本页不满) → 到底; 满 target 条则认为后面还有, 下次要更多再抓
-    exhausted = len(got) < target
+    exhausted = site_done
     _cache_put(key, items, target, exhausted)
     return items, exhausted
 
@@ -447,17 +468,19 @@ async def _search_next_web(cfg, q, limit, page=1):
     return out, bool(more), next_page
 
 
-async def _fetch_all(source, cfg, q, cap):
+async def _fetch_all(source, cfg, q, cap, start_offset=0):
     """抓最多 cap 条并规整成统一 item 结构(全局排序的取数原语, 也是 track_check 的入口)。
 
     顺序抓取由 scripts/diao_search.collect 内部并行化; 返回不足 cap 条 = 站点到底。
+    start_offset: Next-Web 源的翻页偏移 —— 「加载更多」续抓时从已有条数接着抓,
+    不再从第 1 页整段重来(原生搜索源不支持偏移, 该参数被忽略)。
     """
     if source == "next_web":
         from scripts import diao_search
         base, _ = diao_search.resolve_settings(cfg)
         # collect 内部按 offset 翻页, want=cap 一次拿全; 受 MAX_PAGES(200) 上限约束
         items, _tc, _kw, _more, _end = await run_in_threadpool(
-            diao_search.collect, base, q, min(cap, 200), start_offset=0)
+            diao_search.collect, base, q, min(cap, 200), start_offset=max(0, start_offset))
         out = []
         for t in items:
             out.append({
@@ -569,7 +592,7 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         else:
             _annotate_group(page_items, cfg)
         _annotate_suspect(page_items)
-        _annotate_pushed(page_items)
+        await run_in_threadpool(_annotate_pushed, page_items)   # 查库(队列合并)不占事件循环
         return {
             "source": source, "items": page_items, "hasMore": has_more,
             "nextPage": page + 1 if has_more else page, "sort": sort,
@@ -588,5 +611,5 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
 
     _annotate_group(items, cfg)   # 前排徽章在相关性排序下也照常显示
     _annotate_suspect(items)
-    _annotate_pushed(items)
+    await run_in_threadpool(_annotate_pushed, items)            # 查库(队列合并)不占事件循环
     return {"source": source, "items": items, "hasMore": has_more, "nextPage": next_page, "sort": sort}

@@ -147,7 +147,7 @@ venv/bin/python -c "import sqlite3; s=sqlite3.connect('data/media_auto.db'); d=s
 
 | 主页签 | 内容 |
 | --- | --- |
-| 电影 / 剧集 | TMDB 热门榜(国家/类型筛选、滚动分页)+ 详情弹窗(导航栈、侧滑返回):演员页、磁力搜索与推送、分集扫种子、追踪新作/新季、中文标题覆盖与改名、手动重建 NFO |
+| 电影 / 剧集 | TMDB 热门榜(滚动分页)+ 高级筛选:类型 / 国家 / 日期范围 / 流媒体平台(可切地区)/ 电影分级 / 剧集完结状态 —— 不带高级筛选走榜单,带任意一项切 TMDB discover;工具栏值始终按当前筛选回显 + 详情弹窗(导航栈、侧滑返回):演员页、磁力搜索与推送、分集扫种子、追踪新作/新季、中文标题覆盖与改名、手动重建 NFO |
 | 整理 | 离线目录整理计划 → 勾选执行 → 整理记录(详见下一节) |
 | 管理 | 9 个子页签(下表);支持深链,如 `?tab=manage:missing` 直达缺失页 |
 
@@ -163,7 +163,7 @@ venv/bin/python -c "import sqlite3; s=sqlite3.connect('data/media_auto.db'); d=s
 | 本地库 | Jellyfin / TMDB 同步状态与浏览;同步统一由「作业」触发 |
 | 作业 | 定时作业(改排期 / 手动运行)+ 缓存统计与清理 |
 | 屏蔽 | 按 TMDB ID 屏蔽作品(热门榜/浏览/缺失都会过滤) |
-| 浏览 | 本地 TMDB 缓存筛选浏览 |
+| 浏览 | 本地 TMDB 缓存筛选浏览:类型 / 库内状态 / 片名 / 年份范围 / 完结状态 / 分级(**剧集分级只能在这页筛** —— TMDB `discover/tv` 没有 certification 参数,页签里会置灰并注明) |
 
 PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、失败回退缓存,
 离线也能打开;`/api/qbit/*` 实时数据永不缓存。
@@ -256,6 +256,11 @@ PWA:可安装到桌面(`manifest.webmanifest`),Service Worker 走网络优先、
   (`.txt` / `.url` / `.doc` / `.pdf` 等)一并删除;`.nfo` 与海报类资产保留,字幕默认保留。
 - 剧集归位后**按季归位 + 集文件改标准名**(字幕跟随):季号取自 `SxxExx` / 「第N集」/ 子目录名,
   提取不到季的文件留原地;目标名已存在则跳过,绝不覆盖。
+  文件名与子目录都没有季号时,预览里该条会标 **`季号不明 · 保留原名/原结构`** —— 不替你猜
+  (2026-09-27 定的口径:没有真实季集标记就不猜,猜错会把某季塞进 `Season 01`),于是文件留在
+  剧目录根、不改名。想让它们进季目录,自行二选一:①把文件改出季号(如 `…E01…` → `…S01E01…`)
+  或移进 `Season 01/` 子目录(下一条规则会从子目录名读出季号)后重跑整理;②用整理页的
+  「重新匹配」确认条目后再执行。**单季剧也不会自动补 S01**(要的是可预期,不是聪明)。
 - 状态口径:
   - `ok` 改名归位;`merge` 剧集补季(逐文件并入库内季目录,已有内容不动);
   - `duplicate` 库里已有同名:不重复归位,只清源目录里的广告;
@@ -357,6 +362,8 @@ venv/bin/python scripts/verify_nfo_read.py          # 现有 NFO 两条读取通
 venv/bin/python scripts/verify_probe_channels.py   # <fileinfo> 探测两条通道(WebDAV/下载链接)7 用例(连真实 CD2)
 venv/bin/python scripts/verify_search_pages.py     # 磁力翻页: 并行抓取/分段窗口/加载更多 31 用例(打桩站点)
 venv/bin/python scripts/verify_quality_score.py    # 质量分: 分辨率写实 + 体积合理性 49 用例(打桩, 不连网)
+venv/bin/python scripts/verify_trend_filters.py    # 页签/浏览两页高级筛选 104 用例(discover 参数映射、400 校验、缓存键、本地筛选、筛选回显, 全打桩不连网)
+venv/bin/python scripts/verify_trend_filters_ui.py # 筛选回显 UI 44 用例(起临时服务 + 系统 Chrome; /api 全走浏览器侧桩, 不连网)
 venv/bin/python scripts/audit_jellyfin_sync.py      # 同步审计 8 项(要连 Jellyfin, 约 3min)
 node --check server/static/js/*.js                  # 前端语法
 ```

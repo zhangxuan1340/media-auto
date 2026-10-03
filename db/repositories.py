@@ -381,10 +381,17 @@ def get_jf_episodes_by_series(session, series_id):
     return {(s, e) for s, e in rows}
 
 
-def get_series_tmdb_map(session):
-    """{series_item_id: tmdb_id_str} —— Series 项的 item_id → ProviderIds.Tmdb。"""
-    rows = (session.query(JellyfinItem.item_id, JellyfinItem.tmdb_id)
-            .filter(JellyfinItem.type == "Series").all())
+def get_series_tmdb_map(session, tmdb_id=None):
+    """{series_item_id: tmdb_id_str} —— Series 项的 item_id → ProviderIds.Tmdb。
+
+    tmdb_id 给了就只查这一部剧(单作品/单季详情页走这条) —— 全表 6378 行里
+    只要本剧的几行, 省掉每次详情 15ms 的全表扫。
+    """
+    qry = (session.query(JellyfinItem.item_id, JellyfinItem.tmdb_id)
+           .filter(JellyfinItem.type == "Series"))
+    if tmdb_id is not None:
+        qry = qry.filter(JellyfinItem.tmdb_id == str(tmdb_id))
+    rows = qry.all()
     return {iid: str(tid) for iid, tid in rows if tid}
 
 

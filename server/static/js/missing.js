@@ -54,6 +54,7 @@ async function msLoadPage(){
   if(MS.loading || !MS.hasMore) return;
   MS.loading = true;
   const myReq = MS.reqId;
+  let ok = false;                       // 本轮是否真的拿到新数据(决定要不要继续续页)
   try{
     const d = await api(`/api/missing?kind=${MS.kind}&offset=${MS.offset}&limit=${MS.limit}`);
     if(myReq !== MS.reqId) return;                 // 已切页签/重置 → 丢弃过期响应
@@ -65,6 +66,14 @@ async function msLoadPage(){
       MS.hasMore = false;
       return;
     }
+    if(!items.length){
+      // 总数说还有、这页却一条都吐不出来 → 没东西可续了。不设 false 的话,
+      // _msMaybeMore 的"没满一屏就续页"会拿同一个 offset 无限重复打接口。
+      MS.hasMore = false;
+      _msFoot();
+      return;
+    }
+    ok = true;
     const base = MS.list.length;
     items.forEach(x=>MS.list.push(x));
     MS.offset = MS.list.length;
@@ -87,8 +96,10 @@ async function msLoadPage(){
     else _msFoot(true);
   }finally{
     if(myReq === MS.reqId) MS.loading = false;
+    // 只有**成功拿到新数据**才考虑续页: 旧写法无条件续 —— 请求一失败就立刻再打一次,
+    // 变成"报错→重试→报错"的空转, 会把后端刷挂。
     // 不满一屏(结果少/大屏)滚不动 → 继续续页, 直到铺满或到底
-    _msMaybeMore();
+    if(ok && myReq === MS.reqId) _msMaybeMore();
   }
 }
 
@@ -119,12 +130,18 @@ function _msMaybeMore(){
 }
 
 // 滚到底 → 自动续下一页(与热门榜共用同一滚动容器探测; 弹窗打开时不触发)
+// rAF 节流: 一帧最多处理一次(滚轮/惯性滚动会把 scroll 事件打到每帧好几次)
+let _msScrollRaf = 0;
 window.addEventListener('scroll', ()=>{
-  if(MANAGE_SUB !== 'missing') return;
-  const mb = document.getElementById('modalBg');
-  if(mb && mb.classList.contains('show')) return;
-  if(!MS.list.length || !MS.hasMore || MS.loading) return;
-  if(typeof _trendNearBottom === 'function' && _trendNearBottom()) msLoadPage();
+  if(_msScrollRaf) return;
+  _msScrollRaf = requestAnimationFrame(()=>{
+    _msScrollRaf = 0;
+    if(MANAGE_SUB !== 'missing') return;
+    const mb = document.getElementById('modalBg');
+    if(mb && mb.classList.contains('show')) return;
+    if(!MS.list.length || !MS.hasMore || MS.loading) return;
+    if(typeof _trendNearBottom === 'function' && _trendNearBottom()) msLoadPage();
+  });
 }, {passive:true});
 
 // 集号待同步时的自动刷新: 每 15s 重拉一次(后端每次会再排一批回填), 最多 24 轮(6 分钟)
@@ -133,7 +150,11 @@ function _msAutoRefresh(kind){
   if(_msRefreshTimer) return;
   if(_msRefreshRounds >= 24) return;
   _msRefreshTimer = setTimeout(()=>{
-    _msRefreshTimer = null; _msRefreshRounds++;
+    _msRefreshTimer = null;
+    // 标签页在后台 / 已切离缺失子页签 → 这一轮不发请求, 但**继续排下一轮**
+    // (旧写法直接 return, 一次切走就把回填自动刷新永久停掉)
+    if(document.hidden || MANAGE_SUB !== 'missing'){ _msAutoRefresh(kind); return; }
+    _msRefreshRounds++;
     const tab = document.getElementById('ms-'+kind);
     const body = document.getElementById('missingBody');
     if(!tab || !tab.classList.contains('active') || !body) return;  // 已切走/离开 → 不刷

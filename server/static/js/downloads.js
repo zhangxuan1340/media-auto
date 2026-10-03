@@ -14,13 +14,19 @@ function _dlStopTimer(){ if(_dlTimer){ clearInterval(_dlTimer); _dlTimer = null;
 function _dlStartTimer(ms){
   _dlStopTimer();
   _dlTimer = setInterval(()=>{
-    // 仅当管理页仍在「下载」子页签时轮询
-    if(MANAGE_SUB !== 'download') return;
+    // 仅当管理页仍在「下载」子页签时轮询; 后台标签页不白打接口(回前台时 visibilitychange 立即补一次)
+    if(MANAGE_SUB !== 'download' || document.hidden) return;
     loadDownloads(true);   // silent=true: 不闪骨架
   }, ms || 5000);
 }
 // 切走下载子页签时停止轮询(由 settings.js switchManageSub 调用)
 window._dlOnSubChange = (sub)=>{ if(sub !== 'download') _dlStopTimer(); };
+
+// 后台标签页不轮询(见上); 切回前台立刻刷一次, 不用等下个 tick
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden || MANAGE_SUB !== 'download') return;
+  if(_dlTimer) loadDownloads(true);
+});
 
 // 速度格式化
 function _fmtSpeed(bps){
@@ -68,21 +74,35 @@ async function loadDownloads(silent){
 // 错误横幅上的「重试」按钮: 立即重跑一次(loadDownloads 内部会按结果重设轮询间隔)
 function dlRetry(){ loadDownloads(); }
 
-// ---- 渲染骨架(配置表单 + 统计 + 作品聚合 + 任务明细) ----
+// ---- 渲染(错误条 + 配置表单 + 统计 + 作品聚合 + 任务明细) ----
+// ⚠️ 局部更新: 轮询是 5s 一次, 旧写法每次都 innerHTML 整块重建 —— 用户正在表单里
+// 输入的地址/账号/密码每 5 秒被抹掉一次、光标被弹走。现在:
+//   · 配置没变 → 只换错误条和任务区(#dlLive), 表单 DOM 原样保留;
+//   · 配置变了(保存后 cfg 不同)或整页被清过 → 才整块重画。
+let _dlFormKey = null;   // 上次渲染表单时的 cfg 指纹
 function _dlRender(el, cfg, data){
   const err = (data && !data.ok && data.msg)
     ? `<div class="dl-warn">${icon('alert')}<span class="dl-warn-txt">${esc(data.msg)}</span>
         <button class="ghost sm" onclick="dlRetry()">${icon('refresh')}重试</button></div>`
     : '';
+  const live = (data && data.ok)
+    ? `${_dlStats(data.transfer, data.torrents)}${_dlShows(data.shows)}${_dlTorrentList(data.torrents)}`
+    : '';
+  const key = JSON.stringify(cfg || {});
+  const wrap = el.querySelector('.downloads');
+  if(wrap && key === _dlFormKey){
+    const slot = wrap.querySelector('.dl-errslot');
+    if(slot) slot.innerHTML = err;
+    const box = wrap.querySelector('#dlLive');
+    if(box) box.innerHTML = live;
+    return;
+  }
+  _dlFormKey = key;
   el.innerHTML = `
     <div class="downloads">
-      ${err}
+      <div class="dl-errslot">${err}</div>
       ${_dlConfigForm(cfg)}
-      ${data && data.ok ? `
-        ${_dlStats(data.transfer, data.torrents)}
-        ${_dlShows(data.shows)}
-        ${_dlTorrentList(data.torrents)}
-      ` : ''}
+      <div id="dlLive">${live}</div>
     </div>`;
 }
 

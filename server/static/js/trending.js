@@ -10,15 +10,49 @@
 // 页面元素 ID 按 kind 加后缀(trendBody-movie / tGenre-tv …), 两页签 DOM 可同时存在。
 
 // ---- 双实例(电影 / 剧集) ----
-// country/genre 任一非空 → 后端改走 discover 热度筛选榜(trending 接口不支持过滤)
+// country/genre/date/status/cert/provider 任一非空 → 后端改走 discover 热度筛选榜
+// (trending 接口不支持过滤)
 // loading=防重入(滚动/手动并发), hasMore=是否还有下一页, 供滚动自动加载判断
 // _pendingFirst: 切回页签时若上一笔在途请求还占着 loading 锁, 先置位,
 // 等它在 finally 里作废落地(release 锁)后再补一次首屏, 避免首屏卡死在"加载热门榜…"
+// ⚠️ 所有筛选状态都存在实例里, 工具栏每次重建都按实例值回填 —— 否则会出现
+// "数据还是筛过的, 筛选框却显示全部"(2026-10-02 用户反馈的 bug)。
+// providers/certs/regions = 高级筛选下拉的选项缓存(按 kind 存, 换平台地区时重取)。
 function _trendInst(kind, tabId){
-  return {kind, tabId, window:'week', page:1, timer:null, hideLib:false, reqId:0, genre:0, country:'', loading:false, hasMore:true, _pendingFirst:false, list:[]};
+  return {kind, tabId, window:'week', page:1, timer:null, hideLib:false, reqId:0,
+          genre:0, country:'', dateFrom:'', dateTo:'', status:'', cert:'', provider:0,
+          region:'CN', providers:[], certs:[], regions:[],
+          loading:false, hasMore:true, _pendingFirst:false, list:[]};
 }
 const TREND_MOVIE = _trendInst('movie','tab-movie');
 const TREND_TV    = _trendInst('tv','tab-tv');
+
+// 剧集状态(TMDB discover/tv with_status): 0 在播 / 1 计划 / 2 制作中 / 3 完结 / 4 取消 / 5 试播
+const TREND_STATUS_OPTS = [['','全部状态'],['0','在播'],['1','计划'],['2','制作中'],
+                           ['3','已完结'],['4','已取消'],['5','试播集']];
+
+// 下拉选项 HTML: rows=[[value,label],…]; cur 按字符串比对选中项;
+// all = 「全部」项文案(空 = 不加"全部", 平台地区用)。选项没匹配上时浏览器默认选第 1 项。
+function _trendOpts(rows, cur, all){
+  const opts = (all ? [['', all]] : []).concat(rows || []);
+  const cs = String(cur === undefined || cur === null ? '' : cur);
+  return opts.map(([v, l]) => {
+    const sv = String(v);
+    return `<option value="${esc(sv)}"${sv === cs ? ' selected' : ''}>${esc(String(l))}</option>`;
+  }).join('');
+}
+// 换平台地区 → 平台列表要按新地区重取, 已选平台作废(provider id 各地区可用性不同)
+function _trendRegion(code, k){
+  loadTrendList(null, k, {reset:1, region:code, provider:0});
+  loadTrendFilters(k);
+}
+// 一键清空所有筛选(日期/状态/分级/平台/类型/国家)并回第 1 页。
+// 重建工具栏是刻意的: 筛选框要跟着回到"全部", 光改状态不动 DOM 正是这次修的 bug。
+function trendReset(k){
+  const inst = (k==='tv'?TREND_TV:TREND_MOVIE);
+  Object.assign(inst, {genre:0, country:'', dateFrom:'', dateTo:'', status:'', cert:'', provider:0});
+  loadTrending(inst);
+}
 let TREND = TREND_MOVIE;   // 当前激活页签实例别名(detail.js 滚动守卫用)
 function _trendList(){ return TREND.list; }
 // 当前可见的热门实例(滚动守卫用: 两页签不可能同时可见, 谁可见用谁)
@@ -77,8 +111,25 @@ async function loadTrending(inst){
     <span class="trend-spacer" style="flex:1"></span>
     <button class="ghost trend-refresh" onclick="loadTrendList(null,'${k}',{reset:1})">${icon('refresh')}刷新</button>
     <span id="trendInfo-${k}" class="trend-info" style="color:var(--muted);font-size:12px"></span>
+    <div class="trend-filters">
+      <div class="tfdates">
+        <input type="date" id="tDateFrom-${k}" aria-label="起始日期" value="${esc(inst.dateFrom)}"
+          onchange="loadTrendList(null,'${k}',{reset:1,dateFrom:this.value})">
+        <span class="tfsep" aria-hidden="true">~</span>
+        <input type="date" id="tDateTo-${k}" aria-label="结束日期" value="${esc(inst.dateTo)}"
+          onchange="loadTrendList(null,'${k}',{reset:1,dateTo:this.value})">
+      </div>
+      ${k==='tv' ? `<select id="tStatus-${k}" aria-label="状态" onchange="loadTrendList(null,'${k}',{reset:1,status:this.value})">${_trendOpts(TREND_STATUS_OPTS, inst.status, '全部状态')}</select>` : ''}
+      ${k==='movie' ? `<select id="tCert-${k}" aria-label="分级" onchange="loadTrendList(null,'${k}',{reset:1,cert:this.value})">${_trendOpts(inst.certs.map(c=>[c.cert,c.cert]), inst.cert, '全部分级')}</select>`
+        : `<select id="tCertDummy-${k}" disabled aria-label="分级" title="TMDB 发现榜没有剧集分级参数; 剧集分级到「管理 → 浏览」按本地缓存筛"><option>分级(剧集不支持)</option></select>`}
+      <select id="tProvider-${k}" aria-label="流媒体平台" onchange="loadTrendList(null,'${k}',{reset:1,provider:+this.value})">${_trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台')}</select>
+      <select id="tRegion-${k}" aria-label="平台地区" onchange="_trendRegion(this.value,'${k}')">${_trendOpts((inst.regions.length?inst.regions:[{code:'CN',name:'中国'}]).map(r=>[r.code,r.name]), inst.region, '')}</select>
+      <button class="ghost tfreset" onclick="trendReset('${k}')" title="清空日期/状态/分级/平台/类型/国家">${icon('refresh')}重置</button>
+    </div>
   </div><div id="trendBody-${k}"><div class="empty"><span class="spin"></span>加载热门榜…</div></div>`;
-  $('#tGenre-'+k).value = '0';
+  // ⚠️ 不在这里把筛选框写死成"全部": 值一律由实例状态回填
+  // (genre/country 等下拉要等选项到位才能设值 → loadTrendFilters 里设;
+  //  日期/状态这类建工具栏时就带值, 这里不覆盖)
   // 每次进页签都从第 1 页开始(否则切走再回来会接着旧页码)
   inst.page = 1; inst.hasMore = true;
   if(inst.loading){
@@ -96,47 +147,96 @@ async function loadTrending(inst){
 // (工具栏 onchange 直接调 loadTrendList(null,kind,opts); 见下)
 async function loadTrendFilters(k){
   const inst = (k==='tv'?TREND_TV:TREND_MOVIE) || TREND;
+  // ⚠️ 三个下拉的值一律**从实例状态回填**, 不读 DOM 现值:
+  //   DOM 是刚重建出来的"全部", 读它 → 状态留着旧筛选、框却显示全部,
+  //   于是"数据还是筛过的但不知道筛没筛"(2026-10-02 用户反馈)。
+  //   同理, 选回"全部"时状态必须同步清零(旧代码只在选中项非空时写状态,
+  //   导致退回全部后请求仍带旧 country/genre)。
   // 类型: 复用浏览页的 /api/browse/genres(同一 TMDB 类型表, 无重复实现)
   try{
     const gs = await api(`/api/browse/genres?kind=${inst.kind}`);
-    const sel = $('#tGenre-'+k); if(!sel) return;
-    const cur = sel.value || '0';
-    sel.innerHTML = '<option value="0">全部类型</option>' + gs.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
-    sel.value = [...sel.options].some(o=>o.value===cur) ? cur : '0';
-    if(sel.value !== '0' && +sel.value !== inst.genre) inst.genre = +sel.value;
+    const sel = $('#tGenre-'+k);
+    if(sel){
+      sel.innerHTML = '<option value="0">全部类型</option>' + gs.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
+      sel.value = String(inst.genre || 0);
+      if(sel.value !== String(inst.genre || 0)) inst.genre = 0;   // 选项里没有(换过 kind)→ 归零
+      else inst.genre = +sel.value;
+    }
   }catch{}
   // 国家: TMDB /3/configuration(进程内拉一次即可, 国家列表基本不变)
   try{
     const cs = await api('/api/trending/countries');
-    const sel = $('#tCountry-'+k); if(!sel) return;
-    const cur = sel.value || '';
-    const rows = (cs||[]).filter(c=>c.code);
-    const common = ['CN','HK','TW','JP','KR','US','GB','FR','DE','IT','ES','RU','AU','CA','TH','MY','ID','SG','PH','IN','BR','MX'];
-    // 常用国家置顶 + 其余按字母序, 避免翻几百条才找着中国
-    const top = common.map(code=>rows.find(c=>c.code===code)).filter(Boolean);
-    const rest = rows.filter(c=>!common.includes(c.code)).sort((a,b)=>a.name.localeCompare(b.name));
-    sel.innerHTML = '<option value="">全部国家</option>'
-      + [...top,...rest].map(c=>`<option value="${c.code}">${esc(c.name)}</option>`).join('');
-    sel.value = [...sel.options].some(o=>o.value===cur) ? cur : '';
-    if(sel.value && sel.value !== inst.country) inst.country = sel.value;
+    const sel = $('#tCountry-'+k);
+    if(sel){
+      const rows = (cs||[]).filter(c=>c.code);
+      const common = ['CN','HK','TW','JP','KR','US','GB','FR','DE','IT','ES','RU','AU','CA','TH','MY','ID','SG','PH','IN','BR','MX'];
+      // 常用国家置顶 + 其余按字母序, 避免翻几百条才找着中国
+      const top = common.map(code=>rows.find(c=>c.code===code)).filter(Boolean);
+      const rest = rows.filter(c=>!common.includes(c.code)).sort((a,b)=>a.name.localeCompare(b.name));
+      sel.innerHTML = '<option value="">全部国家</option>'
+        + [...top,...rest].map(c=>`<option value="${c.code}">${esc(c.name)}</option>`).join('');
+      sel.value = inst.country || '';
+      inst.country = sel.value;                                 // 选项里没有 → 自动清成 ''
+    }
+  }catch{}
+  // 高级筛选: 平台地区 + 该地区的流媒体平台 + 分级(仅电影, 剧集 TMDB 无此参数)
+  try{
+    const f = await api(`/api/trending/filters?kind=${inst.kind}&region=${encodeURIComponent(inst.region||'CN')}`);
+    inst.regions = f.regions || [];
+    inst.providers = f.providers || [];
+    inst.certs = f.certifications || [];
+    const rs = $('#tRegion-'+k);
+    if(rs && inst.regions.length){
+      rs.innerHTML = _trendOpts(inst.regions.map(r=>[r.code,r.name]), inst.region, '');
+      rs.value = inst.region;
+      if(!rs.value){ rs.selectedIndex = 0; inst.region = rs.value; }
+    }
+    const ps = $('#tProvider-'+k);
+    if(ps && inst.providers.length){
+      ps.innerHTML = _trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台');
+      ps.value = String(inst.provider || '');
+      if(ps.value !== String(inst.provider || '')) inst.provider = 0;   // 换地区后平台不在列表 → 归零
+    }
+    const csel = $('#tCert-'+k);
+    if(csel && inst.certs.length){
+      csel.innerHTML = _trendOpts(inst.certs.map(c=>[c.cert,c.cert]), inst.cert, '全部分级');
+      csel.value = inst.cert || '';
+      if(csel.value !== (inst.cert || '')) inst.cert = '';
+    }
   }catch{}
   _syncTrendFilterUI(inst);
 }
+// 任一筛选生效 → 走 discover 热度榜(日/周窗口不再适用)
+function _trendAnyFilter(inst){
+  return !!(inst.genre || inst.country || inst.dateFrom || inst.dateTo ||
+            inst.status || inst.cert || inst.provider);
+}
 function _syncTrendFilterUI(inst){
   inst = inst || TREND;
-  // 筛选模式下 trending 的日/周窗口不适用(后端走 discover 热度排序) → 禁用避免误导
-  const w = $('#tWindow-'+inst.kind); if(!w) return;
-  const filtered = !!(inst.genre || inst.country);
-  w.disabled = filtered;
-  w.title = filtered ? '选了类型/国家后按热度排序, 日榜/周榜不适用' : '';
+  const w = $('#tWindow-'+inst.kind);
+  const filtered = _trendAnyFilter(inst);
+  if(w){
+    w.disabled = filtered;
+    w.title = filtered ? '选了筛选条件后按热度排序, 日榜/周榜不适用' : '';
+  }
+  // 有筛选时给「重置」点个高亮(纯视觉提示, 随时可点)
+  const pane = document.getElementById(inst.tabId);
+  const rs = pane ? pane.querySelector('.trend-filters .tfreset') : null;
+  if(rs) rs.classList.toggle('on', filtered);
 }
 async function loadTrendList(manual, k, opts){
   const inst = (k && (k==='tv'?TREND_TV:TREND_MOVIE)) || TREND;
-  // 工具栏 onchange 直接传 opts: 写入 window/genre/country; reset=回第 1 页
+  // 工具栏 onchange 直接传 opts: 写入各筛选项; reset=回第 1 页
   if(opts){
     if(opts.window!==undefined) inst.window = opts.window;
     if(opts.genre!==undefined) inst.genre = opts.genre;
     if(opts.country!==undefined) inst.country = opts.country;
+    if(opts.dateFrom!==undefined) inst.dateFrom = opts.dateFrom;
+    if(opts.dateTo!==undefined) inst.dateTo = opts.dateTo;
+    if(opts.status!==undefined) inst.status = opts.status;
+    if(opts.cert!==undefined) inst.cert = opts.cert;
+    if(opts.region!==undefined) inst.region = opts.region;
+    if(opts.provider!==undefined) inst.provider = opts.provider;
     if(opts.reset){ inst.page = 1; _syncTrendFilterUI(inst); }
   }
   const kk = inst.kind;
@@ -149,7 +249,15 @@ async function loadTrendList(manual, k, opts){
   if(inst.page===1) el.innerHTML='<div class="empty"><span class="spin"></span>加载热门榜…</div>';
   else _setTrendFoot(el, '<span class="spin"></span>加载中…');   // 恒只一行(先清光再插, 杜绝并发叠加)
   try{
-    const d = await api(`/api/trending/${inst.kind}?window=${inst.window}&page=${inst.page}&size=20&genre=${inst.genre||0}&country=${encodeURIComponent(inst.country||'')}`);
+    const q = new URLSearchParams();
+    q.set('window', inst.window); q.set('page', String(inst.page)); q.set('size', '20');
+    q.set('genre', String(inst.genre || 0)); q.set('country', inst.country || '');
+    if(inst.dateFrom) q.set('date_from', inst.dateFrom);
+    if(inst.dateTo) q.set('date_to', inst.dateTo);
+    if(inst.status) q.set('status', inst.status);
+    if(inst.cert) q.set('cert', inst.cert);
+    if(inst.provider){ q.set('provider', String(inst.provider)); q.set('watch_region', inst.region || 'CN'); }
+    const d = await api(`/api/trending/${inst.kind}?${q.toString()}`);
     if(tok !== inst.reqId) return;   // 过期响应 —— 不渲染(根治"旧响应把同页数据再追加一遍"的重复)
     const items = d.items||[];
     if(inst.page===1){
@@ -171,7 +279,7 @@ async function loadTrendList(manual, k, opts){
       (el.querySelector('.grid') || el).insertAdjacentHTML('beforeend', html);
     }
     inst.hasMore = !!d.hasMore;
-    const _src = (inst.genre||inst.country) ? '热度榜·筛选' : `TMDB ${inst.window==='day'?'日榜':'周榜'}`;
+    const _src = _trendAnyFilter(inst) ? '热度榜·筛选' : `TMDB ${inst.window==='day'?'日榜':'周榜'}`;
     const _info = $('#trendInfo-'+kk);
     if(_info) _info.textContent = `${_src} · 已显示 ${list.length} 条${inst.hasMore?'':' · 已是榜单尾部'}`;
     // 底部提示行: 恒只保留一行(有旧行就原地改文案, 没有才追加) —— 杜绝逐页累加
@@ -204,6 +312,9 @@ async function loadTrendList(manual, k, opts){
 }
 function trendEmptyMsg(inst){
   inst = inst || TREND;
+  if(_trendAnyFilter(inst)){
+    return `<div class="empty">${icon('search')} 当前筛选没有结果<br><span style="font-size:12px">放宽日期/状态/分级/平台, 或点工具栏「重置」</span></div>`;
+  }
   return inst.hideLib
     ? `<div class="empty">${icon('eye')} 隐藏"库内"已开启, 当前热门榜没有库外条目<br><span style="font-size:12px">到「管理 · 通用」关掉"隐藏已完整作品"可看全部热门</span></div>`
     : `<div class="empty">${icon('search')} 热门榜为空(未配置 TMDB key?)</div>`;

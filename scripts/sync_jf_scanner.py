@@ -586,13 +586,32 @@ async def _run_async(cfg, mode="full", limit=0):
         if limit:
             items = items[:limit]
 
+        # 攒批提交(旧: 每条一个 commit → 全量 6400 条 = 6400 次事务开销)。
+        # 仍保留"中断可恢复": 一批 25 条, 最坏丢这批未落盘的改动, 下一轮幂等重算。
+        # 某条处理抛异常 → 它写了一半, 连同本批一起回滚, 已计入 stats 的成功计数跟着退掉
+        # (旧行为是**带着半条脏数据 commit**, 反而可能把写坏的行固化进库)。
+        COMMIT_EVERY = 25
+        dirty = 0
+        pending = {}            # 本批已计入 stats 但尚未落盘的分类 → 条数
         for it in items:
             try:
                 r = await _process_item(session, cfg, it, sem, id_lock, eps_index)
                 stats[r] = stats.get(r, 0) + 1
+                pending[r] = pending.get(r, 0) + 1
+                dirty += 1
+                if dirty >= COMMIT_EVERY:
+                    session.commit()
+                    dirty = 0
+                    pending.clear()
             except Exception:  # noqa: BLE001
                 stats["fail"] += 1
-            session.commit()  # 逐条提交, 中断可恢复
+                session.rollback()
+                for k, v in pending.items():
+                    stats[k] -= v
+                pending.clear()
+                dirty = 0
+        if dirty:
+            session.commit()
         return stats
     finally:
         session.close()

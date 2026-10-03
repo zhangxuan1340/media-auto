@@ -15,6 +15,7 @@ function openCard(it){
 let _navStack = [];          // 详情页的"返回目标"栈(重渲染闭包), 返回键逐级回退
 let _ctxStack = [];          // 当前顶层视图(搜索页/演员页)重建上下文, 从它点进详情时消费
 let _curDetail = null;       // 当前详情页 {kind,tmdbId}: 从详情点演员/导演进演员页时, "返回"回该详情
+const _detailPayload = {};    // {tmdbId: 详情完整载荷} —— 详情刚拉过, 后续「扫种子」等直接复用
 function _ctxRebuild(ctx){
   if(ctx && ctx.type === 'person') openPersonPage(ctx.id, true);
   else if(ctx && ctx.type === 'search') openTitleSearch(ctx.q);
@@ -183,6 +184,7 @@ async function openDetailLocal(kind, tmdbId, pushHist){
 function renderDetailLocal(d, kind, tmdbId){
   // 供"详情→点演员→返回"定位回该详情; title/originalTitle/year 给「改标题 → 重搜磁力/重命名」用
   _curDetail = {kind, tmdbId, title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, inLibrary: !!d.inLibrary};
+  _detailPayload[String(tmdbId)] = d;   // 快照:「扫种子」等后续操作复用, 不再重复请求
   _ctxStack = [];                // 详情是叶子视图: 清掉上级视图上下文, 避免点演员时误用陈旧的搜索/演员上下文
   // 2026-09: 移除顶部 hero 背景横条 —— 标题/年份/评分/类型全部由正文 .dtitle 承载(桌面+移动统一, 不再占篇幅)
   _navTitle(d.title);
@@ -928,9 +930,10 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
   if(btn){ btn.disabled=true; btn.textContent='扫描中…'; }
   box.style.display='block';
   box.innerHTML='<div class="empty"><span class="spin"></span>扫种中…</div>';
-  // 取剧名(从已渲染详情; 避免再请求)
-  let d = null;
-  try{ d = await api(`/api/browse/detail/tv/${tmdbId}`); }catch{}
+  // 取剧名: 用刚打开的详情快照(旧写法注释说"从已渲染详情; 避免再请求", 代码却每次都
+  // 再打一遍 /api/browse/detail —— 详情页本来就刚拉过, 纯重复请求)
+  let d = _detailPayload[String(tmdbId)] || null;
+  if(!d){ try{ d = await api(`/api/browse/detail/tv/${tmdbId}`); }catch{} }
   const qs = _seasonSeedQueries(season, d);
   try{
     // 中文标题 + 英文原名 各扫一遍, 合并去重(整季包常按英文原名发布, 单查中文会漏)
@@ -976,11 +979,17 @@ $('#modalBg').addEventListener('click', e=>{ if(e.target===$('#modalBg')) closeM
 // (移动端上拉/桌面端滚到底都走这里; 防重入由 inst.loading 保证, 不会重复请求;
 //  必须走 _trendNextPage 递增页码 —— 直接调 loadTrendList 会停在第 1 页反复重渲)
 // 2026-09 二版: 电影/剧集是两个独立页签+独立实例, 守卫查"当前可见的热门实例"
+// rAF 节流: 一帧最多处理一次(惯性滚动会把 scroll 打到每帧多次)
+let _trScrollRaf = 0;
 window.addEventListener('scroll', ()=>{
-  const inst = _visibleTrend();
-  if(!inst) return;
-  if($('#modalBg').classList.contains('show')) return;   // 详情弹窗内滚动会冒泡到 window, 不能触发榜单加载
-  if(inst.loading || !inst.hasMore || !inst.list.length) return;
-  if(_trendNearBottom()) _trendNextPage(inst.kind);
+  if(_trScrollRaf) return;
+  _trScrollRaf = requestAnimationFrame(()=>{
+    _trScrollRaf = 0;
+    const inst = _visibleTrend();
+    if(!inst) return;
+    if($('#modalBg').classList.contains('show')) return;   // 详情弹窗内滚动会冒泡到 window, 不能触发榜单加载
+    if(inst.loading || !inst.hasMore || !inst.list.length) return;
+    if(_trendNearBottom()) _trendNextPage(inst.kind);
+  });
 }, {passive:true});
 

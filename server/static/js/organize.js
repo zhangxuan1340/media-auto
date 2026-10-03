@@ -138,6 +138,7 @@ async function _apply(body, btn, label){
 function _pollJob(jobId, btn, label){
   clearInterval(_applyTimer);
   _applyTimer = setInterval(async ()=>{
+    if(document.hidden) return;   // 后台标签页不轮询(整理在后端继续跑, 回前台下一拍接着刷)
     try{
       const s = await api(`/api/organize/apply/${jobId}`);
       if(s.status==='running'){

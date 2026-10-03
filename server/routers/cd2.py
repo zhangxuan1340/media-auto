@@ -145,7 +145,9 @@ def _new_job():
 async def api_push(item: PushItem, cfg: dict = Depends(get_config)):
     try:
         from clients.clouddrive import client as cd2
-        from scripts.push import build_task
+        # ⚠️ parse_info_hash 也要在这儿绑上 —— 原来只 import 了 build_task, 下面
+        # push.parse_info_hash 必然 NameError 被 except 吞掉, 推送标记**从来没写进去过**。
+        from scripts.push import build_task, parse_info_hash
         from lib import state
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"模块加载失败: {e}")
@@ -180,7 +182,7 @@ async def api_push(item: PushItem, cfg: dict = Depends(get_config)):
         from db import repositories as repo
         s = SessionLocal()
         try:
-            repo.mark_pushed(s, push.parse_info_hash(item.magnet), item.magnet, item.title, target="cd2")
+            repo.mark_pushed(s, parse_info_hash(item.magnet), item.magnet, item.title, target="cd2")
             s.commit()
         finally:
             s.close()

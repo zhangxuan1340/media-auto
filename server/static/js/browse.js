@@ -1,56 +1,98 @@
 // MediaAuto 前端 — browse.js
 // 浏览(2026-09 起并入「管理」页 → 「浏览」子页签): 本地 TMDB 缓存筛选
-// 全局作用域(classic script), 依赖 common.js 工具函数 + trending.js 的滚动容器探测,
-// 由 index.html 按序加载
+// 全局作用域(classic script), 依赖 common.js 工具函数 + trending.js 的滚动容器探测、
+// _trendOpts(下拉选项 HTML), 由 index.html 按序加载
 //
 // 2026-09 分页改造: 旧版只有「上一页」(第 1 页连下一页都没有), 且每次请求后端都要
 // 重拉整表 tmdb_media —— 改成 48 张/页 + 滚到底自动续(与热门榜同一套滚动口径)。
+//
+// 2026-10-02 高级筛选 + 状态回显修复:
+//   - 新增 年份范围(起/止)、剧集完结状态、分级 —— 全走本地 tmdb_media, 零网络;
+//   - ⚠️ BROWSE 是模块级状态, 切子页签回来会重建工具栏: 值必须**从 BROWSE 回填**,
+//     不能读 DOM 现值(重建出来的都是"全部")。旧代码读 DOM → 数据仍是筛过的、
+//     筛选框却显示"全部", 根本看不出筛没筛(2026-10-02 用户反馈的 bug)。
+//     同理, 选回"全部"时状态要同步清零(旧代码只在非空时写状态)。
 
-let BROWSE = {kind:'tv', q:'', genre:0, year:0, status:'all', page:1, size:48,
-              list:[], loading:false, hasMore:true, total:0, reqId:0};
+let BROWSE = {kind:'tv', q:'', genre:0, yearFrom:0, yearTo:0, cstatus:'', cert:'',
+              status:'all', page:1, size:48,
+              list:[], loading:false, hasMore:true, total:0, reqId:0, certs:[]};
+
+// 库内可用性(与后端 status 参数同口径)
+const BROWSE_STATUS = [['all','全部'],['inlibrary','库内'],['complete','完整'],['missing','未拥有']];
+// 剧集完结状态(本地 tmdb_media.status / in_production 列)
+const BROWSE_CSTATUS = [['ended','已完结'],['returning','在播'],['canceled','已取消']];
+
+// 换 kind: 类型/年份/分级/完结状态在另一个 kind 下不一定存在 → 一并清零再重建
+function _browseKind(v){
+  BROWSE.kind = v;
+  BROWSE.genre = 0; BROWSE.yearFrom = 0; BROWSE.yearTo = 0;
+  BROWSE.cstatus = ''; BROWSE.cert = ''; BROWSE.q = '';
+  loadBrowse();
+}
+// 一键清空所有筛选(片名/类型/年份范围/完结状态/分级/库内状态)
+function _browseReset(){
+  Object.assign(BROWSE, {q:'', genre:0, yearFrom:0, yearTo:0, cstatus:'', cert:'', status:'all'});
+  loadBrowse();
+}
 
 async function loadBrowse(){
   const el = $('#manageBody');
+  const k = BROWSE.kind;
   el.innerHTML = `<div class="toolbar">
-    <select onchange="BROWSE.kind=this.value;BROWSE.genre=0;BROWSE.year=0;loadBrowseFilters();loadBrowseData()">
-      <option value="tv">剧集</option>
-      <option value="movie">电影</option>
+    <select id="bKind" onchange="_browseKind(this.value)">
+      <option value="tv"${k==='tv'?' selected':''}>剧集</option>
+      <option value="movie"${k==='movie'?' selected':''}>电影</option>
     </select>
-    <select id="bStatus" onchange="BROWSE.status=this.value;loadBrowseData()">
-      <option value="all">全部</option>
-      <option value="inlibrary">库内</option>
-      <option value="complete">完整</option>
-      <option value="missing">未拥有</option>
-    </select>
+    <select id="bStatus" onchange="BROWSE.status=this.value;loadBrowseData()">${_trendOpts(BROWSE_STATUS, BROWSE.status, '')}</select>
     <select id="bGenre" onchange="BROWSE.genre=+this.value;loadBrowseData()"><option value="0">全部类型</option></select>
-    <select id="bYear" onchange="BROWSE.year=+this.value;loadBrowseData()"><option value="0">全部年份</option></select>
-    <input id="bQ" type="text" placeholder="搜片名(回车)" style="padding:7px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;width:180px"
+    <select id="bYearFrom" aria-label="起始年" onchange="BROWSE.yearFrom=+this.value;loadBrowseData()"><option value="0">起始年</option></select>
+    <select id="bYearTo" aria-label="截止年" onchange="BROWSE.yearTo=+this.value;loadBrowseData()"><option value="0">截止年</option></select>
+    ${k==='tv' ? `<select id="bCstatus" aria-label="完结状态" onchange="BROWSE.cstatus=this.value;loadBrowseData()">${_trendOpts(BROWSE_CSTATUS, BROWSE.cstatus, '全部状态')}</select>` : ''}
+    <select id="bCert" aria-label="分级" onchange="BROWSE.cert=this.value;loadBrowseData()"><option value="">全部分级</option></select>
+    <input id="bQ" type="text" placeholder="搜片名(回车)" value="${esc(BROWSE.q||'')}" style="padding:7px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;width:180px"
       onkeydown="if(event.key==='Enter'){BROWSE.q=this.value;loadBrowseData()}"/>
+    <button class="ghost" onclick="_browseReset()" title="清空片名/类型/年份/状态/分级">重置</button>
     <span id="bCount" style="color:var(--muted);font-size:12px"></span>
     <span style="flex:1"></span>
     <span style="color:var(--muted);font-size:12px">数据来自本地 TMDB 缓存 · 在「本地库」同步</span>
   </div><div id="browseBody"></div>`;
-  $('#bGenre').value = '0';
   loadBrowseData();
   loadBrowseFilters();
 }
 async function loadBrowseFilters(){
+  // ⚠️ 选项到位后一律把值从 BROWSE 回填(不读 DOM), 且"选项里没有"要同步清零
   try{
     const gs = await api(`/api/browse/genres?kind=${BROWSE.kind}`);
-    const sel = $('#bGenre'); if(!sel) return;
-    const cur = sel.value;
-    sel.innerHTML = '<option value="0">全部类型</option>' + gs.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
-    sel.value = cur;
+    const sel = $('#bGenre');
+    if(sel){
+      sel.innerHTML = '<option value="0">全部类型</option>' + gs.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('');
+      sel.value = String(BROWSE.genre || 0);
+      if(sel.value !== String(BROWSE.genre || 0)) BROWSE.genre = 0;
+      else BROWSE.genre = +sel.value;
+    }
   }catch{}
   // 年份选项来自本地缓存里实际存在的年份(选哪个精准过滤哪个, 不会选到库里没有的年份)
   try{
     const ys = await api(`/api/browse/years?kind=${BROWSE.kind}`);
-    const sel = $('#bYear'); if(!sel) return;
-    const cur = sel.value;
-    sel.innerHTML = '<option value="0">全部年份</option>' + (ys.years||[]).map(y=>`<option value="${y}">${y}</option>`).join('');
-    // 当前选中的年份不在新列表里(切了 剧集/电影) → 重置为全部
-    sel.value = [...sel.options].some(o=>o.value===cur) ? cur : '0';
-    if(sel.value !== cur){ BROWSE.year = +sel.value; }
+    const rows = (ys.years||[]).map(y=>[String(y), String(y)]);
+    [['bYearFrom','起始年'],['bYearTo','截止年']].forEach(([id, all])=>{
+      const sel = $('#'+id); if(!sel) return;
+      sel.innerHTML = `<option value="0">${all}</option>` + _trendOpts(rows, id==='bYearFrom'?BROWSE.yearFrom:BROWSE.yearTo, '');
+      if(id==='bYearFrom'){ sel.value = String(BROWSE.yearFrom||0); BROWSE.yearFrom = +sel.value || 0; }
+      else { sel.value = String(BROWSE.yearTo||0); BROWSE.yearTo = +sel.value || 0; }
+    });
+  }catch{}
+  // 分级: 本地 tmdb_media.certification 里出现过的值(剧集分级唯一可靠口径 ——
+  // TMDB 发现榜没有剧集分级参数)
+  try{
+    const cs = await api(`/api/browse/certs?kind=${BROWSE.kind}`);
+    BROWSE.certs = cs.certs || [];
+    const sel = $('#bCert');
+    if(sel && BROWSE.certs.length){
+      sel.innerHTML = _trendOpts(BROWSE.certs.map(c=>[c,c]), BROWSE.cert, '全部分级');
+      sel.value = BROWSE.cert || '';
+      if(sel.value !== (BROWSE.cert || '')) BROWSE.cert = '';
+    }
   }catch{}
 }
 
@@ -73,7 +115,16 @@ async function browseFetch(){
   const myReq = BROWSE.reqId;
   const el = $('#browseBody');
   try{
-    const d = await api(`/api/browse?kind=${BROWSE.kind}&q=${encodeURIComponent(BROWSE.q)}&genre=${BROWSE.genre}&year=${BROWSE.year}&status=${BROWSE.status}&page=${BROWSE.page}&size=${BROWSE.size}`);
+    const q = new URLSearchParams();
+    q.set('kind', BROWSE.kind); q.set('q', BROWSE.q || '');
+    q.set('genre', String(BROWSE.genre || 0));
+    if(BROWSE.yearFrom) q.set('year_from', String(BROWSE.yearFrom));
+    if(BROWSE.yearTo) q.set('year_to', String(BROWSE.yearTo));
+    if(BROWSE.cstatus) q.set('cstatus', BROWSE.cstatus);
+    if(BROWSE.cert) q.set('cert', BROWSE.cert);
+    q.set('status', BROWSE.status);
+    q.set('page', String(BROWSE.page)); q.set('size', String(BROWSE.size));
+    const d = await api(`/api/browse?${q.toString()}`);
     if(myReq !== BROWSE.reqId) return;                  // 已重置/切筛选 → 丢弃过期响应
     const items = d.items || [];
     BROWSE.total = d.total || 0;
@@ -127,10 +178,16 @@ function _browseMaybeMore(){
 }
 
 // 滚到底 → 自动续下一页(与热门榜共用滚动容器探测; 详情弹窗打开时不触发)
+// rAF 节流: 一帧最多处理一次(惯性滚动会把 scroll 打到每帧多次)
+let _bScrollRaf = 0;
 window.addEventListener('scroll', ()=>{
-  if(MANAGE_SUB !== 'browse') return;
-  const mb = document.getElementById('modalBg');
-  if(mb && mb.classList.contains('show')) return;
-  if(!BROWSE.list.length || !BROWSE.hasMore || BROWSE.loading) return;
-  if(typeof _trendNearBottom === 'function' && _trendNearBottom()) browseMore();
+  if(_bScrollRaf) return;
+  _bScrollRaf = requestAnimationFrame(()=>{
+    _bScrollRaf = 0;
+    if(MANAGE_SUB !== 'browse') return;
+    const mb = document.getElementById('modalBg');
+    if(mb && mb.classList.contains('show')) return;
+    if(!BROWSE.list.length || !BROWSE.hasMore || BROWSE.loading) return;
+    if(typeof _trendNearBottom === 'function' && _trendNearBottom()) browseMore();
+  });
 }, {passive:true});

@@ -228,6 +228,19 @@
   .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
   /* 折行点: 仅移动端用(trend 三个下拉强制独占一行), 桌面单行布局须隐藏 */
   .trend-toolbar .tb-break{display:none}
+  /* 高级筛选行(日期范围 / 状态 / 分级 / 平台 / 平台地区 / 重置): 独占整行、**始终展开**。
+     刻意不做折叠面板 —— 折叠会重演"数据是筛过的, 却看不见筛了什么"
+     (2026-10-02 用户反馈)。order:4 排在 日/周榜·类型·国家 那排之后(移动端那些是 order:3)。 */
+  .trend-toolbar .trend-filters{order:4;flex:0 0 100%;display:flex;flex-wrap:wrap;
+    align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+  .trend-toolbar .trend-filters .tfdates{display:flex;align-items:center;gap:6px;flex:1 1 260px;min-width:0}
+  .trend-toolbar .trend-filters .tfdates input{flex:1 1 0;min-width:0;padding:8px 10px;font-size:13px;
+    border:1px solid var(--line);border-radius:var(--r-s);background:var(--glass);color:var(--text)}
+  .trend-toolbar .trend-filters .tfsep{color:var(--muted);font-size:13px}
+  .trend-toolbar .trend-filters select{flex:1 1 130px;min-width:0;font-size:13px;padding:8px 10px}
+  .trend-toolbar .trend-filters select:disabled{opacity:.55;cursor:default}
+  .trend-toolbar .trend-filters .tfreset{flex:0 0 auto;padding:8px 14px;font-size:12px}
+  .trend-toolbar .trend-filters .tfreset.on{border-color:var(--brand);color:var(--brand)}
   /* toolbar 内的默认按钮 = 主操作(蓝渐变), ghost 仍走玻璃描边 */
   .toolbar button{background:linear-gradient(135deg,#0a84ff,#0060df);color:#fff;border:0;padding:10px 18px;border-radius:var(--r-s);font-size:13px;font-weight:600;box-shadow:0 4px 14px rgba(10,132,255,.28);transition:.2s var(--ease)}
   .toolbar button:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(10,132,255,.4);color:#fff}
@@ -862,6 +875,13 @@
     .trend-toolbar .trend-info{order:1;margin-left:auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
     .trend-toolbar .trend-refresh{order:2;flex:none;padding:9px 12px;font-size:13px}
     .trend-toolbar .tlabel{order:0}
+    /* 高级筛选行(移动端): 日期范围独占一行, 下拉三三排, 重置殿后。
+       ⚠️ 必须显式给 .trend-filters 里的控件写 order —— 外层 `.trend-toolbar select`
+       的 order:3 会波及这里的 select, 而 .tfreset 默认 order:0 会被排到下拉前面。 */
+    .trend-toolbar .trend-filters .tfdates{flex:1 1 100%}
+    .trend-toolbar .trend-filters .tfdates input{font-size:16px;padding:9px 8px}
+    .trend-toolbar .trend-filters select{order:3;flex:1 1 30%;min-width:0;font-size:16px;padding:9px 8px}
+    .trend-toolbar .trend-filters .tfreset{order:4;flex:1 1 auto;justify-content:center;padding:9px 12px;font-size:13px}
     .setting{padding:12px 13px}
     .setting .st-name{font-size:13px}
     .setting .st-desc{font-size:12px}

@@ -10,6 +10,7 @@
 未配置 qbit 时接口优雅返回 {ok:false, configured:false, msg: ...}, 前端据此提示去配置。
 """
 import re
+import sys
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool

@@ -32,10 +32,11 @@ from clients.tmdb import client as tmdb
 from lib import titles
 from db.database import SessionLocal, init_db
 from db import repositories as repo
-from db.models import JellyfinItem
+from db.models import JellyfinItem, TmdbMedia
 
 CONCURRENCY = 5          # 并发拉取(TMDB 限速 ~10 req/s, 5 并发安全)
 REFRESH_DAYS = 30        # 超过多少天没刷的条目, 下次增量时重刷
+COMMIT_BATCH = 50        # 攒 50 条落一次盘(旧: 每条一次 commit+fsync)
 
 
 def _seed_ids(session, limit=None):
@@ -69,6 +70,32 @@ def _needs_refresh(session, kind, tmdb_id, full, refresh_days):
     if not row.synced_at:
         return True
     return (datetime.now() - row.synced_at) > timedelta(days=refresh_days)
+
+
+def _stale_keys(session, seeds, full, refresh_days):
+    """从一批种子里挑出要刷新的 (kind, tmdb_id) —— 一次查询代替逐条 _needs_refresh。
+
+    旧写法: 4444 个种子各发一条 `get_tmdb_media_by_id`(4444 次往返)。批量只需
+    一次 `IN` 查询(~0.4ms), 判定口径与 _needs_refresh 完全一致:
+    本地没有 / 没有 synced_at / 超过 refresh_days 都算"该刷"。
+    """
+    if full:
+        return list(seeds)
+    ids = sorted({int(t) for _k, t in seeds})
+    if not ids:
+        return []
+    # 只取三列: kind + tmdb_id + synced_at(全表 ORM 会把 overview/海报/cast_json 都拖出来)
+    rows = (session.query(TmdbMedia.kind, TmdbMedia.tmdb_id, TmdbMedia.synced_at)
+            .filter(TmdbMedia.tmdb_id.in_(ids))
+            .all())
+    fresh = {(k, t): sa for k, t, sa in rows}
+    now = datetime.now()
+    out = []
+    for key in seeds:
+        sa = fresh.get(key)
+        if sa is None or (now - sa) > timedelta(days=refresh_days):
+            out.append(key)
+    return out
 
 
 def _image_urls_from_row(row: dict):
@@ -153,10 +180,15 @@ async def _fetch_one(cfg, kind, tmdb_id):
         return None
     seasons = []
     if kind == "tv":
-        try:
-            seasons = await tmdb.all_seasons(cfg, tmdb_id) or []
-        except Exception:  # noqa: BLE001
-            pass
+        # detail() 本身就带 seasons(同结构, 见 clients/tmdb.detail), 旧写法再调一次
+        # all_seasons = 把同一个 /3/tv/{id} 整个重拉一遍: 全量同步时剧集侧白烧一倍
+        # TMDB 配额和一次往返。只有 detail 没给到(异常/空)才退回单拉。
+        seasons = meta.get("seasons") or []
+        if not seasons:
+            try:
+                seasons = await tmdb.all_seasons(cfg, tmdb_id) or []
+            except Exception:  # noqa: BLE001
+                seasons = []
     # 英文标题(供磁力双查): 原语言本就是英文 → 直接复用 title(省一次 API);
     # 否则(如中文片)单独拉 ?language=en 的标题, 失败不阻断(留空)。
     if (meta.get("original_language") or "") == "en":
@@ -249,8 +281,7 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
     stats = {"ok": 0, "fail": 0, "n": 0}
     try:
         seeds = _seed_ids(session, limit=limit or None)
-        todo = [(k, t) for k, t in seeds
-                if _needs_refresh(session, k, t, full, refresh_days)]
+        todo = _stale_keys(session, seeds, full, refresh_days)   # 一次 IN 查询, 不逐条查
         total = len(todo)
         print(f"[tmdb] 种子 {len(seeds)} 个, 待同步 {total} 个"
               f"({'全量' if full else '增量'}, 并发 {CONCURRENCY})")
@@ -259,8 +290,10 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
 
         sem = asyncio.Semaphore(CONCURRENCY)
         write_lock = asyncio.Lock()  # 写库串行: session 单线程访问
+        dirty = 0                    # 已写但尚未 commit 的条数(攒批, 见 COMMIT_BATCH)
 
         async def _worker(kind, tid):
+            nonlocal dirty
             async with sem:
                 stats["n"] += 1
                 item = await _fetch_one(cfg, kind, tid)
@@ -280,8 +313,13 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
                             repo.upsert_tmdb_media(session, item)
                             if item.get("seasons"):
                                 repo.upsert_tmdb_seasons(session, item["tmdb_id"], item["seasons"])
-                            session.commit()
                             stats["ok"] += 1
+                            dirty += 1
+                            if dirty >= COMMIT_BATCH:
+                                # 攒 50 条一个事务(旧: 每条一个 commit —— 4444 条就是
+                                # 4444 次事务开销; WAL 下单次不贵, 但纯属白开销)
+                                session.commit()
+                                dirty = 0
                             # 图片缓存联动: 旧图 URL 不再使用(换图) → 删旧缓存,
                             # 下次访问自动拉新图; 未变的 URL 不动(继续命中省带宽)
                             stale = old_imgs - new_imgs
@@ -293,6 +331,11 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
                                 except Exception:  # noqa: BLE001
                                     pass
                         except Exception:  # noqa: BLE001
+                            # 这条写了一半 → 回滚; 本批还没落盘的成功条目跟着一起回滚,
+                            # 计数必须同步回退, 否则"成功 N"会比库里实际多。
+                            if dirty:
+                                stats["ok"] -= dirty
+                                dirty = 0
                             session.rollback()
                             stats["fail"] += 1
                     if stats["n"] % 100 == 0 or stats["n"] >= total:
@@ -301,6 +344,9 @@ async def run(scope: str = "all", full: bool = False, limit: int = 0,
                               f"用时 {time.time()-t0:.0f}s", flush=True)
 
         await asyncio.gather(*[_worker(k, t) for k, t in todo])
+        if dirty:                       # 收尾: 把最后一批落盘
+            session.commit()
+            dirty = 0
         print(f"[tmdb] 完成: 成功 {stats['ok']} / 失败 {stats['fail']} "
               f"用时 {time.time()-t0:.0f}s")
         return stats["ok"]

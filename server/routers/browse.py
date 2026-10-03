@@ -12,6 +12,7 @@
 """
 import asyncio
 import json
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -114,17 +115,29 @@ def _jf_detail_url(cfg, item_id):
     return f"{base}/web/index.html#/details?id={item_id}"
 
 
-def _series_item_to_tmdb(session):
-    """{series_item_id: tmdb_id_str}。jf_episode.series_id 是 Series 项的 item_id。"""
-    return repo.get_series_tmdb_map(session)
+def _series_item_to_tmdb(session, tmdb_id=None):
+    """{series_item_id: tmdb_id_str}。jf_episode.series_id 是 Series 项的 item_id。
+
+    tmdb_id 给了 → 只查这一部剧(详情/单季页用)。
+    """
+    return repo.get_series_tmdb_map(session, tmdb_id)
 
 
-def _jf_episode_map(session):
-    """{series_item_id: set((season, episode))} 本地实有集。"""
+def _jf_episode_map(session, series_ids=None):
+    """{series_item_id: set((season, episode))} 本地实有集。
+
+    series_ids 给了 → 只查这几部剧(全表 77,700 行 → 按 series_id 索引查是 0.1ms 级,
+    实测全表 71ms; 详情/单季页传本剧的 series id, 缺失页全量构建才传 None)。
+    """
     from db.models import JfEpisode
+    q = session.query(JfEpisode.series_id, JfEpisode.season, JfEpisode.episode)
+    if series_ids is not None:
+        ids = [x for x in series_ids if x]
+        if not ids:
+            return {}
+        q = q.filter(JfEpisode.series_id.in_(ids))
     out = {}
-    for sid, s, e in session.query(
-            JfEpisode.series_id, JfEpisode.season, JfEpisode.episode).all():
+    for sid, s, e in q.all():
         out.setdefault(sid, set()).add((s, e))
     return out
 
@@ -366,12 +379,19 @@ async def _trending_cached(cfg, kind, window, page, size):
     return deduped, has_more
 
 
-async def _discover_trending_cached(cfg, kind, window, genre, country, page, size):
-    """选了 国家/类型 筛选时 trending 接口不支持过滤 → 走 discover(热度排序)。
+async def _discover_trending_cached(cfg, kind, window, genre, country, page, size,
+                                    filters=None):
+    """选了 国家/类型/日期/状态/分级/平台 筛选时 trending 接口不支持过滤 →
+    走 discover(热度排序)。filters = 高级筛选 dict(见 clients.tmdb.discover_page)。
     同样 10 分钟缓存 + 跨页去重(筛选条件进缓存/去重键); discover 的 total_pages
     是真实值, 到底判断用它(不再靠"满 20 条"猜)。返回 (deduped, has_more)。"""
     from clients.tmdb import client as tmdb
-    fkey = (kind, window, genre or 0, country or "")
+    f = dict(filters or {})
+    # ⚠️ 所有筛选条件都必须进 fkey: 少一个就会"换筛选吃到上一次的缓存页"
+    fkey = (kind, window, genre or 0, country or "",
+            f.get("date_from") or "", f.get("date_to") or "",
+            str(f.get("status") or ""), f.get("cert") or "",
+            int(f.get("provider") or 0), (f.get("watch_region") or "").upper())
     ckey = fkey + (page,)
     now = time.time()
     hit = _trending_cache.get(ckey)
@@ -379,7 +399,8 @@ async def _discover_trending_cached(cfg, kind, window, genre, country, page, siz
         raw, deduped, total_pages = hit[1], hit[2], hit[3]
     else:
         raw, total_pages = await tmdb.discover_page(
-            cfg, kind, page=page, genre_id=genre or None, country=country or None)
+            cfg, kind, page=page, genre_id=genre or None, country=country or None,
+            filters=f)
         if page == 1:
             _trend_seen.pop(fkey, None)
         seen = _trend_seen.setdefault(fkey, set())
@@ -407,14 +428,110 @@ async def trending_countries():
     return tmdb.countries()
 
 
+# ---- 高级筛选(日期范围 / 剧集状态 / 分级 / 流媒体平台) ----------------------
+# trending 接口不支持这些过滤 → 任一非空就改走 discover(热度排序)。
+# 校验集中在这里: 格式/取值不对一律 400, 绝不让 TMDB 静默忽略 ——
+# 静默忽略 = "筛了等于没筛", 用户根本看不出来(正是这次要修的那类问题)。
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# TMDB discover/tv with_status: 0 在播 / 1 计划 / 2 制作中 / 3 完结 / 4 取消 / 5 试播
+_TV_STATUS = {"0", "1", "2", "3", "4", "5"}
+_CERT_RE = re.compile(r"^[A-Z]{2}:[A-Za-z0-9\-\s]{1,16}$")
+
+
+def _trend_filters(kind, date_from, date_to, status, cert, provider, watch_region):
+    """校验 + 归一高级筛选 → dict(空值 = 不筛)。非法输入抛 HTTPException(400)。"""
+    f = {"date_from": "", "date_to": "", "status": "", "cert": "",
+         "provider": 0, "watch_region": ""}
+    date_from = (date_from or "").strip()
+    date_to = (date_to or "").strip()
+    for label, v in (("date_from", date_from), ("date_to", date_to)):
+        if v and not _DATE_RE.match(v):
+            raise HTTPException(400, f"{label} 需为 YYYY-MM-DD 形式(如 2024-01-01)")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "日期范围起止颠倒(起 ≤ 止)")
+    f["date_from"], f["date_to"] = date_from, date_to
+
+    status = (status or "").strip()
+    if status:
+        if kind != "tv":
+            raise HTTPException(400, "状态筛选仅剧集可用(电影没有完结状态)")
+        if status not in _TV_STATUS:
+            raise HTTPException(400, "status 需为 0..5(0在播/1计划/2制作中/3完结/4取消/5试播)")
+        f["status"] = status
+
+    cert = (cert or "").strip()
+    if cert:
+        if kind != "movie":
+            raise HTTPException(400, "分级筛选仅电影可用(TMDB discover/tv 无分级参数;"
+                                     "剧集分级请在「管理 → 浏览」按本地缓存筛)")
+        if not _CERT_RE.match(cert):
+            raise HTTPException(400, "cert 需为 国家:分级 形式(如 US:PG-13)")
+        f["cert"] = cert
+
+    provider = int(provider or 0)
+    if provider < 0:
+        raise HTTPException(400, "provider 需为正整数(流媒体平台 id)")
+    if provider:
+        region = (watch_region or "").strip().upper()
+        if region and not (len(region) == 2 and region.isalpha()):
+            raise HTTPException(400, "watch_region 需为 2 字母国家代码(如 CN/US)")
+        # TMDB 要求 with_watch_providers 与 watch_region 成对: 没给地区按 CN 兜底
+        f["provider"], f["watch_region"] = provider, region or "CN"
+    return f
+
+
+_FILTERS_TTL = 3600
+_FILTERS_CACHE = {}   # {(kind, region): (ts, payload)} —— 平台/分级表基本不变
+
+
+@router.get("/trending/filters")
+async def trending_filters(kind: str = Query("movie"), region: str = Query("CN"),
+                           cfg: dict = Depends(get_config)):
+    """榜单高级筛选下拉一次取齐: 平台地区(内置表) + 该地区的流媒体平台 + 分级。
+
+    分级只给电影 —— TMDB discover/tv 没有 certification 参数, 剧集分级在
+    「管理 → 浏览」按本地 tmdb_media.certification 筛(那边数据是齐的)。
+    平台/分级按 (kind, region) 进程内缓存 1 小时; 拉不到平台(TMDB 限流/无 key)
+    时**不缓存**, 免得一次失败把下拉饿 1 小时。
+    """
+    if kind not in ("movie", "tv"):
+        raise HTTPException(400, "kind 仅支持 movie / tv")
+    region = (region or "CN").strip().upper()
+    if not (len(region) == 2 and region.isalpha()):
+        raise HTTPException(400, "region 需为 2 字母国家代码(如 CN/US)")
+    key = (kind, region)
+    now = time.time()
+    hit = _FILTERS_CACHE.get(key)
+    if hit and now - hit[0] < _FILTERS_TTL:
+        return hit[1]
+    from clients.tmdb import client as tmdb
+    has_key = bool((cfg.get("tmdb", {}) or {}).get("api_key"))
+    providers = await tmdb.watch_providers(cfg, kind, region) if has_key else []
+    certs = await tmdb.certifications(cfg, kind) if (has_key and kind == "movie") else []
+    payload = {"regions": tmdb.watch_regions(), "providers": providers,
+               "certifications": certs}
+    if providers:
+        _FILTERS_CACHE[key] = (now, payload)
+        if len(_FILTERS_CACHE) > 50:
+            _FILTERS_CACHE.pop(min(_FILTERS_CACHE, key=lambda k: _FILTERS_CACHE[k][0]), None)
+    return payload
+
+
 @router.get("/trending/{kind}")
 async def trending(kind: str, window: str = Query("week"),
                    page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=50),
                    genre: int = Query(0, ge=0),
                    country: str = Query("", max_length=2),
+                   date_from: str = Query("", max_length=10),
+                   date_to: str = Query("", max_length=10),
+                   status: str = Query("", max_length=2),
+                   cert: str = Query("", max_length=20),
+                   provider: int = Query(0, ge=0),
+                   watch_region: str = Query("", max_length=2),
                    cfg: dict = Depends(get_config)):
     """TMDB 热门榜(实时)。kind=movie|tv, window=day|week(不筛选时)。
-    genre(类型 id)/ country(2 字母国家码, 如 CN/JP) 任一非空 → 改用
+    genre(类型)/ country(产地国)/ date_from~date_to(上映日期范围)/ status(剧集状态)/
+    cert(分级, 仅电影)/ provider+watch_region(流媒体平台) 任一生效 → 改用
     discover 按热度排序的筛选榜(trending 接口不支持过滤)。
     不依赖本地缓存/同步 —— 手机上看热门影视用这个; 数据 10 分钟缓存一次。"""
     if kind not in ("movie", "tv"):
@@ -424,11 +541,12 @@ async def trending(kind: str, window: str = Query("week"),
     country = (country or "").strip().upper()
     if country and not (len(country) == 2 and country.isalpha()):
         raise HTTPException(400, "country 需为 2 字母国家代码(如 CN/JP/US)")
+    f = _trend_filters(kind, date_from, date_to, status, cert, provider, watch_region)
     if not (cfg.get("tmdb", {}) or {}).get("api_key"):
         raise HTTPException(503, "未配置 tmdb.api_key, 无法拉取热门榜")
-    if genre or country:
+    if genre or country or any(f.values()):
         cards, has_more = await _discover_trending_cached(
-            cfg, kind, window, genre, country, page, size)
+            cfg, kind, window, genre, country, page, size, filters=f)
     else:
         cards, has_more = await _trending_cached(cfg, kind, window, page, size)
     # 标记哪些已在库(与浏览页一致的"库内/缺失"感), 不阻塞: 库没同步就是空
@@ -485,10 +603,30 @@ def _tmdb_media_rows(session, kind):
     return rows
 
 
+# 剧集完结状态筛选: 值 → (status, in_production) 判定。数据齐不齐只看本地缓存 ——
+# 没缓存的作品在选了该筛选时一律排除(宁可少给, 不能拿"未知"当"符合")。
+_TV_CSTATUS = {
+    "ended": lambda st, inp: st == "Ended",
+    "returning": lambda st, inp: st == "Returning Series" or bool(inp),
+    "canceled": lambda st, inp: st == "Canceled",
+}
+
+
+def _year_int(v):
+    """年份列是字符串(可能是 "2020" / "2020-05-01" / "")→ 取前 4 位整数, 取不到 = 0。"""
+    try:
+        return int(str(v or "")[:4])
+    except ValueError:
+        return 0
+
+
 @router.get("/browse")
 async def browse(kind: str = Query("movie"), q: str = Query(""),
-                 genre: int = Query(0), year: int = Query(0),
-                 status: str = Query("all"),  # all | missing | inlibrary | complete
+                 genre: int = Query(0),
+                 year_from: int = Query(0), year_to: int = Query(0),
+                 cstatus: str = Query(""),   # 剧集完结状态: ended|returning|in_production|canceled
+                 cert: str = Query(""),      # 分级 "US:TV-14"(本地 tmdb_media.certification)
+                 status: str = Query("all"),  # all | missing | inlibrary | complete(库内可用性)
                  page: int = Query(1, ge=1), size: int = Query(24, ge=1, le=96),
                  cfg: dict = Depends(get_config)):
     """浏览/筛选(作品清单来自可用性表 media, 展示元数据按需)。
@@ -498,7 +636,19 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
         Jellyfin 里所有在库作品 —— 不再受"元数据缓存没同步到"的影响)。
       - 展示元数据(标题/海报/年份): tmdb_media 快速路径 → TMDB 实时(进程内缓存)。
         库里作品若在 tmdb_media 没缓存, 现从 TMDB 拉(只拉当前页), 绝不漏掉在库作品。
+
+    高级筛选(全部走本地 tmdb_media, 零网络):
+      year_from~year_to  年份范围(两端都给 = 闭区间; 没年份的作品进不了范围)
+      cstatus            仅剧集: 完结状态(status/in_production 列)
+      cert               分级: 与本地 certification 同格式, 按 "/" 拆开精确比对
     """
+    if year_from and year_to and year_from > year_to:
+        raise HTTPException(400, "年份范围起止颠倒(起 ≤ 止)")
+    if cstatus:
+        if kind != "tv":
+            raise HTTPException(400, "完结状态筛选仅剧集可用")
+        if cstatus not in ("ended", "returning", "canceled"):
+            raise HTTPException(400, "cstatus 仅支持 ended|returning|canceled")
     def _db_q():
         s = SessionLocal()
         try:
@@ -510,91 +660,101 @@ async def browse(kind: str = Query("movie"), q: str = Query(""),
             mt = MediaType.MOVIE if kind == "movie" else MediaType.TV
             # 权威在库清单: media 表 —— 全量覆盖 Jellyfin 里所有在库作品,
             # 不再受"元数据缓存没同步到"影响。title/year 扫描时从 Jellyfin 带入, 0 API。
-            media_rows = {str(r.tmdb_id): (r.title or "", r.year or "")
-                          for r in s.query(Media.tmdb_id, Media.title, Media.year)
-                          .filter(Media.media_type == mt)}
-            # 可用性状态码(4=不完整 / 5=完整 / 8=库内·完整性未知), 供前端顶层徽章区分
-            status_map = {str(r.tmdb_id): r.status
-                          for r in s.query(Media.tmdb_id, Media.status)
-                          .filter(Media.media_type == mt)}
-            # 展示元数据快速路径: 老 tmdb_media 缓存(含库外作品, 带海报/类型/演员)
-            cached = {str(r.tmdb_id): r for r in
-                      repo.get_tmdb_media(s, kind=kind, q="", limit=100000)}
+            # ⚠️ title/year/status 一次取齐(旧写法两遍全表扫, 白付一倍)。
+            media_rows, status_map = {}, {}
+            for _tid, _t, _y, _st in s.query(Media.tmdb_id, Media.title, Media.year,
+                                             Media.status).filter(Media.media_type == mt):
+                media_rows[str(_tid)] = (_t or "", _y or "")
+                status_map[str(_tid)] = _st
+            # 展示元数据快速路径: 走 stamp 缓存(count + max(synced_at) 命中就不再扫表)。
+            # 旧写法每次请求全表 ORM 物化 movie 4157 行 ≈ 45ms —— 浏览页最大的一块 DB 开销。
+            cached = {str(r.tmdb_id): r for r in _tmdb_media_rows(s, kind)}
+
+            # ── 纯 CPU 段: 过滤 + 排序 + 切页(6k 条 ≈ 60ms)一并放进线程池 ──
+            # 放在事件循环里会让同屏的其它请求(详情/磁力/轮询)跟着卡。
+            def _meta_of(tid):
+                """一个作品的展示 meta。cached 行优先(完整); 否则用 media 表 title/year 兜底。
+                _cached=True 表示有完整元数据(可参与 genre 筛选 + 直接出卡片)。"""
+                r = cached.get(tid)
+                if r is not None:
+                    return {"title": r.title or "", "originalTitle": r.original_title or "",
+                            "year": r.year or "", "overview": (r.overview or "")[:240],
+                            "poster": r.poster or "", "vote": r.vote or 0.0,
+                            "genreNames": [g for g in (r.genre_names or "").split(",") if g],
+                            "inProduction": bool(r.in_production), "status": r.status or "",
+                            "_cached": True}
+                t, y = media_rows.get(tid, ("", ""))
+                return {"title": t, "originalTitle": t, "year": y, "overview": "",
+                        "poster": "", "vote": 0.0, "genreNames": [],
+                        "inProduction": False, "status": "", "_cached": False}
+
+            all_ids = set(media_rows) | set(cached)
+            recs = []
+            for tid in all_ids:
+                if tid in block_ids:
+                    continue
+                in_lib = tid in in_lib_ids
+                # complete 口径: media 表空(回退)时"在库即完整"; 否则按季 rollup
+                if in_lib and complete_ids is not None:
+                    complete = tid in complete_ids
+                else:
+                    complete = in_lib if complete_ids is None else False
+                meta = _meta_of(tid)
+                # 筛选: q/年份范围 对 media 表回填的 title/year 生效(全在库可达);
+                # genre / 完结状态 / 分级 需要元数据缓存(cached), 没缓存的作品选了就排除
+                if q:
+                    ql = q.lower()
+                    if ql not in ((meta["title"] + " " + meta["originalTitle"]).lower()):
+                        continue
+                y = _year_int(meta["year"])
+                if year_from and (not y or y < year_from):
+                    continue
+                if year_to and (not y or y > year_to):
+                    continue
+                if cstatus:
+                    if not meta["_cached"] or \
+                            not _TV_CSTATUS[cstatus](cached[tid].status or "",
+                                                     bool(cached[tid].in_production)):
+                        continue
+                if cert:
+                    have = {p.strip() for p in (cached[tid].certification or "").split("/")} \
+                        if meta["_cached"] else set()
+                    if cert not in have:
+                        continue
+                if genre:
+                    if not meta["_cached"] or \
+                            str(genre) not in (cached[tid].genres or "").split(","):
+                        continue
+                # "隐藏已完整作品"只作用于「全部」: 显式选了 库内/完整 却因为这个开关被清空
+                # (旧行为)等于筛选器失效, 选了也没东西可看。
+                if hide_complete and status == "all" and complete and in_lib:
+                    continue
+                if status == "missing" and in_lib:
+                    continue
+                if status == "inlibrary" and not in_lib:
+                    continue
+                if status == "complete" and not complete:
+                    continue
+                recs.append((tid, in_lib, complete, meta))
+
+            # 排序: 有标题的按标题字母序, 无标题的殿后(按 tmdb_id 稳定)
+            recs.sort(key=lambda x: ((not x[3]["title"]), x[3]["title"].lower(), x[0]))
+            total = len(recs)
+            start = (page - 1) * size
+            page_rec = recs[start:start + size]
             return {
                 "hide_complete": hide_complete, "block_ids": block_ids,
                 "in_lib_ids": in_lib_ids, "complete_ids": complete_ids,
                 "media_rows": media_rows, "cached": cached,
-                "status_map": status_map,
+                "status_map": status_map, "total": total, "page_rec": page_rec,
             }
         finally:
             s.close()
 
     ctx = await run_in_threadpool(_db_q)
-    hide_complete = ctx["hide_complete"]; block_ids = ctx["block_ids"]
-    in_lib_ids = ctx["in_lib_ids"]
-    complete_ids = ctx["complete_ids"]
-    status_map = ctx["status_map"]
-    if complete_ids is not None:
-        complete_ids = {str(x) for x in complete_ids}
-    media_rows = ctx["media_rows"]   # {tid_str: (title, year)}
-    cached = ctx["cached"]           # {tid_str: TmdbMedia}
-    all_ids = set(media_rows) | set(cached)
-
-    def _meta_of(tid):
-        """一个作品的展示 meta。cached 行优先(完整); 否则用 media 表 title/year 兜底。
-        _cached=True 表示有完整元数据(可参与 genre 筛选 + 直接出卡片)。"""
-        r = cached.get(tid)
-        if r is not None:
-            return {"title": r.title or "", "originalTitle": r.original_title or "",
-                    "year": r.year or "", "overview": (r.overview or "")[:240],
-                    "poster": r.poster or "", "vote": r.vote or 0.0,
-                    "genreNames": [g for g in (r.genre_names or "").split(",") if g],
-                    "inProduction": bool(r.in_production), "status": r.status or "",
-                    "_cached": True}
-        t, y = media_rows.get(tid, ("", ""))
-        return {"title": t, "originalTitle": t, "year": y, "overview": "",
-                "poster": "", "vote": 0.0, "genreNames": [],
-                "inProduction": False, "status": "", "_cached": False}
-
-    recs = []
-    for tid in all_ids:
-        if tid in block_ids:
-            continue
-        in_lib = tid in in_lib_ids
-        # complete 口径: media 表空(回退)时"在库即完整"; 否则按季 rollup
-        if in_lib and complete_ids is not None:
-            complete = tid in complete_ids
-        else:
-            complete = in_lib if complete_ids is None else False
-        meta = _meta_of(tid)
-        # 筛选: q/year 对 media 表回填的 title/year 生效(全在库可达); genre 仅 cached 可判
-        if q:
-            ql = q.lower()
-            if ql not in ((meta["title"] + " " + meta["originalTitle"]).lower()):
-                continue
-        if year and str(year) not in (meta["year"] or ""):
-            continue
-        if genre:
-            if not meta["_cached"] or \
-                    str(genre) not in (cached[tid].genres or "").split(","):
-                continue
-        # "隐藏已完整作品"只作用于「全部」: 显式选了 库内/完整 却因为这个开关被清空
-        # (旧行为)等于筛选器失效, 选了也没东西可看。
-        if hide_complete and status == "all" and complete and in_lib:
-            continue
-        if status == "missing" and in_lib:
-            continue
-        if status == "inlibrary" and not in_lib:
-            continue
-        if status == "complete" and not complete:
-            continue
-        recs.append((tid, in_lib, complete, meta))
-
-    # 排序: 有标题的按标题字母序, 无标题的殿后(按 tmdb_id 稳定)
-    recs.sort(key=lambda x: ((not x[3]["title"]), x[3]["title"].lower(), x[0]))
-    total = len(recs)
-    start = (page - 1) * size
-    page_rec = recs[start:start + size]
+    status_map = ctx["status_map"]   # 可用性状态码(4/5/8), 供前端顶层徽章区分
+    total = ctx["total"]
+    page_rec = ctx["page_rec"]       # 已过滤 + 已排序 + 已切页(线程池里算好的当前页)
 
     # 展示元数据: cached 命中直接用; 未命中的对**当前页**批量现拉 TMDB(进程内 24h 缓存)
     from server import mediacache
@@ -721,8 +881,8 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
             d["missingCount"] = None      # None = 未知(分集未同步), 前端据此显示提示而非"缺N集"
             d["extraCount"] = 0
         else:
-            s_map = _series_item_to_tmdb(s)
-            ep_map = _jf_episode_map(s)
+            s_map = _series_item_to_tmdb(s, tmdb_id)
+            ep_map = _jf_episode_map(s, list(s_map))
             mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
                 tmdb_id, seasons, s_map, ep_map, check_s0)
             d["episodesSynced"] = True
@@ -778,8 +938,8 @@ async def browse_season_episodes(tmdb_id: int, season_number: int,
         try:
             if not _jf_episodes_ready(s):
                 return None   # jf 未同步 → 无法判定实有, have 全 false
-            s_map = _series_item_to_tmdb(s)
-            ep_map = _jf_episode_map(s)
+            s_map = _series_item_to_tmdb(s, tmdb_id)
+            ep_map = _jf_episode_map(s, list(s_map))
             have = set()
             for iid, tid in s_map.items():
                 if str(tid) == str(tmdb_id):
@@ -918,8 +1078,8 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
             # 回填后的真实集号(现拉的季对象本身不带 episode_numbers)
             persisted = {x.season_number: (x.episode_numbers or "")
                          for x in repo.get_tmdb_seasons(s, tmdb_id)}
-            s_map = _series_item_to_tmdb(s)
-            ep_map = _jf_episode_map(s)
+            s_map = _series_item_to_tmdb(s, tmdb_id)
+            ep_map = _jf_episode_map(s, list(s_map))
             check_s0 = repo.get_setting(s, "check_missing_s0", "false") == "true"
 
             class _TS:  # _season_expected_numbers 只读这些属性
@@ -1102,6 +1262,48 @@ async def browse_years(kind: str = Query("movie")):
     return {"years": sorted(set(years), reverse=True)}
 
 
+# 常见 US 分级的显示顺序(宽松→严格), 让下拉是 G→PG→… 而不是字符串序;
+# 不在这个表里的(各国本地分级)按字符串序垫底 —— 只求稳定, 不求完美。
+_US_CERT_ORDER = ["G", "PG", "PG-13", "R", "NC-17", "NR", "TV-Y", "TV-Y7",
+                  "TV-G", "TV-PG", "TV-14", "TV-MA"]
+_CERT_COUNTRIES = ["US", "HK", "TW", "CN", "GB", "JP", "KR", "DE", "FR",
+                   "ES", "IT", "AU", "CA", "IN", "BR"]
+
+
+@router.get("/browse/certs")
+async def browse_certs(kind: str = Query("movie")):
+    """筛选下拉: 本地 TMDB 缓存里出现过的分级(该 kind), 形如 ["US:TV-14", …]。
+
+    零网络 —— 直接 distinct tmdb_media.certification; 一条可能含多国
+    ("US:R / HK:III")→ 按 "/" 拆开去重。排序: 常用国家在前, 同国家里 US 走
+    宽松→严格固定序(其余按字符串序), 截前 60 条。剧集分级就靠这个筛 ——
+    TMDB discover/tv 没有分级参数, 本地缓存是唯一可靠的口径。"""
+    from db.models import TmdbMedia
+
+    def _q():
+        s = SessionLocal()
+        try:
+            rows = s.query(TmdbMedia.certification).filter(
+                TmdbMedia.kind == kind, TmdbMedia.certification != "").distinct().all()
+            return [r[0] for r in rows]
+        finally:
+            s.close()
+
+    seen, out = set(), []
+    for raw in await run_in_threadpool(_q):
+        for part in str(raw or "").split("/"):
+            v = part.strip()
+            if not v or ":" not in v or v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+    cc_rank = {c: i for i, c in enumerate(_CERT_COUNTRIES)}
+    us_rank = {c: i for i, c in enumerate(_US_CERT_ORDER)}
+    out.sort(key=lambda v: (cc_rank.get(v.split(":")[0], 99),
+                            us_rank.get(v, 99), v))
+    return {"certs": out[:60]}
+
+
 # ---------------------------------------------------------------------------
 # 缺失页(电影未拥有 + 剧集分集级缺失)
 # ---------------------------------------------------------------------------
@@ -1163,6 +1365,24 @@ def _missing_payload(kind):
     return payload
 
 
+def _seasons_by_tmdb(session, tmdb_ids):
+    """{tmdb_id: [TmdbSeason…(按季号序)]} —— 一次 IN 查询代替逐剧 N+1。
+
+    缺失页逐剧调 repo.get_tmdb_seasons 是 2200+ 次往返(实测 ~1.4s 是这条撑起来的),
+    批量 IN 只要 0.1ms。
+    """
+    from db.models import TmdbSeason
+    ids = list(dict.fromkeys(int(t) for t in tmdb_ids if t))
+    if not ids:
+        return {}
+    out = {}
+    for row in (session.query(TmdbSeason)
+                .filter(TmdbSeason.tmdb_id.in_(ids))
+                .order_by(TmdbSeason.season_number)):
+        out.setdefault(row.tmdb_id, []).append(row)
+    return out
+
+
 def _build_missing(kind):
     """缺失页全量卡片 + 汇总(原 /missing 的主体逻辑, 只是挪出来以便缓存)。"""
     def _q():
@@ -1174,7 +1394,7 @@ def _build_missing(kind):
             if kind == "movie":
                 in_lib = _jf_in_library_ids(s, "movie")
                 out = []
-                for r in repo.get_tmdb_media(s, kind="movie", limit=3000):
+                for r in _tmdb_media_rows(s, "movie")[:3000]:
                     if str(r.tmdb_id) in block_ids:
                         continue
                     if str(r.tmdb_id) in in_lib:
@@ -1188,10 +1408,13 @@ def _build_missing(kind):
             ep_map = _jf_episode_map(s)
             in_lib = _jf_in_library_ids(s, "tv")
             out = []
-            for r in repo.get_tmdb_media(s, kind="tv", limit=3000):
+            rows = _tmdb_media_rows(s, "tv")[:3000]     # stamp 缓存, 不再每次全表物化
+            # 季表一次 IN 取齐(旧: 每部剧一次查询 → 2200+ 次往返)
+            seasons_map = _seasons_by_tmdb(s, [r.tmdb_id for r in rows])
+            for r in rows:
                 if str(r.tmdb_id) in block_ids:
                     continue
-                seasons = repo.get_tmdb_seasons(s, r.tmdb_id)
+                seasons = seasons_map.get(r.tmdb_id) or []
                 if not seasons:
                     continue
                 in_library = str(r.tmdb_id) in in_lib
@@ -1300,8 +1523,8 @@ async def missing_episodes_detail(tmdb_id: int, cfg: dict = Depends(get_config))
             seasons = repo.get_tmdb_seasons(s, tmdb_id)
             if not media or not seasons:
                 raise HTTPException(404, "本地缓存无此剧集(请先同步 TMDB)")
-            s_map = _series_item_to_tmdb(s)
-            ep_map = _jf_episode_map(s)
+            s_map = _series_item_to_tmdb(s, tmdb_id)
+            ep_map = _jf_episode_map(s, list(s_map))
             check_s0 = repo.get_setting(s, "check_missing_s0", "false") == "true"
             mc, xc, per_season, have_eps, tmdb_eps, nsync = _series_missing(
                 tmdb_id, seasons, s_map, ep_map, check_s0)

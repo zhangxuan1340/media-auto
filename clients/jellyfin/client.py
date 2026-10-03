@@ -29,6 +29,8 @@
 的旧模型打的补丁, 已随旧模型一起删除。
 """
 from datetime import datetime, timezone
+import asyncio
+import weakref
 
 import httpx
 
@@ -56,22 +58,37 @@ def auth_headers(cfg_or_token):
     }
 
 
+# ── 连接复用(2026-10-02 性能修复)──────────────────────────────────────────
+# 旧写法每个请求 `async with httpx.AsyncClient(...)` —— 每次新建连接池 + 重握手。
+# 全量分集刷新是一页一请求(几千次), 白烧的握手和 fd churn 都很可观。
+# 按事件循环存(httpx 连接池绑死创建它的 loop, 跨 loop 复用会炸; loop 死了由
+# WeakKeyDictionary 连带回收, 不攒僵尸连接)。trust_env=False 在建池时定死。
+_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _client():
+    loop = asyncio.get_running_loop()
+    c = _clients.get(loop)
+    if c is None:
+        c = httpx.AsyncClient(timeout=30, trust_env=False)
+        _clients[loop] = c
+    return c
+
+
 async def _jf_get(cfg, path, params=None):
     url = (cfg.get("jellyfin", {}).get("url", "")).rstrip("/") + path
     # trust_env=False: 不走系统/环境代理(本机 HTTP_PROXY 指向 127.0.0.1, 会把内网
     # Jellyfin 地址 nas.example.com 卡死, 与 TMDB 客户端一致)。
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        r = await client.get(url, headers=auth_headers(cfg), params=params)
-        r.raise_for_status()
-        return r.json()
+    r = await _client().get(url, headers=auth_headers(cfg), params=params)
+    r.raise_for_status()
+    return r.json()
 
 
 async def _jf_put(cfg, path, json_body):
     url = (cfg.get("jellyfin", {}).get("url", "")).rstrip("/") + path
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        r = await client.put(url, headers=auth_headers(cfg), json=json_body)
-        r.raise_for_status()
-        return r.json() if r.content else {}
+    r = await _client().put(url, headers=auth_headers(cfg), json=json_body)
+    r.raise_for_status()
+    return r.json() if r.content else {}
 
 
 async def update_provider_ids(cfg, item_id, provider_ids):

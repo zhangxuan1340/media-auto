@@ -5,11 +5,27 @@
  *   - 静态资源(css/js/html) 网络优先 + 缓存回退, 保证改完即发、断网可用。
  * 版本递增 → 升级时清旧缓存, 避免陈旧资源。
  */
-const VERSION = 'mediaauto-v5';   // 2026-09-21: 不再缓存 qbit 实时数据(旧缓存会把"过去的进度"当当前值)
+const VERSION = 'mediaauto-v6';   // 2026-10-02: 运行时缓存加条数上限(旧版无上限, 长期跑下去 API 缓存无界增长); 2026-09-21: 不再缓存 qbit 实时数据
 const STATIC_CACHE = VERSION + '-static';
 const RUNTIME_CACHE = VERSION + '-runtime';
 // 启动即预缓存的核心壳(离线也能打开登录页)
 const PRECACHE = ['/', '/css/app.css', '/manifest.webmanifest'];
+
+// RUNTIME_CACHE 条数上限: 每个不同的 /api GET 都会被存一份(分页、搜索词都是新 key),
+// 不设上限的话缓存会随使用时间无界膨胀(磁盘 + 缓存查找都变慢)。
+// Cache API 不暴露"年龄", keys() 实测按插入序 → 从头(最旧)删到只剩上限。
+const RUNTIME_MAX = 200;
+
+async function trimRuntimeCache() {
+  try {
+    const c = await caches.open(RUNTIME_CACHE);
+    const keys = await c.keys();
+    if (keys.length <= RUNTIME_MAX) return;
+    for (const k of keys.slice(0, keys.length - RUNTIME_MAX)) {
+      await c.delete(k);
+    }
+  } catch (_) { /* 缓存不可用(隐私模式等)时忽略 */ }
+}
 
 // 实时状态类接口: 永不缓存(既不读也不写)。
 // 缓存它们会在断网/瞬时报错时把"上一次的进度"当成当前值显示出来 —— 对下载进度这是误导。
@@ -28,7 +44,8 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    ).then(() => trimRuntimeCache())
+    .then(() => self.clients.claim())
   );
 });
 

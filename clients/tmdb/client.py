@@ -14,7 +14,9 @@
 无 API key 时所有接口优雅降级: 返回 None / 空列表, 并置 last_error 供上层提示。
 """
 import asyncio
+import time
 import urllib.parse
+import weakref
 
 import httpx
 
@@ -68,6 +70,57 @@ def _img(path, size="w300"):
     return TMDB_IMG + suffix + path.lstrip("/")
 
 
+# ---------------------------------------------------------------------------
+# 连接复用(2026-10-02 性能修复)
+# ---------------------------------------------------------------------------
+# 旧写法: 每个请求 `async with httpx.AsyncClient(...)` —— 每次都新建连接池 + TLS 握手
+# + 连接销毁。全量 TMDB 同步约 9000 次请求, 单次握手 ~0.2s 就是半小时级的纯握手开销,
+# 同时不停 churn fd。
+#   · async: 按**事件循环**各存一个客户端。httpx 的连接池绑死创建它的 loop, 跨 loop
+#     复用会炸; _run_async 每次 asyncio.run 都换新 loop, 所以用 WeakKeyDictionary ——
+#     loop 死了 client 跟着被回收, 不攒僵尸连接。长驻的 server loop 全程只建一次。
+#   · sync: 进程内一个 httpx.Client(官方文档: Client 线程安全), organize 的工作线程共用。
+# host 每次请求都写在绝对 URL 里, 主/备域自动切换不受共享 client 影响。
+# 所有调用点 timeout 都是默认 30s, 以首次建池的值为准。
+_async_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_sync_client: "httpx.Client | None" = None
+
+
+def _async_client(timeout=30):
+    loop = asyncio.get_running_loop()
+    c = _async_clients.get(loop)
+    if c is None:
+        c = httpx.AsyncClient(timeout=timeout, trust_env=False)
+        _async_clients[loop] = c
+    return c
+
+
+def _sync_client_get(timeout=30):
+    global _sync_client
+    if _sync_client is None:
+        _sync_client = httpx.Client(timeout=timeout, trust_env=False)
+    return _sync_client
+
+
+def close_sync_client():
+    """关掉同步连接池(进程退出/测试用)。异步池随 loop 回收, 不需要显式关。"""
+    global _sync_client
+    if _sync_client is not None:
+        try:
+            _sync_client.close()
+        finally:
+            _sync_client = None
+
+
+def _retry_after(resp):
+    """429 的退避秒数: 读 Retry-After, 非法/缺失按 1s, 上限 10s(别把整轮同步挂死)。"""
+    try:
+        wait = float(resp.headers.get("Retry-After") or "1")
+    except (TypeError, ValueError):
+        wait = 1.0
+    return min(max(wait, 0.5), 10.0)
+
+
 async def _tmdb_get(cfg, path, params=None, timeout=30):
     """对多个候选 host 依次尝试 GET。成功返回 json, 全失败抛最后异常。
 
@@ -80,18 +133,27 @@ async def _tmdb_get(cfg, path, params=None, timeout=30):
     _cache_stats.miss("tmdb")
     params = dict(params or {})
     params["api_key"] = key
+    client = _async_client(timeout)      # 连接复用: 不再每次请求新建连接池
+    hosts = _hosts(cfg)
     last_exc = None
-    for host in _hosts(cfg):
+    # 次数比 host 多 2: 429(限速)按 Retry-After 退避后再试, 网络错误则换域。
+    # 旧写法 429 走 raise_for_status 直接抛 → 全量同步撞一次限速就整轮失败。
+    for i in range(len(hosts) + 2):
+        host = hosts[i % len(hosts)]
         url = f"https://{host}{path}"
         try:
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                r = await client.get(url, params=params)
-                if r.status_code == 401:
-                    raise RuntimeError("TMDB api_key 无效(401)")
-                if r.status_code == 404:
-                    return None  # 资源不存在(非网络错误), 直接返回
-                r.raise_for_status()
-                return r.json()
+            r = await client.get(url, params=params)
+            if r.status_code == 401:
+                raise RuntimeError("TMDB api_key 无效(401)")
+            if r.status_code == 404:
+                return None  # 资源不存在(非网络错误), 直接返回
+            if r.status_code == 429:
+                last_exc = httpx.HTTPStatusError(
+                    "429 Too Many Requests", request=r.request, response=r)
+                await asyncio.sleep(_retry_after(r))
+                continue
+            r.raise_for_status()
+            return r.json()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                 httpx.PoolTimeout, httpx.RemoteProtocolError) as e:
             last_exc = e
@@ -109,18 +171,25 @@ def _tmdb_get_sync(cfg, path, params=None, timeout=30):
     _cache_stats.miss("tmdb")
     params = dict(params or {})
     params["api_key"] = key
+    client = _sync_client_get(timeout)    # 连接复用: httpx.Client 线程安全, 组织器多线程共用
+    hosts = _hosts(cfg)
     last_exc = None
-    for host in _hosts(cfg):
+    for i in range(len(hosts) + 2):
+        host = hosts[i % len(hosts)]
         url = f"https://{host}{path}"
         try:
-            with httpx.Client(timeout=timeout, trust_env=False) as client:
-                r = client.get(url, params=params)
-                if r.status_code == 401:
-                    raise RuntimeError("TMDB api_key 无效(401)")
-                if r.status_code == 404:
-                    return None
-                r.raise_for_status()
-                return r.json()
+            r = client.get(url, params=params)
+            if r.status_code == 401:
+                raise RuntimeError("TMDB api_key 无效(401)")
+            if r.status_code == 404:
+                return None
+            if r.status_code == 429:
+                last_exc = httpx.HTTPStatusError(
+                    "429 Too Many Requests", request=r.request, response=r)
+                time.sleep(_retry_after(r))
+                continue
+            r.raise_for_status()
+            return r.json()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                 httpx.PoolTimeout, httpx.RemoteProtocolError) as e:
             last_exc = e
@@ -293,18 +362,47 @@ async def trending(cfg, kind, time_window="week", page=1):
 
 
 async def discover_page(cfg, kind, page=1, genre_id=None, country=None,
-                        sort_by="popularity.desc"):
+                        sort_by="popularity.desc", filters=None):
     """TMDB 发现接口单页(带筛选)。返回 (cards, total_pages)。
 
     与 trending 不同, discover 的 total_pages 是真实值 —— 筛选后榜单到底
     判断用它(不再靠"满 20 条"猜)。country 为 TMDB 国家代码(如 CN/JP/US)。
+
+    filters = 高级筛选 dict(可选, 空 = 只按 类型/国家 筛):
+      date_from/date_to  "YYYY-MM-DD" → 电影 primary_release_date.gte/lte,
+                         剧集 first_air_date.gte/lte
+      status             剧集状态码(TMDB with_status: 0 在播 / 1 计划 / 2 制作中 /
+                         3 完结 / 4 取消 / 5 试播), 仅 kind=tv
+      cert               分级 "US:PG-13" → certification + certification_country + region
+                         (仅 kind=movie —— TMDB discover/tv 没有分级参数, 剧集分级
+                         只能走本地缓存, 见 /api/browse/certs)
+      provider / watch_region  流媒体平台 id + 地区(如 CN), TMDB 要求两者成对
     """
+    f = dict(filters or {})
     params = {"language": _lang(cfg), "page": page,
               "include_adult": "false", "sort_by": sort_by}
     if genre_id:
         params["with_genres"] = genre_id
     if country:
         params["with_origin_country"] = country
+    dfrom = (f.get("date_from") or "").strip()
+    dto = (f.get("date_to") or "").strip()
+    if dfrom:
+        params["primary_release_date.gte" if kind == "movie" else "first_air_date.gte"] = dfrom
+    if dto:
+        params["primary_release_date.lte" if kind == "movie" else "first_air_date.lte"] = dto
+    if f.get("status") is not None and str(f.get("status")) != "" and kind == "tv":
+        params["with_status"] = str(f["status"])
+    cert = (f.get("cert") or "").strip()
+    if cert and kind == "movie":
+        cc, sep, rating = cert.partition(":")
+        if sep and rating:
+            params["certification"] = rating
+            params["certification_country"] = cc
+            params["region"] = cc          # docs: certification 与 region 配合
+    if f.get("provider"):
+        params["with_watch_providers"] = int(f["provider"])
+        params["watch_region"] = (f.get("watch_region") or "CN").upper()
     try:
         data = await _tmdb_get(cfg, f"/3/discover/{kind}", params)
     except Exception as e:  # noqa: BLE001
@@ -339,6 +437,72 @@ def countries(cfg=None):
     """影视产地国家列表(内置固定表), 返回 [{"code","name"}]。
     榜单页"按国家筛选"下拉用; 不依赖网络, 恒返回全表。"""
     return [{"code": code, "name": name} for code, name in _COUNTRY_TABLE]
+
+
+# 平台地区(筛选下拉的 watch_region): 只给主流地区 —— 全表几十个地区里
+# 绝大多数没有可用平台, 列出来反而难找。中文名与 _COUNTRY_TABLE 同源。
+_WATCH_REGIONS = ["CN", "HK", "TW", "JP", "KR", "US", "GB", "DE", "FR",
+                  "AU", "IN", "TH", "ES", "IT", "BR", "CA"]
+
+
+def watch_regions():
+    """平台地区下拉 → [{"code","name"}](内置表, 零网络)。"""
+    names = dict(_COUNTRY_TABLE)
+    return [{"code": c, "name": names.get(c, c)} for c in _WATCH_REGIONS if c in names]
+
+
+async def watch_providers(cfg, kind, region="CN"):
+    """流媒体平台列表(按地区) → [{"id","name","logo"}], 按 TMDB 热度序, 截前 60。
+
+    logo 是 TMDB 图片路径(前端 img() 拼完整地址); 某地区 TMDB 没有平台表时返回空。
+    """
+    try:
+        data = await _tmdb_get(cfg, f"/3/watch/providers/{kind}",
+                               {"language": _lang(cfg), "watch_region": region})
+    except Exception as e:  # noqa: BLE001
+        global last_error
+        last_error = str(e)
+        return []
+    out = []
+    for p in (data.get("results") or []):
+        pid = p.get("provider_id")
+        if not pid:
+            continue
+        out.append({"id": int(pid), "name": p.get("provider_name") or "",
+                    "logo": p.get("logo_path") or ""})
+        if len(out) >= 60:
+            break
+    return out
+
+
+# 分级表里优先给的国家(TMDB /3/certification 按国家分组, 国家远多于常用):
+# 中文用户实际会用到的美/英/加/澳 + 中文区 + 主要欧陆
+_CERT_COUNTRIES = ["US", "GB", "CA", "AU", "HK", "TW", "CN", "JP", "KR",
+                   "DE", "FR", "ES", "IT", "IN", "BR"]
+
+
+async def certifications(cfg, kind):
+    """分级表 → [{"country","cert"}], cert 形如 "US:PG-13"(与本地缓存同格式)。
+    同国家按 TMDB order(宽松→严格)排; 只给 _CERT_COUNTRIES 里有的国家, 截前 40。"""
+    try:
+        data = await _tmdb_get(cfg, f"/3/certification/{kind}", {})
+    except Exception as e:  # noqa: BLE001
+        global last_error
+        last_error = str(e)
+        return []
+    by_cc = data.get("certifications") if isinstance(data, dict) else None
+    if not isinstance(by_cc, dict):
+        return []
+    out = []
+    for cc in _CERT_COUNTRIES:
+        rows = by_cc.get(cc) or []
+        rows = [r for r in rows if r.get("certification")]
+        rows.sort(key=lambda r: (r.get("order") or 99, str(r.get("certification"))))
+        for r in rows:
+            out.append({"country": cc, "cert": f"{cc}:{r.get('certification')}"})
+            if len(out) >= 40:
+                return out
+    return out
 
 
 async def discover(cfg, kind, page=1, genre_id=None, year=None,

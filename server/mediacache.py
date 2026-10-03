@@ -11,8 +11,21 @@ import time
 TTL = 24 * 3600
 FETCH_CONCURRENCY = 8   # 并行拉 TMDB(限速 ~10/s, 8 并发安全)
 
-_cache: dict = {}       # {(kind, tmdb_id): (ts, payload)}
-_lock = asyncio.Lock()  # 防同一 id 并发重复拉(单事件循环内)
+_cache: dict = {}       # {(kind, tmdb_id): (ts, payload)} —— 见 _put, 有上限
+_CACHE_MAX = 512        # 上限: 展示元数据是小 dict, 但长期翻页会涨到全库(6000+)条
+
+
+def _put(key, payload):
+    """写缓存并控制上限(旧写法无上限, 进程活得越久占得越多)。
+    满了就淘汰最旧的一条 —— 读远多于写, O(n) 扫一次可接受;
+    被淘汰的下次会先走 tmdb_media 本地快路(毫秒级), 不会真的去打 TMDB。"""
+    if len(_cache) >= _CACHE_MAX and key not in _cache:
+        try:
+            old = min(_cache.items(), key=lambda kv: kv[1][0])
+            _cache.pop(old[0], None)
+        except ValueError:
+            pass
+    _cache[key] = (time.time(), payload)
 
 
 def _payload_from_tmdb(meta: dict) -> dict:
@@ -59,7 +72,7 @@ async def get_display(cfg, kind: str, tmdb_id: int, session=None) -> dict:
                     "imdb_id": row.imdb_id or "", "runtime": row.runtime or 0,
                     "premiered": row.premiered or "", "certification": row.certification or "",
                 }
-                _cache[key] = (time.time(), p)
+                _put(key, p)
                 return p
         except Exception:  # noqa: BLE001  表不存在等
             pass
@@ -77,7 +90,7 @@ async def get_display(cfg, kind: str, tmdb_id: int, session=None) -> dict:
                 await asyncio.sleep(0.8)
         if meta:
             p = _payload_from_tmdb(meta)
-            _cache[key] = (time.time(), p)
+            _put(key, p)
             return p
     except Exception:  # noqa: BLE001
         pass

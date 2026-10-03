@@ -64,6 +64,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 # 直接 `python clients/clouddrive/client.py` 跑 CLI 时,把项目根加进 sys.path,
 # 保证 `from clients.clouddrive import ...` 可用(与 scripts/*.py 一致)。
@@ -210,6 +211,35 @@ def _open_channel(target, use_tls, insecure, authority):
     return grpc.insecure_channel(target, options=opts)
 
 
+# ── channel 复用(2026-10-02 性能修复)──────────────────────────────────────
+# 旧写法每次调用 _open_channel 建一条 channel、finally 里立刻 close —— 每次都要
+# TCP(+TLS) 握手, 下载页/离线列表一次轮询里几十个方法调用就是几十次握手。
+# grpc.Channel 本身线程安全、自带连接管理与自动重连, 进程内按 (target, 参数) 缓存复用;
+# 拨号类失败(unavailable/超时)才把它丢掉重建, 避免坏连接被永久缓存。
+_CHANNELS: dict = {}
+_CHANNELS_LOCK = threading.Lock()
+
+
+def _get_channel(key, target, use_tls, insecure, authority):
+    with _CHANNELS_LOCK:
+        ch = _CHANNELS.get(key)
+        if ch is None:
+            ch = _open_channel(target, use_tls, insecure, authority)
+            _CHANNELS[key] = ch
+        return ch
+
+
+def _drop_channel(key):
+    with _CHANNELS_LOCK:
+        ch = _CHANNELS.pop(key, None)
+    if ch is not None:
+        try:
+            ch.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+
 def _method_info(svc, method):
     """从 proto 描述符取某方法的 (请求消息类, 是否服务端流式)。
 
@@ -260,9 +290,9 @@ def _grpcurl(config, method, data=None, auth=True, emit_defaults=False,
 
     last_err = None
     for idx, (target, use_tls, insecure, authority) in enumerate(candidates):
-        ch = None
+        key = (target, use_tls, insecure, authority)
         try:
-            ch = _open_channel(target, use_tls, insecure, authority)
+            ch = _get_channel(key, target, use_tls, insecure, authority)  # 复用, 不再每调用建关
             stub = stub_cls(ch)
             rpc = getattr(stub, method)
             req = ParseDict(data, req_cls()) if data else req_cls()
@@ -296,6 +326,7 @@ def _grpcurl(config, method, data=None, auth=True, emit_defaults=False,
                          "轮询请改用 list_offline_all()/find_offline(),或调大 "
                          "clouddrive2.offline_by_path_timeout)")
             if dial_fail and idx + 1 < len(candidates):
+                _drop_channel(key)   # 这条候选拨不通 → 丢掉缓存的 channel,下次重建
                 last_err = f"CD2 {method} @ {target} 失败: {err}"
                 continue
             hints = []
@@ -314,14 +345,12 @@ def _grpcurl(config, method, data=None, auth=True, emit_defaults=False,
         except Exception as e:  # noqa: BLE001
             last_err = f"CD2 {method} @ {target} 异常: {e}"
             if idx + 1 < len(candidates):
+                _drop_channel(key)   # 换候选前把这条的缓存 channel 丢掉(可能就是它坏的)
                 continue
             raise
-        finally:
-            if ch is not None:
-                try:
-                    ch.close()
-                except Exception:  # noqa: BLE001
-                    pass
+        # 注意: 这里**不再 close** channel —— channel 按 (target, 参数) 缓存复用
+        # (见 _get_channel), close 会把复用的连接一起砍掉。grpc.Channel 自带
+        # 连接管理/自动重连, 进程存活期内复用即可。
 
     raise RuntimeError(last_err or f"CD2 {method} 失败: 所有候选地址均不可用 {candidates}")
 

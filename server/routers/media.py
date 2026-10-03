@@ -74,7 +74,9 @@ async def media_title(kind: str, tmdb_id: int, body: TitleBody,
     title = new_title
     warning = ""
     try:
-        meta = _build_meta(cfg, kind, tmdb_id)
+        # ⚠️ 必须进线程池: _build_meta 是 TMDB 同步 HTTP(30s 超时)+ 豆瓣核对(10s),
+        # 直接在 async 端点里跑会把事件循环冻住 —— 保存标题期间全站所有请求一起卡。
+        meta = await run_in_threadpool(_build_meta, cfg, kind, tmdb_id)
     except Exception as e:  # noqa: BLE001 HTTPException 也一并降级成 warning
         meta = None
         detail = getattr(e, "detail", None) or str(e)
