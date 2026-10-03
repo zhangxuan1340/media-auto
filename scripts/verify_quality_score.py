@@ -168,7 +168,7 @@ def main():
 
         real_fetch, real_nw = s._fetch_all, s._search_next_web
 
-        async def fake_fetch(source, cfg, q, cap):
+        async def fake_fetch(source, cfg, q, cap, *a, **k):
             return [dict(x, infoHash="%040x" % i) for i, x in enumerate(items)]
 
         async def fake_nw(cfg, q, limit, page=1):

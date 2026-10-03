@@ -159,7 +159,7 @@ def main():
         from fastapi.testclient import TestClient
         from server.auth import require_auth
 
-        async def fake_fetch_all(source, cfg, q, cap):
+        async def fake_fetch_all(source, cfg, q, cap, *a, **k):
             return [dict(x) for x in payload]
 
         async def fake_search_next_web(cfg, q, limit, page=1):

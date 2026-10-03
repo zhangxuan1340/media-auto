@@ -27,6 +27,7 @@
 10 条要 2~3.5s, 老实现首屏串行翻 20 页要 12~20s, 缓存 120s 过期后点一次「加载更多」又是十几秒,
 表现就是"详情页很慢、加载更多点了没反应"。抓取本身在 scripts/diao_search.collect 里并行翻页。
 """
+import asyncio
 import re
 import time
 
@@ -276,7 +277,7 @@ def _cache_put(key, items, cap=None, exhausted=None):
                         True if exhausted is None else exhausted)
 
 
-async def _load_window(source, cfg, q, need, sort):
+async def _load_window(source, cfg, q, need, sort, multi=False):
     """拿一个"至少 need 条"的全局排序窗口(分段抓取), 返回 (sorted_items, exhausted)。
 
     exhausted=True 表示站点已到底(再翻也不会有新结果)。
@@ -290,17 +291,21 @@ async def _load_window(source, cfg, q, need, sort):
     base, cap0 = [], 0
     if hit:
         items, cap_used, exhausted = hit
-        if len(items) >= need or exhausted or cap_used >= _SORT_CAP:
+        # 上限用"每源上限"而非全局 _SORT_CAP: 多源时 next_web 上限 100, 满了就该停
+        if len(items) >= need or exhausted or cap_used >= _source_fetch_cap(source, multi):
             return items, exhausted
         base, cap0 = list(items), cap_used
-    target = min(_SORT_CAP, max(need + _STEP, _WINDOW0))
+    target = min(_SORT_CAP, max(need + _STEP, _WINDOW0), _source_fetch_cap(source, multi))
     site_done = False
     if cap0 and source == "next_web":
         # 增量续抓: 只补 target-cap0 条。旧写法命中缓存但条数不够就整段从第 1 页重抓 ——
         # 点一次「加载更多」把前面抓过的又抓一遍(6 次点击 ≈ 4 倍站点往返)。
         # TypeError = _fetch_all 被门禁打桩成不带 start_offset 的旧签名 → 退回整段抓。
+        if target - cap0 <= 0:
+            # 已到该源预算上限(如多源 next_web 100), 不再增量, 视为该源到底
+            return _apply_sort(base, sort, cfg), True
         try:
-            more = await _fetch_all(source, cfg, q, target - cap0, start_offset=cap0)
+            more = await _fetch_all(source, cfg, q, target - cap0, start_offset=cap0, multi=multi)
         except TypeError:
             more = None
         if more is not None:
@@ -309,10 +314,10 @@ async def _load_window(source, cfg, q, need, sort):
                           if not x.get("infoHash") or x["infoHash"].lower() not in seen]
             site_done = len(more) < (target - cap0)
         else:
-            got = await _fetch_all(source, cfg, q, target)
+            got = await _fetch_all(source, cfg, q, target, multi=multi)
             site_done = len(got) < target
     else:
-        got = await _fetch_all(source, cfg, q, target)
+        got = await _fetch_all(source, cfg, q, target, multi=multi)
         site_done = len(got) < target
     items = _apply_sort(got, sort, cfg)
     # 站点一条不剩(本页不满) → 到底; 满 target 条则认为后面还有, 下次要更多再抓
@@ -431,8 +436,22 @@ def _enabled_sources(cfg):
 
 
 def _src_label(source):
-    """源标识 → 品牌名(错误信息、前端来源标签共用)。"""
+    """源标识 → 品牌名(错误信息、前端标签共用)。"""
     return _SOURCE_LABEL.get(source, source)
+
+
+def _source_fetch_cap(source, multi):
+    """Web 路径每源的抓取上限(按 性能×种子关联性 调过, 见 2026-10-03 分析)。
+
+    - native:  100 —— 快(单查询)+高信号(seeders+元数据), 100 条足够, 再多是噪声。
+    - jackett: 200 —— 一次抓全+有 seeders+自配站点(广+可信), 200 去重后够(原 500 在 Web 走不到)。
+    - next_web:最慢(每页 10 条, 20 页)+最弱信号(无 seeders/元数据) →
+      **多源时降到 100**(原生/Jackett 已覆盖 seeders+元数据+广度, 它的边际价值下降),
+      **单源独开时保 200**(它是唯一来源, 覆盖要紧)。
+    """
+    if source == "next_web":
+        return 100 if multi else 200
+    return 100 if source == "native" else 200
 
 
 async def _search_native(cfg, q, limit):
@@ -498,7 +517,7 @@ async def _search_jackett(cfg, q, limit):
     return out, len(out) < limit, 1
 
 
-async def _fetch_all(source, cfg, q, cap, start_offset=0):
+async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False):
     """抓最多 cap 条并规整成统一 item 结构(全局排序的取数原语, 也是 track_check 的入口)。
 
     顺序抓取由 scripts/diao_search.collect 内部并行化; 返回不足 cap 条 = 站点到底。
@@ -516,9 +535,10 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0):
     if source == "next_web":
         from scripts import diao_search
         base, _ = diao_search.resolve_settings(cfg)
-        # collect 内部按 offset 翻页, want=cap 一次拿全; 受 MAX_PAGES(200) 上限约束
+        # collect 内部按 offset 翻页, want=cap 一次拿全; 上限按 性能×关联性 随多源变化
         items, _tc, _kw, _more, _end = await run_in_threadpool(
-            diao_search.collect, base, q, min(cap, 200), start_offset=max(0, start_offset))
+            diao_search.collect, base, q, min(cap, _source_fetch_cap("next_web", multi)),
+            start_offset=max(0, start_offset))
         out = []
         for t in items:
             out.append({
@@ -653,17 +673,23 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
     if not sources:
         raise HTTPException(503, "所有磁力源都已禁用(管理 → 通用 → 磁力搜索源: 至少启用一个)")
 
-    # ---- 非 relevance: 各源各抓一个分段窗口 → 合并 → 全局排序 → 按 limit 切片 ----
+    multi = len(sources) > 1
+
+    # ---- 非 relevance: 各源【并行】各抓一个分段窗口 → 合并 → 全局排序 → 按 limit 切片 ----
+    # 并行(asyncio.gather): 总耗时 = 最慢单源, 而非各源之和; 顺序仍按 sources 保证合并确定。
     if sort != "relevance":
-        per_items, warnings = [], []
-        for src in sources:
+        async def _one_nr(src):
             try:
-                # 只抓"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限 200)
-                window, exhausted = await _load_window(src, cfg, q, page * limit, sort)
+                # 只抓"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限按源)
+                window, exhausted = await _load_window(src, cfg, q, page * limit, sort, multi=multi)
                 _tag_source(window, src)
-                per_items.append((src, window, exhausted))
+                return ("ok", (src, window, exhausted))
             except Exception as e:  # noqa: BLE001  单源失败不致命, 用其它源
-                warnings.append(f"{_src_label(src)}: {e}")
+                return ("warn", f"{_src_label(src)}: {e}")
+        results = await asyncio.gather(*(_one_nr(src) for src in sources))
+        per_items, warnings = [], []
+        for kind, val in results:
+            (warnings.append if kind == "warn" else per_items.append)(val)
         if not per_items:
             raise HTTPException(status_code=502, detail="; ".join(warnings) or "磁力源请求失败")
         window = _merge_sources([(s, w) for s, w, _e in per_items], sort, cfg)
@@ -690,15 +716,18 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
             resp["warnings"] = warnings
         return resp
 
-    # ---- relevance: 各源各取一页(引擎原序) → 合并去重 ----
-    per_items, warnings = [], []
-    for src in sources:
+    # ---- relevance: 各源【并行】各取一页(引擎原序) → 合并去重 ----
+    async def _one_rel(src):
         try:
             items, has_more, next_page = await _one_page_relevance(src, cfg, q, limit, page)
             _tag_source(items, src)
-            per_items.append((src, items, has_more, next_page))
+            return ("ok", (src, items, has_more, next_page))
         except Exception as e:  # noqa: BLE001
-            warnings.append(f"{_src_label(src)}: {e}")
+            return ("warn", f"{_src_label(src)}: {e}")
+    results = await asyncio.gather(*(_one_rel(src) for src in sources))
+    per_items, warnings = [], []
+    for kind, val in results:
+        (warnings.append if kind == "warn" else per_items.append)(val)
     if not per_items:
         raise HTTPException(status_code=502, detail="; ".join(warnings) or "磁力源请求失败")
 

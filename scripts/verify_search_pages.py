@@ -130,9 +130,10 @@ def main():
         site.caps = []
         real_fetch = s._fetch_all
 
-        async def spy_fetch(source, cfg, q, cap):
+        async def spy_fetch(source, cfg, q, cap, *a, **k):
+            # 转发 start_offset / multi 等新参到真实 _fetch_all(接口演进保持兼容)
             site.caps.append(cap)
-            return await real_fetch(source, cfg, q, cap)
+            return await real_fetch(source, cfg, q, cap, *a, **k)
 
         s._fetch_all = spy_fetch
         cfg = {"bitmagnet_next_web": {"enabled": True, "base": "http://fake"},
@@ -166,8 +167,10 @@ def main():
             check("第 2 页 hasMore=True(窗口没到底)", r2["hasMore"] is True, r2["hasMore"])
 
             r3 = client.get("/api/search?q=test&sort=quality&limit=30&page=3").json()
-            check("第 3 页需要 90 条 → 抓更大的窗口", site.caps[-1] > site.caps[0],
-                  site.caps)
+            # 增量续抓: 第 3 页要 90 条, 首屏窗口只有 60 → 必须再发一次抓取(增量补 target-cap0),
+            # 而不是直接吃 60 条的旧缓存。用调用次数增长来验证(不耦合"单个更大 cap"的旧回退写法)。
+            check("第 3 页需要 90 条 → 触发增量抓取撑大窗口", site.calls > n_calls,
+                  f"calls {n_calls} -> {site.calls}")
             check("语料 64 条到底 → exhausted 且 hasMore=False",
                   r3.get("exhausted") is True and r3["hasMore"] is False,
                   (r3.get("exhausted"), r3["hasMore"]))
