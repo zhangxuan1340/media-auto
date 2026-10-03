@@ -419,11 +419,14 @@ def case_cli_json_guard():
         seen.setdefault("base_dir", base_dir)
         return [{"name": "Show.S01E01.mkv", "path": path + "/a.mkv", "size": 1, "rel_dir": ""}]
 
+    # ⑥a: _offline_seasons 现复用 plan['media'] 提季, 不再二次 scan_tree 源目录(2026-10-03 性能)
     plan = PLAN("ok", "Show (2019)", kind="tv")
+    plan["media"] = [{"name": "Show.S01E01.mkv", "path": "/Temp/Show (2019)/a.mkv",
+                      "size": 1, "rel_dir": ""}]
     with Patch(**{"scan_tree": fake_scan}):
-        og._offline_seasons(CFG(), plan, base_dir="/BASE")
-    check("_offline_seasons 把 base_dir 传给 scan_tree",
-          seen.get("base_dir") == "/BASE", seen)
+        got_seasons = og._offline_seasons(CFG(), plan, base_dir="/BASE")
+    check("_offline_seasons 从 plan['media'] 提季(S01E01 → 1)", got_seasons == {1}, got_seasons)
+    check("_offline_seasons 不再二次 scan_tree 源目录", "base_dir" not in seen, seen)
 
     seen.clear()
     with Patch(**{"scan_tree": fake_scan}):

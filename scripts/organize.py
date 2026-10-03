@@ -791,18 +791,15 @@ def _episode_hint(name):
 
 
 def _offline_seasons(config, plan, base_dir=None):
-    """离线条目覆盖的季号集合。目录条目扫全部视频文件;散落文件取自身文件名季号。"""
+    """离线条目覆盖的季号集合, 从 analyse_entry 已扫出的 plan['media'] 提取。
+
+    ⚠️ 不再二次 scan_tree 源目录: analyse_entry 建 plan 时已把源目录视频文件(=media)
+    扫好并存进 plan['media'], 这里直接复用, 省一次 CD2 网络往返(2026-10-03 性能优化)。
+    """
     srcs = []
-    if plan.get("is_dir"):
-        try:
-            srcs = [f for f in scan_tree(config, plan.get("source"), base_dir=base_dir)
-                    if naming.ext_of(f.get("name")) in naming.VIDEO_EXT]
-        except Exception:  # noqa: BLE001
-            srcs = []
-    else:
-        for f in plan.get("media") or []:
-            if naming.ext_of(f.get("name") or "") in naming.VIDEO_EXT:
-                srcs.append(f)
+    for f in plan.get("media") or []:
+        if naming.ext_of(f.get("name") or "") in naming.VIDEO_EXT:
+            srcs.append(f)
     seasons = set()
     for f in srcs:
         season, _ep = naming.parse_episode(f.get("name") or "")
@@ -813,11 +810,13 @@ def _offline_seasons(config, plan, base_dir=None):
     return seasons
 
 
-def _library_seasons(config, dir_path, base_dir=None):
-    """库内剧目录里已有的季号集合(Season N / 视频文件名 Sxx / Specials)。"""
+def _library_seasons(config, dir_path, base_dir=None, files=None):
+    """库内剧目录里已有的季号集合(Season N / 视频文件名 Sxx / Specials)。
+    files 传入已扫结果可省一次 scan_tree 网络往返(见 _mark_dedup)。"""
     seasons = set()
     try:
-        for f in scan_tree(config, dir_path, base_dir=base_dir):
+        for f in (files if files is not None
+                  else scan_tree(config, dir_path, base_dir=base_dir)):
             d = f.get("rel_dir") or ""
             for part in d.split("/"):
                 s = naming.season_of_dirname(part)
@@ -851,12 +850,19 @@ def _mark_dedup(config, p, base_dir=None):
         return  # 目标是个文件(如电影散落文件)→ 归 apply_plan 的 on_conflict 处理
 
     p["existing"] = hit.get("fullPathName") or tgt
+    # 库目录只扫一次: 原 _library_seasons 与 _compare_with_library→_library_dir_version
+    # 各扫同一目录一遍(每条目多一次 CD2 网络往返)。这里扫一次, 透传两处复用(2026-10-03)。
+    try:
+        _existing_files = scan_tree(config, p["existing"], base_dir=base_dir)
+    except Exception:  # noqa: BLE001
+        _existing_files = []
 
     # 剧集: 先比季 —— 离线有库内没有的季 → 补季合并(merge)
     if (p.get("meta") or {}).get("kind") == "tv":
         off_seasons = _offline_seasons(config, p, base_dir=base_dir)
         if off_seasons:
-            missing = off_seasons - _library_seasons(config, p["existing"], base_dir=base_dir)
+            missing = off_seasons - _library_seasons(config, p["existing"], base_dir=base_dir,
+                                                     files=_existing_files)
             if missing:
                 p["status"] = "merge"
                 p["missing_seasons"] = sorted(missing)
@@ -868,7 +874,8 @@ def _mark_dedup(config, p, base_dir=None):
 
     # 同季/电影: 版本比较 —— 同名不等于重复,离线那条可能是更高规格的升级版
     # (如库里 5.3GB 2160p WEB-DL、离线 16.6GB UHD BluRay),只按目录名判重会把升级版丢掉。
-    cmp_result = _compare_with_library(config, p, hit, base_dir=base_dir)
+    cmp_result = _compare_with_library(config, p, hit, base_dir=base_dir,
+                                       existing_files=_existing_files)
     if cmp_result and cmp_result.get("verdict") == "upgrade":
         p["status"] = "upgrade"
         p["version_cmp"] = cmp_result
@@ -884,12 +891,14 @@ def _mark_dedup(config, p, base_dir=None):
             p["reason"] = f"媒体库已有同名条目,不重复归位: {tgt}"
 
 
-def _library_dir_version(config, dir_path, base_dir=None):
+def _library_dir_version(config, dir_path, base_dir=None, files=None):
     """读库里已有条目的「主媒体文件」(体积最大的那个视频),返回 (name, size)。
 
     库内条目可能是目录(常见)或散落文件;读不到返回 None。
+    files 传入已扫结果可省一次 scan_tree 网络往返(见 _mark_dedup)。
     """
-    files = scan_tree(config, dir_path, base_dir=base_dir)
+    if files is None:
+        files = scan_tree(config, dir_path, base_dir=base_dir)
     vids = [f for f in files if naming.ext_of(f.get("name")) in naming.VIDEO_EXT]
     if not vids:
         return None
@@ -897,8 +906,9 @@ def _library_dir_version(config, dir_path, base_dir=None):
     return biggest.get("name") or "", int(biggest.get("size") or 0)
 
 
-def _compare_with_library(config, plan, hit, base_dir=None):
-    """把离线条目与库里同名条目做版本比较,返回 compare_versions 的结果(读不到则 None)。"""
+def _compare_with_library(config, plan, hit, base_dir=None, existing_files=None):
+    """把离线条目与库里同名条目做版本比较,返回 compare_versions 的结果(读不到则 None)。
+    existing_files 传入已扫的库目录文件可省一次 scan_tree 网络往返(见 _mark_dedup)。"""
     try:
         from lib import mediainfo
     except Exception:  # noqa: BLE001
@@ -910,7 +920,8 @@ def _compare_with_library(config, plan, hit, base_dir=None):
     if not new_name:
         return None
 
-    lib = _library_dir_version(config, hit.get("fullPathName") or "", base_dir=base_dir)
+    lib = _library_dir_version(config, hit.get("fullPathName") or "", base_dir=base_dir,
+                               files=existing_files)
     if not lib:
         return None
     old_name, old_size = lib

@@ -123,6 +123,9 @@ class MatchBody(BaseModel):
 
 # ---- 整理任务(后台) ----
 _JOBS = {}   # job_id -> {status: running|done|error, count, results, error, started_at}
+# 整理执行互斥锁: 同一进程内只允许一个 /organize/apply 后台任务在跑。两个 worker 同时
+# 搬/改名/删广告同一批文件会在 CD2 上交叉操作 → 数据错乱(2026-10-03 子代理发现, 加守卫)。
+_ORGANIZE_LOCK = threading.Lock()
 
 
 def _new_job():
@@ -375,6 +378,10 @@ async def api_organize_apply(body: ApplyBody, cfg: dict = Depends(get_config)):
     # 默认上限 100(原来是 20): 前端「执行全部/执行选中」不传 limit, 20 会把用户
     # 在确认框里数过的 N 条**静默截断**成 20 条; 传了就按传的来, 上限 200(2026-09-29 修)。
     limit = max(1, min(int(body.limit or 100), 200))
+    # 并发守卫(在建 job 之前抢锁): 抢不到 = 已有整理任务在跑 → 409 提示, 绝不并发起
+    # 第二个 worker(双 worker 会同时搬/改同一批文件)。建 job 前抢, 避免留一个空 job。
+    if not _ORGANIZE_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "已有整理任务正在运行, 请等待其完成后再执行")
     base = skill_root()
     jid = _new_job()
     job = _JOBS[jid]
@@ -488,7 +495,17 @@ async def api_organize_apply(body: ApplyBody, cfg: dict = Depends(get_config)):
             print(f"[organize] 任务失败: {str(e)[:500]}", file=sys.stderr)
             _finish_db_log("error", str(e)[:500])
 
-    threading.Thread(target=_worker, daemon=True).start()
+    def _run_guarded():
+        try:
+            _worker()
+        finally:
+            _ORGANIZE_LOCK.release()   # 无论 worker 成功/异常都释放, 让下一次整理能进
+
+    try:
+        threading.Thread(target=_run_guarded, daemon=True).start()
+    except Exception:  # noqa: BLE001  起线程失败(极罕见)也要释放, 否则永久锁死
+        _ORGANIZE_LOCK.release()
+        raise
     return {"ok": True, "job_id": jid,
             "msg": "整理已在后台启动, 轮询 GET /api/organize/apply/" + jid + " 查看进度"}
 
