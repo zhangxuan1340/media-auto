@@ -141,6 +141,14 @@ async def _sel(page, sel, value):
     await page.wait_for_timeout(450)
 
 
+async def _open_trend_filters(page, k):
+    """高级筛选行现在默认收起(省篇幅) —— 操作控件前先点「筛选」按钮展开。"""
+    btn = page.locator(f"#tfToggle-{k}")
+    if await btn.count():
+        await btn.click()
+        await page.wait_for_timeout(300)
+
+
 async def _last_trend(hits, kind, after=None):
     after = after if after is not None else 0
     for u in reversed(hits[after:]):
@@ -194,6 +202,19 @@ async def flow(base):
 
         n = await _goto_tab(page, "movie", hits)
 
+        # 1a) 高级筛选行默认收起(省篇幅) + 「筛选」按钮存在 + 点击可展开
+        panel = page.locator("#tab-movie .trend-filters")
+        toggle = page.locator("#tfToggle-movie")
+        check("1a) 有「筛选」展开按钮", await toggle.count() == 1)
+        check("1a) 无筛选时高级筛选行默认收起", await panel.count() == 1
+              and "open" not in (await panel.get_attribute("class") or ""),
+              await panel.get_attribute("class"))
+        check("1a) 默认收起时日期框不可见", not await page.locator("#tDateFrom-movie").is_visible())
+        await toggle.click()
+        await page.wait_for_timeout(300)
+        check("1a) 点「筛选」后展开(日期框可见)", "open" in (await panel.get_attribute("class") or "")
+              and await page.locator("#tDateFrom-movie").is_visible())
+
         # 1) 工具栏长出高级筛选行
         check("1) 高级筛选行存在", await page.locator("#tab-movie .trend-filters").count() == 1)
         check("1) 日期区间两个输入", await page.locator("#tDateFrom-movie").count() == 1
@@ -234,6 +255,11 @@ async def flow(base):
         check("2) 有筛选时日/周榜禁用", await w.is_disabled())
         check("2) 重置按钮有高亮提示",
               await page.locator("#tab-movie .trend-filters .tfreset.on").count() == 1)
+        # 徽章: 日期(1)+分级(1)+平台(1) = 3, 折叠/展开都可见, 0 项才藏
+        badge = page.locator("#tfBadge-movie")
+        check("2) 徽章显示已选数量(3)", (await badge.inner_text()).strip() == "3"
+              and "show" in (await badge.get_attribute("class") or ""),
+              await badge.inner_text())
 
         # 3) 切走再切回 → 值必须回显(bug 本体)
         await _goto_tab(page, "tv", hits)
@@ -271,6 +297,7 @@ async def flow(base):
               await dummy.count() == 1 and await dummy.is_disabled()
               and "浏览" in (await dummy.get_attribute("title") or ""),
               await dummy.get_attribute("title"))
+        await _open_trend_filters(page, "tv")
         await _sel(page, "#tStatus-tv", "3")
         q = await _last_trend(hits, "tv")
         check("5) 剧集状态进请求", bool(q) and q.get("status") == ["3"], q)
@@ -363,6 +390,7 @@ async def flow(base):
         await _install_routes(page2, [])
         await _login(page2, base)
         await _goto_tab(page2, "movie", [])
+        await _open_trend_filters(page2, "movie")   # 移动端同样默认收起, 先展开再验可见性
         for sel in ("#tDateFrom-movie", "#tDateTo-movie", "#tCert-movie",
                     "#tProvider-movie", "#tRegion-movie"):
             check(f"7) 390px 可见 {sel}", await page2.locator(sel).is_visible())

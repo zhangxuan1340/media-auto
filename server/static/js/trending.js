@@ -21,8 +21,8 @@
 function _trendInst(kind, tabId){
   return {kind, tabId, window:'week', page:1, timer:null, hideLib:false, reqId:0,
           genre:0, country:'', dateFrom:'', dateTo:'', status:'', cert:'', provider:0,
-          region:'HK', providers:[], certs:[], regions:[],
-          loading:false, hasMore:true, _pendingFirst:false, list:[]};
+          region:'HK', providers:[], certs:[], regions:[], filtersOpen:false,
+          loading:false, hasMore:true, _pendingFirst:false, _pendingOpts:null, list:[]};
 }
 const TREND_MOVIE = _trendInst('movie','tab-movie');
 const TREND_TV    = _trendInst('tv','tab-tv');
@@ -108,6 +108,7 @@ async function loadTrending(inst){
     <select id="tWindow-${k}" onchange="loadTrendList(null,'${k}',{reset:1,window:this.value})"><option value="day"${inst.window==='day'?' selected':''}>日榜</option><option value="week"${inst.window==='week'?' selected':''}>周榜</option></select>
     <select id="tGenre-${k}" onchange="loadTrendList(null,'${k}',{reset:1,genre:+this.value})"><option value="0">全部类型</option></select>
     <select id="tCountry-${k}" aria-label="产地国" title="按影视产地国筛选(片子是哪国出品)。与下面高级筛选行里的「平台地区」是两回事" onchange="loadTrendList(null,'${k}',{reset:1,country:this.value})"><option value="">全部国家</option></select>
+    <button class="ghost tf-toggle" id="tfToggle-${k}" aria-expanded="false" title="展开/收起高级筛选(上映日期 / 状态 / 分级 / 流媒体平台)" onclick="trendToggleFilters('${k}')">${icon('sliders')}<span>筛选</span><span class="tf-badge" id="tfBadge-${k}">0</span><svg class="icn tf-caret" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>
     <span class="trend-spacer" style="flex:1"></span>
     <button class="ghost trend-refresh" onclick="loadTrendList(null,'${k}',{reset:1})">${icon('refresh')}刷新</button>
     <span id="trendInfo-${k}" class="trend-info" style="color:var(--muted);font-size:12px"></span>
@@ -128,6 +129,9 @@ async function loadTrending(inst){
       <button class="ghost tfreset" onclick="trendReset('${k}')" title="清空日期/状态/分级/平台/类型/产地国(平台地区是平台设置, 不清)">${icon('refresh')}重置</button>
     </div>
   </div><div id="trendBody-${k}"><div class="empty"><span class="spin"></span>加载热门榜…</div></div>`;
+  // 高级筛选行默认收起; 但已有激活筛选时自动展开 —— 避免"数据是筛过的却看不见筛了什么"
+  inst.filtersOpen = _trendAdvFilterCount(inst) > 0;
+  _applyTrendFilterPanel(inst);
   // ⚠️ 不在这里把筛选框写死成"全部": 值一律由实例状态回填
   // (genre/country 等下拉要等选项到位才能设值 → loadTrendFilters 里设;
   //  日期/状态这类建工具栏时就带值, 这里不覆盖)
@@ -227,6 +231,33 @@ function _trendAnyFilter(inst){
   return !!(inst.genre || inst.country || inst.dateFrom || inst.dateTo ||
             inst.status || inst.cert || inst.provider);
 }
+// 高级筛选行里激活的项数(日期/状态/分级/平台各算 1; 产地国/类型在第一行常显, 不计)
+// 「筛选」按钮上的徽章用 —— 折叠时也一眼看到"筛了几项", 避免重演"筛了却看不见"
+function _trendAdvFilterCount(inst){
+  let n = 0;
+  if(inst.dateFrom || inst.dateTo) n++;
+  if(inst.status) n++;
+  if(inst.cert) n++;
+  if(inst.provider) n++;
+  return n;
+}
+// 展开/收起高级筛选行(「筛选」按钮点一下切换)
+function trendToggleFilters(k){
+  const inst = (k==='tv'?TREND_TV:TREND_MOVIE);
+  inst.filtersOpen = !inst.filtersOpen;
+  _applyTrendFilterPanel(inst);
+}
+// 把"展开/收起"状态落到 DOM(行显示 + 按钮 aria-expanded + 箭头旋转)
+function _applyTrendFilterPanel(inst){
+  const pane = document.getElementById(inst.tabId);
+  const panel = pane ? pane.querySelector('.trend-filters') : null;
+  if(panel) panel.classList.toggle('open', !!inst.filtersOpen);
+  const btn = $('#tfToggle-'+inst.kind);
+  if(btn){
+    btn.setAttribute('aria-expanded', String(!!inst.filtersOpen));
+    btn.classList.toggle('open', !!inst.filtersOpen);
+  }
+}
 function _syncTrendFilterUI(inst){
   inst = inst || TREND;
   const w = $('#tWindow-'+inst.kind);
@@ -235,8 +266,14 @@ function _syncTrendFilterUI(inst){
     w.disabled = filtered;
     w.title = filtered ? '选了筛选条件后按热度排序, 日榜/周榜不适用' : '';
   }
-  // 有筛选时给「重置」点个高亮(纯视觉提示, 随时可点)
   const pane = document.getElementById(inst.tabId);
+  // 高级筛选徽章: 折叠/展开都可见; 0 项时藏起
+  const n = _trendAdvFilterCount(inst);
+  const badge = $('#tfBadge-'+inst.kind);
+  if(badge){ badge.textContent = String(n); badge.classList.toggle('show', n > 0); }
+  const tbtn = $('#tfToggle-'+inst.kind);
+  if(tbtn) tbtn.classList.toggle('on', n > 0);
+  // 有筛选时给「重置」点个高亮(纯视觉提示, 随时可点)
   const rs = pane ? pane.querySelector('.trend-filters .tfreset') : null;
   if(rs) rs.classList.toggle('on', filtered);
 }
@@ -258,7 +295,14 @@ async function loadTrendList(manual, k, opts){
   const kk = inst.kind;
   const el = $('#trendBody-'+kk); if(!el) return;
   const list = inst.list;
-  if(inst.loading) return;              // 防重入: 滚动事件/手动刷新并发触发时忽略(根治"点好几次"的竞态)
+  if(inst.loading){
+    // 防重入: 自动加载(滚动/定时/首屏, 无 opts)并发时忽略(根治"点好几次"的竞态)。
+    // ⚠️ 但用户主动变更(改筛选/刷新/换地区, 带 opts)此时"状态已被上面写新、请求却没发"
+    //    —— 直接 return 会让"下拉已选新条件、列表还是旧数据"(用户反馈的"对不上")。
+    //    记一笔, 等在途请求 finally 释放锁后重放(不引入真并发, 复用 _pendingFirst 模式)。
+    if(opts) inst._pendingOpts = Object.assign({}, opts);
+    return;
+  }
   inst.loading = true;
   let _autoMore = false;   // "不满一屏需自动续"标记: 在 finally 释放锁后再消费(try 里直接递归会被防重入拦掉)
   const tok = ++inst.reqId;   // 请求令牌: 期间若发起更新请求(刷新/切榜单/自动刷新), 本次过期响应直接丢弃
@@ -320,9 +364,16 @@ async function loadTrendList(manual, k, opts){
     else _clearTrendFoot(el);   // 失败也清光所有指示行(下一轮滚动会重新插)
   }finally{
     inst.loading = false;
-    // 切回页签时若有在途旧请求占着锁, loadTrending 置了 _pendingFirst;
-    // 此处释放锁后补一次首屏, 避免首屏卡死在"加载热门榜…"
-    if(inst._pendingFirst){ inst._pendingFirst = false; inst.page = 1; loadTrendList(null, kk); }
+    // 用户主动变更期间被"防重入"拦下的加载(带 opts)此刻重放 —— 状态已写新, 补发请求,
+    // 否则"下拉已选、列表还是旧的"。优先级高于 _pendingFirst(用户的最新筛选意图为准)。
+    if(inst._pendingOpts){
+      const po = inst._pendingOpts; inst._pendingOpts = null; inst._pendingFirst = false;
+      loadTrendList(null, kk, po);
+    }else if(inst._pendingFirst){
+      // 切回页签时若有在途旧请求占着锁, loadTrending 置了 _pendingFirst;
+      // 此处释放锁后补一次首屏, 避免首屏卡死在"加载热门榜…"
+      inst._pendingFirst = false; inst.page = 1; loadTrendList(null, kk);
+    }
   }
   if(_autoMore) _trendNextPage(kk);   // 锁已释放, 安全递归(每轮都是新的 loadTrendList 调用)
 }
