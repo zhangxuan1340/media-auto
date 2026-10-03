@@ -237,6 +237,11 @@
   .trend-toolbar .trend-filters .tfdates input{flex:1 1 0;min-width:0;padding:8px 10px;font-size:13px;
     border:1px solid var(--line);border-radius:var(--r-s);background:var(--glass);color:var(--text)}
   .trend-toolbar .trend-filters .tfsep{color:var(--muted);font-size:13px}
+  /* 平台地区 = 一个带可见标签的分组(标签 + 下拉)。
+     必须是**一个** flex 项(不能把标签直接塞进 .trend-filters)——
+     标签单独成项会被移动端的 order:3 规则甩到别的下拉前面去。 */
+  .trend-toolbar .trend-filters .tfgroup{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0}
+  .trend-toolbar .trend-filters .tflbl{flex:0 0 auto;font-size:12px;color:var(--muted);white-space:nowrap}
   .trend-toolbar .trend-filters select{flex:1 1 130px;min-width:0;font-size:13px;padding:8px 10px}
   .trend-toolbar .trend-filters select:disabled{opacity:.55;cursor:default}
   .trend-toolbar .trend-filters .tfreset{flex:0 0 auto;padding:8px 14px;font-size:12px}
@@ -880,6 +885,8 @@
        的 order:3 会波及这里的 select, 而 .tfreset 默认 order:0 会被排到下拉前面。 */
     .trend-toolbar .trend-filters .tfdates{flex:1 1 100%}
     .trend-toolbar .trend-filters .tfdates input{font-size:16px;padding:9px 8px}
+    .trend-toolbar .trend-filters .tfgroup{order:3;flex:1 1 46%}
+    .trend-toolbar .trend-filters .tflbl{font-size:13px}
     .trend-toolbar .trend-filters select{order:3;flex:1 1 30%;min-width:0;font-size:16px;padding:9px 8px}
     .trend-toolbar .trend-filters .tfreset{order:4;flex:1 1 auto;justify-content:center;padding:9px 12px;font-size:13px}
     .setting{padding:12px 13px}

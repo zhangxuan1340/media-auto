@@ -138,7 +138,7 @@ def t_discover_params():
               and p.get("include_adult") == "false", p)
 
         # A17 平台列表(按地区)截前 60 + 形状
-        rows = run(tmdbc.watch_providers(TMDB_CFG, "movie", "CN"))
+        rows = run(tmdbc.watch_providers(TMDB_CFG, "movie", "HK"))
         check("A17 平台列表形状", rows == [{"id": 8, "name": "Netflix", "logo": ""}], rows)
 
         # A18 分级表: 只留常用国家 + US 固定序宽松→严格 + 同格式 "US:..."
@@ -147,6 +147,14 @@ def t_discover_params():
         check("A18 分级固定序 PG-13 在 R 之前", names.index("US:PG-13") < names.index("US:R"), names)
         check("A19 非常用国家(XX)不进下拉", all(not c["cert"].startswith("XX:") for c in certs), names)
         check("A20 分级值带国家前缀", all(":" in c["cert"] for c in certs), names)
+
+        # A21/A22 平台地区的默认值: TMDB 没有 CN(中国大陆)的平台数据, 兜底绝不能是 CN
+        run(tmdbc.discover_page(TMDB_CFG, "movie", page=1,
+                                filters={"provider": 8, "watch_region": ""}))
+        check("A21 只给平台没给地区 → 兜底默认地区", CAP["params"].get("watch_region")
+              == tmdbc.DEFAULT_WATCH_REGION, CAP["params"])
+        check("A22 平台地区表与默认值都不含 CN", tmdbc.DEFAULT_WATCH_REGION != "CN"
+              and "CN" not in tmdbc._WATCH_REGIONS, tmdbc._WATCH_REGIONS)
     finally:
         tmdbc._tmdb_get = orig
 
@@ -231,9 +239,9 @@ def t_trending_endpoint():
               and calls["discover"][0]["filters"]["cert"] == "US:R", calls)
         reset()
         run(call(provider=8))
-        check("B16 平台走 discover + 地区兜底 CN",
+        check("B16 平台走 discover + 地区兜底默认地区(非 CN)",
               calls["discover"][0]["filters"]["provider"] == 8
-              and calls["discover"][0]["filters"]["watch_region"] == "CN", calls)
+              and calls["discover"][0]["filters"]["watch_region"] == "HK", calls)
         reset()
         run(call(genre=28, country="CN", date_from="2020-01-01", date_to="2020-12-31"))
         f = calls["discover"][0]
@@ -262,7 +270,7 @@ def t_trending_endpoint():
 def t_filters_endpoint():
     calls = {"prov": 0, "cert": 0}
 
-    async def _prov(cfg, kind, region="CN"):
+    async def _prov(cfg, kind, region="HK"):
         calls["prov"] += 1
         return [{"id": 8, "name": "Netflix", "logo": "/a.png"}]
 
@@ -275,7 +283,7 @@ def t_filters_endpoint():
     browse._FILTERS_CACHE.clear()
     try:
         async def call(**kw):
-            base = dict(kind="movie", region="CN", cfg=TMDB_CFG)
+            base = dict(kind="movie", region="HK", cfg=TMDB_CFG)
             base.update(kw)
             return await browse.trending_filters(**base)
 
@@ -287,12 +295,21 @@ def t_filters_endpoint():
                 return e
 
         r = run(call())
-        check("C1 平台地区列表(内置表)", r["regions"] and r["regions"][0]["code"] == "CN", r.get("regions"))
+        check("C1 平台地区列表(内置表, 首项=默认地区)", r["regions"]
+              and r["regions"][0]["code"] == tmdbc.DEFAULT_WATCH_REGION, r.get("regions"))
+        check("C1b 地区表不含 CN(TMDB 无中国平台数据)",
+              all(x["code"] != "CN" for x in r["regions"]), r.get("regions"))
+        check("C1c 回显实际生效地区", r.get("region") == "HK", r.get("region"))
+        check("C1d 平台列表是拉取成功(非限流)", r.get("providers_err") is False, r.get("providers_err"))
         check("C2 电影平台列表", r["providers"] and r["providers"][0]["name"] == "Netflix", r["providers"])
         check("C3 电影分级列表", r["certifications"] and r["certifications"][0]["cert"] == "US:PG-13",
               r["certifications"])
         r2 = run(call())
         check("C4 有平台时第二次命中缓存(不再打 TMDB)", calls["prov"] == 1 and calls["cert"] == 1, calls)
+        n0 = calls["prov"]
+        r4 = run(call(region=""))
+        check("C4b 不给地区 → 默认地区且同缓存键", r4.get("region") == tmdbc.DEFAULT_WATCH_REGION
+              and calls["prov"] == n0, (r4.get("region"), calls))
 
         r3 = run(call(kind="tv"))
         check("C5 剧集不分级(前端因此置灰并注明)",
@@ -307,6 +324,11 @@ def t_filters_endpoint():
         n = calls["prov"]
         run(call(region="US"))
         check("C9 换地区重新取平台", calls["prov"] == n + 1, calls)
+        # 表里没有的地区(如 CN, TMDB 无中国平台数据)→ 落到默认地区, 不去 TMDB 白跑一趟
+        r5 = run(call(region="CN"))
+        check("C10 地区表里没有的(CN)→ 落到默认地区且复用缓存",
+              r5.get("region") == tmdbc.DEFAULT_WATCH_REGION and calls["prov"] == n + 1,
+              (r5.get("region"), calls))
     finally:
         tmdbc.watch_providers, tmdbc.certifications = orig_p, orig_c
         browse._FILTERS_CACHE.clear()
@@ -468,6 +490,21 @@ def t_frontend():
           and 'f.get("date_from") or ""' in srv, "")
     check("F17 后端: 静默忽略=假筛选, 校验必须 400", "_TV_STATUS" in srv and "_CERT_RE" in srv, "")
     check("F18 后端: 剧集分级只能本地筛", "剧集分级请在「管理 → 浏览」" in srv, "")
+
+    # F 两个"地区"必须分清: 产地国(全部国家) vs 平台地区(只与流媒体平台成对)
+    tmdbc_src = (ROOT / "clients/tmdb/client.py").read_text(encoding="utf-8")
+    m = re.search(r"_WATCH_REGIONS = \[(.*?)\]", tmdbc_src, re.S)
+    check("F19 平台地区表不含 CN(TMDB 没有中国平台数据)", m is not None and '"CN"' not in m.group(1),
+          (m.group(1)[:90] if m else "没找到 _WATCH_REGIONS"))
+    check("F20 默认平台地区不是 CN", 'DEFAULT_WATCH_REGION = "HK"' in tmdbc_src, "")
+    check("F21 平台地区有可见标签(不是裸国家名)", 'class="tflbl"' in trend
+          and "平台地区</span>" in trend, "")
+    check("F22 产地国/平台地区各标各的", 'aria-label="产地国"' in trend
+          and 'aria-label="平台地区"' in trend, "")
+    check("F23 该地区无平台数据时清空禁用平台下拉(防旧地区平台残留)",
+          "该地区暂无平台数据" in trend and "ps.disabled = true" in trend, "")
+    check("F24 平台下拉拉取失败不清空(providers_err 有分流)",
+          "providers_err" in trend and "providers_err" in srv, "")
 
 
 def main():

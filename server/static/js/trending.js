@@ -21,7 +21,7 @@
 function _trendInst(kind, tabId){
   return {kind, tabId, window:'week', page:1, timer:null, hideLib:false, reqId:0,
           genre:0, country:'', dateFrom:'', dateTo:'', status:'', cert:'', provider:0,
-          region:'CN', providers:[], certs:[], regions:[],
+          region:'HK', providers:[], certs:[], regions:[],
           loading:false, hasMore:true, _pendingFirst:false, list:[]};
 }
 const TREND_MOVIE = _trendInst('movie','tab-movie');
@@ -107,7 +107,7 @@ async function loadTrending(inst){
     <i class="tb-break" aria-hidden="true"></i>
     <select id="tWindow-${k}" onchange="loadTrendList(null,'${k}',{reset:1,window:this.value})"><option value="day"${inst.window==='day'?' selected':''}>日榜</option><option value="week"${inst.window==='week'?' selected':''}>周榜</option></select>
     <select id="tGenre-${k}" onchange="loadTrendList(null,'${k}',{reset:1,genre:+this.value})"><option value="0">全部类型</option></select>
-    <select id="tCountry-${k}" onchange="loadTrendList(null,'${k}',{reset:1,country:this.value})"><option value="">全部国家</option></select>
+    <select id="tCountry-${k}" aria-label="产地国" title="按影视产地国筛选(片子是哪国出品)。与下面高级筛选行里的「平台地区」是两回事" onchange="loadTrendList(null,'${k}',{reset:1,country:this.value})"><option value="">全部国家</option></select>
     <span class="trend-spacer" style="flex:1"></span>
     <button class="ghost trend-refresh" onclick="loadTrendList(null,'${k}',{reset:1})">${icon('refresh')}刷新</button>
     <span id="trendInfo-${k}" class="trend-info" style="color:var(--muted);font-size:12px"></span>
@@ -122,9 +122,10 @@ async function loadTrending(inst){
       ${k==='tv' ? `<select id="tStatus-${k}" aria-label="状态" onchange="loadTrendList(null,'${k}',{reset:1,status:this.value})">${_trendOpts(TREND_STATUS_OPTS, inst.status, '全部状态')}</select>` : ''}
       ${k==='movie' ? `<select id="tCert-${k}" aria-label="分级" onchange="loadTrendList(null,'${k}',{reset:1,cert:this.value})">${_trendOpts(inst.certs.map(c=>[c.cert,c.cert]), inst.cert, '全部分级')}</select>`
         : `<select id="tCertDummy-${k}" disabled aria-label="分级" title="TMDB 发现榜没有剧集分级参数; 剧集分级到「管理 → 浏览」按本地缓存筛"><option>分级(剧集不支持)</option></select>`}
-      <select id="tProvider-${k}" aria-label="流媒体平台" onchange="loadTrendList(null,'${k}',{reset:1,provider:+this.value})">${_trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台')}</select>
-      <select id="tRegion-${k}" aria-label="平台地区" onchange="_trendRegion(this.value,'${k}')">${_trendOpts((inst.regions.length?inst.regions:[{code:'CN',name:'中国'}]).map(r=>[r.code,r.name]), inst.region, '')}</select>
-      <button class="ghost tfreset" onclick="trendReset('${k}')" title="清空日期/状态/分级/平台/类型/国家">${icon('refresh')}重置</button>
+      <select id="tProvider-${k}" aria-label="流媒体平台" title="流媒体平台: 只在选中具体平台时生效; 平台列表按右边的「平台地区」取" onchange="loadTrendList(null,'${k}',{reset:1,provider:+this.value})">${_trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台')}</select>
+      <span class="tfgroup"><span class="tflbl" aria-hidden="true">平台地区</span>
+        <select id="tRegion-${k}" aria-label="平台地区" title="流媒体平台的可用地区: 决定「全部平台」里有哪些平台, 只与平台一起生效。TMDB 没有中国大陆(CN)的平台数据, 所以没有「中国」这一项(默认中国香港)。与上面的「全部国家」(产地国)无关" onchange="_trendRegion(this.value,'${k}')">${_trendOpts((inst.regions.length?inst.regions:[{code:'HK',name:'中国香港'}]).map(r=>[r.code,r.name]), inst.region, '')}</select></span>
+      <button class="ghost tfreset" onclick="trendReset('${k}')" title="清空日期/状态/分级/平台/类型/产地国(平台地区是平台设置, 不清)">${icon('refresh')}重置</button>
     </div>
   </div><div id="trendBody-${k}"><div class="empty"><span class="spin"></span>加载热门榜…</div></div>`;
   // ⚠️ 不在这里把筛选框写死成"全部": 值一律由实例状态回填
@@ -180,22 +181,37 @@ async function loadTrendFilters(k){
     }
   }catch{}
   // 高级筛选: 平台地区 + 该地区的流媒体平台 + 分级(仅电影, 剧集 TMDB 无此参数)
+  //   ⚠️ 平台地区 ≠ 产地国: 这里是"流媒体平台在哪个地区有片", 只与平台成对生效;
+  //      工具栏第一行的「全部国家」是产地国(片子是哪国出品)。两个下拉语义不同,
+  //      所以平台地区必须带可见标签(2026-10-02 用户反馈"怎么存在两个地区筛选")。
   try{
-    const f = await api(`/api/trending/filters?kind=${inst.kind}&region=${encodeURIComponent(inst.region||'CN')}`);
+    const f = await api(`/api/trending/filters?kind=${inst.kind}&region=${encodeURIComponent(inst.region||'HK')}`);
     inst.regions = f.regions || [];
     inst.providers = f.providers || [];
     inst.certs = f.certifications || [];
+    if(f.region) inst.region = f.region;   // 后端回显实际生效的地区(请求的地区已不在表里 → 默认地区)
     const rs = $('#tRegion-'+k);
     if(rs && inst.regions.length){
       rs.innerHTML = _trendOpts(inst.regions.map(r=>[r.code,r.name]), inst.region, '');
-      rs.value = inst.region;
-      if(!rs.value){ rs.selectedIndex = 0; inst.region = rs.value; }
+      rs.value = inst.region || '';
+      if(!rs.value) rs.selectedIndex = 0;   // 选项里没有(过期地区)→ 落到表里第一个
+      inst.region = rs.value;
     }
     const ps = $('#tProvider-'+k);
-    if(ps && inst.providers.length){
-      ps.innerHTML = _trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台');
-      ps.value = String(inst.provider || '');
-      if(ps.value !== String(inst.provider || '')) inst.provider = 0;   // 换地区后平台不在列表 → 归零
+    if(ps){
+      if(inst.providers.length){
+        ps.disabled = false;
+        ps.innerHTML = _trendOpts(inst.providers.map(p=>[p.id,p.name]), inst.provider, '全部平台');
+        ps.value = String(inst.provider || '');
+        if(ps.value !== String(inst.provider || '')) inst.provider = 0;   // 换地区后平台不在列表 → 归零
+      }else if(!f.providers_err){
+        // 该地区确实没有平台数据(TMDB 没有这张平台表, 如 CN)→ 清空并禁用。
+        // 绝不能留着上一个地区的平台选项: 那样"旧平台 + 新地区"筛出来恒是空榜单。
+        inst.provider = 0;
+        ps.disabled = true;
+        ps.innerHTML = '<option value="">该地区暂无平台数据</option>';
+      }
+      // providers_err = 拉取失败(限流/无 key)≠ 没有数据 → 保留现有选项不清空
     }
     const csel = $('#tCert-'+k);
     if(csel && inst.certs.length){
@@ -256,7 +272,7 @@ async function loadTrendList(manual, k, opts){
     if(inst.dateTo) q.set('date_to', inst.dateTo);
     if(inst.status) q.set('status', inst.status);
     if(inst.cert) q.set('cert', inst.cert);
-    if(inst.provider){ q.set('provider', String(inst.provider)); q.set('watch_region', inst.region || 'CN'); }
+    if(inst.provider){ q.set('provider', String(inst.provider)); q.set('watch_region', inst.region || 'HK'); }
     const d = await api(`/api/trending/${inst.kind}?${q.toString()}`);
     if(tok !== inst.reqId) return;   // 过期响应 —— 不渲染(根治"旧响应把同页数据再追加一遍"的重复)
     const items = d.items||[];

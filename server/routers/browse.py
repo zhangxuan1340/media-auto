@@ -474,9 +474,11 @@ def _trend_filters(kind, date_from, date_to, status, cert, provider, watch_regio
     if provider:
         region = (watch_region or "").strip().upper()
         if region and not (len(region) == 2 and region.isalpha()):
-            raise HTTPException(400, "watch_region 需为 2 字母国家代码(如 CN/US)")
-        # TMDB 要求 with_watch_providers 与 watch_region 成对: 没给地区按 CN 兜底
-        f["provider"], f["watch_region"] = provider, region or "CN"
+            raise HTTPException(400, "watch_region 需为 2 字母国家代码(如 HK/US)")
+        # TMDB 要求 with_watch_providers 与 watch_region 成对: 没给地区按默认地区兜底。
+        # 默认不是 CN —— TMDB 没有中国大陆平台数据(watch_region=CN 恒 0 结果)。
+        from clients.tmdb import client as _tmdb
+        f["provider"], f["watch_region"] = provider, region or _tmdb.DEFAULT_WATCH_REGION
     return f
 
 
@@ -485,7 +487,7 @@ _FILTERS_CACHE = {}   # {(kind, region): (ts, payload)} —— 平台/分级表�
 
 
 @router.get("/trending/filters")
-async def trending_filters(kind: str = Query("movie"), region: str = Query("CN"),
+async def trending_filters(kind: str = Query("movie"), region: str = Query(""),
                            cfg: dict = Depends(get_config)):
     """榜单高级筛选下拉一次取齐: 平台地区(内置表) + 该地区的流媒体平台 + 分级。
 
@@ -493,24 +495,41 @@ async def trending_filters(kind: str = Query("movie"), region: str = Query("CN")
     「管理 → 浏览」按本地 tmdb_media.certification 筛(那边数据是齐的)。
     平台/分级按 (kind, region) 进程内缓存 1 小时; 拉不到平台(TMDB 限流/无 key)
     时**不缓存**, 免得一次失败把下拉饿 1 小时。
+
+    返回:
+      region        实际生效的平台地区(请求里没给/给的地区已不在表里 → 默认地区)
+      providers     该地区的流媒体平台;**空 = 该地区确实没有平台数据**
+      providers_err 平台列表是拉取失败(限流/无 key)而非"没有数据" ——
+                    前端据此决定是清空平台下拉还是保留旧选项
     """
     if kind not in ("movie", "tv"):
         raise HTTPException(400, "kind 仅支持 movie / tv")
-    region = (region or "CN").strip().upper()
-    if not (len(region) == 2 and region.isalpha()):
-        raise HTTPException(400, "region 需为 2 字母国家代码(如 CN/US)")
+    from clients.tmdb import client as tmdb
+    region = (region or "").strip().upper()
+    if region and not (len(region) == 2 and region.isalpha()):
+        raise HTTPException(400, "region 需为 2 字母国家代码(如 HK/US)")
+    # 地区表里没有的地区(如 CN —— TMDB 没有中国大陆平台数据)→ 落到默认地区再取平台,
+    # 免得"地区是 CN、平台列表却按别的地区拉"互相打架。回显 region 让前端跟着改。
+    regions = tmdb.watch_regions()
+    codes = [r["code"] for r in regions]
+    if region not in codes:
+        region = (tmdb.DEFAULT_WATCH_REGION if tmdb.DEFAULT_WATCH_REGION in codes
+                  else (codes[0] if codes else tmdb.DEFAULT_WATCH_REGION))
     key = (kind, region)
     now = time.time()
     hit = _FILTERS_CACHE.get(key)
     if hit and now - hit[0] < _FILTERS_TTL:
         return hit[1]
-    from clients.tmdb import client as tmdb
     has_key = bool((cfg.get("tmdb", {}) or {}).get("api_key"))
+    tmdb.last_error = ""
     providers = await tmdb.watch_providers(cfg, kind, region) if has_key else []
+    # watch_providers 吞异常并写 last_error: 据此区分"该地区没有平台"和"没拉到"
+    providers_err = (not has_key) or bool(tmdb.last_error)
     certs = await tmdb.certifications(cfg, kind) if (has_key and kind == "movie") else []
-    payload = {"regions": tmdb.watch_regions(), "providers": providers,
-               "certifications": certs}
-    if providers:
+    payload = {"regions": regions, "region": region, "providers": providers,
+               "providers_err": providers_err, "certifications": certs}
+    # 有平台, 或"确实没平台(拉取成功)"→ 缓存; 拉取失败不缓存(否则一次限流饿下拉 1 小时)
+    if providers or not providers_err:
         _FILTERS_CACHE[key] = (now, payload)
         if len(_FILTERS_CACHE) > 50:
             _FILTERS_CACHE.pop(min(_FILTERS_CACHE, key=lambda k: _FILTERS_CACHE[k][0]), None)

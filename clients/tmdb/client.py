@@ -376,7 +376,7 @@ async def discover_page(cfg, kind, page=1, genre_id=None, country=None,
       cert               分级 "US:PG-13" → certification + certification_country + region
                          (仅 kind=movie —— TMDB discover/tv 没有分级参数, 剧集分级
                          只能走本地缓存, 见 /api/browse/certs)
-      provider / watch_region  流媒体平台 id + 地区(如 CN), TMDB 要求两者成对
+      provider / watch_region  流媒体平台 id + 地区(如 HK/US), TMDB 要求两者成对
     """
     f = dict(filters or {})
     params = {"language": _lang(cfg), "page": page,
@@ -402,7 +402,7 @@ async def discover_page(cfg, kind, page=1, genre_id=None, country=None,
             params["region"] = cc          # docs: certification 与 region 配合
     if f.get("provider"):
         params["with_watch_providers"] = int(f["provider"])
-        params["watch_region"] = (f.get("watch_region") or "CN").upper()
+        params["watch_region"] = (f.get("watch_region") or DEFAULT_WATCH_REGION).upper()
     try:
         data = await _tmdb_get(cfg, f"/3/discover/{kind}", params)
     except Exception as e:  # noqa: BLE001
@@ -441,8 +441,15 @@ def countries(cfg=None):
 
 # 平台地区(筛选下拉的 watch_region): 只给主流地区 —— 全表几十个地区里
 # 绝大多数没有可用平台, 列出来反而难找。中文名与 _COUNTRY_TABLE 同源。
-_WATCH_REGIONS = ["CN", "HK", "TW", "JP", "KR", "US", "GB", "DE", "FR",
+# ⚠️ 表里**没有 CN(中国大陆)**: TMDB 根本没有中国的平台数据 ——
+# /3/watch/providers/regions 官方 139 个地区不含 CN, watch_providers(..., "CN")
+# 电影/剧集都返回 0 条(2026-10-02 实测)。曾把 CN 当默认平台地区, 结果
+# 「全部平台」下拉永远只有一个空选项, 平台筛选对默认用户完全不可用。
+# 中国香港/台湾/日本都有数据(含 iQIYI 等), 中文用户默认落到 HK。
+_WATCH_REGIONS = ["HK", "TW", "JP", "KR", "US", "GB", "DE", "FR",
                   "AU", "IN", "TH", "ES", "IT", "BR", "CA"]
+# 平台地区的默认/兜底值(前端初始值、只给平台没给地区时的兜底)。
+DEFAULT_WATCH_REGION = "HK"
 
 
 def watch_regions():

@@ -58,16 +58,24 @@ def free_port():
 
 
 # 浏览器侧桩数据(只要形状对, 前端不会去挑内容)
+# region/providers_err 是后端真实字段: region=实际生效的平台地区(默认 HK ——
+# TMDB 没有 CN 的平台数据), providers_err 区分"该地区没有平台"和"没拉到"。
 FILTERS_MOVIE = {
-    "regions": [{"code": "CN", "name": "中国"}, {"code": "US", "name": "美国"}],
+    "regions": [{"code": "HK", "name": "中国香港"}, {"code": "US", "name": "美国"}],
+    "region": "HK",
     "providers": [{"id": 8, "name": "Netflix"}, {"id": 9, "name": "Prime Video"}],
+    "providers_err": False,
     "certifications": [{"cert": "US:G"}, {"cert": "US:PG-13"}, {"cert": "US:R"}],
 }
 FILTERS_TV = {
-    "regions": [{"code": "CN", "name": "中国"}, {"code": "US", "name": "美国"}],
+    "regions": [{"code": "HK", "name": "中国香港"}, {"code": "US", "name": "美国"}],
+    "region": "HK",
     "providers": [{"id": 8, "name": "Netflix"}, {"id": 9, "name": "Prime Video"}],
+    "providers_err": False,
     "certifications": [],
 }
+# 用例 11: 切到一个 TMDB 没有平台表的地区 → providers 为空且 providers_err=False
+STATE = {"no_data": False}
 BROWSE_CERTS = {"tv": ["US:TV-PG", "US:TV-14", "US:TV-MA"], "movie": ["US:PG-13", "US:R"]}
 BROWSE_YEARS = [2019, 2020, 2021, 2022]
 
@@ -88,7 +96,10 @@ async def _install_routes(page, hits):
 
         if path.startswith("/api/trending/filters"):
             kind = (qs.get("kind") or ["movie"])[0]
-            await body(FILTERS_TV if kind == "tv" else FILTERS_MOVIE)
+            payload = FILTERS_TV if kind == "tv" else FILTERS_MOVIE
+            if STATE["no_data"]:
+                payload = dict(payload, providers=[], providers_err=False)
+            await body(payload)
         elif path.startswith("/api/trending/countries"):
             await body([{"code": "CN", "name": "中国"}, {"code": "US", "name": "美国"}])
         elif path.startswith("/api/trending/movie") or path.startswith("/api/trending/tv"):
@@ -192,6 +203,14 @@ async def flow(base):
               and await page.locator("#tProvider-movie").count() == 1
               and await page.locator("#tRegion-movie").count() == 1
               and await page.locator("#tab-movie .trend-filters .tfreset").count() == 1)
+        # 两个"地区"必须分清: 第一行是产地国, 平台地区要带可见标签(不能是个裸国家名)
+        lbl = page.locator("#tab-movie .trend-filters .tflbl")
+        check("1) 平台地区有可见标签", await lbl.count() == 1
+              and (await lbl.inner_text()).strip() == "平台地区" and await lbl.is_visible(),
+              await lbl.inner_text() if await lbl.count() else "无")
+        check("1) 产地国/平台地区各标各的",
+              await page.locator("#tCountry-movie").get_attribute("aria-label") == "产地国"
+              and await page.locator("#tRegion-movie").get_attribute("aria-label") == "平台地区", "")
         check("1) 电影没有状态下拉", await page.locator("#tStatus-movie").count() == 0)
         w = page.locator("#tWindow-movie")
         check("1) 无筛选时日/周榜可用", not await w.is_disabled())
@@ -211,7 +230,7 @@ async def flow(base):
               bool(q) and q.get("date_from") == ["2024-01-01"] and q.get("date_to") == ["2024-12-31"], q)
         check("2) 请求带分级", bool(q) and q.get("cert") == ["US:R"], q)
         check("2) 请求带平台+地区", bool(q) and q.get("provider") == ["9"]
-              and q.get("watch_region") == ["CN"], q)
+              and q.get("watch_region") == ["HK"], q)
         check("2) 有筛选时日/周榜禁用", await w.is_disabled())
         check("2) 重置按钮有高亮提示",
               await page.locator("#tab-movie .trend-filters .tfreset.on").count() == 1)
@@ -316,6 +335,21 @@ async def flow(base):
               await page.input_value("#bCert") == "" and await page.input_value("#bYearFrom") == "0",
               (await page.input_value("#bCert"), await page.input_value("#bYearFrom")))
 
+        # ---------- 11) 该平台地区没有平台数据(TMDB 没有这张平台表) ----------
+        await page.evaluate("switchTab('movie')")
+        await page.wait_for_timeout(900)
+        STATE["no_data"] = True
+        await page.evaluate("loadTrendFilters('movie')")
+        await page.wait_for_timeout(700)
+        ps = page.locator("#tProvider-movie")
+        check("11) 无平台数据 → 平台下拉只剩提示并禁用", await ps.is_disabled()
+              and "暂无平台数据" in (await ps.first.inner_text()), await ps.first.inner_text())
+        check("11) 无平台数据时已选平台归零", await ps.input_value() == "", await ps.input_value())
+        STATE["no_data"] = False
+        await page.evaluate("loadTrendFilters('movie')")
+        await page.wait_for_timeout(700)
+        check("11) 有数据时平台下拉恢复可用", not await ps.is_disabled(), "")
+
         check("6) 桌面无 JS 运行时错误", not errs, errs[:3])
         await ctx.close()
 
@@ -332,6 +366,9 @@ async def flow(base):
         for sel in ("#tDateFrom-movie", "#tDateTo-movie", "#tCert-movie",
                     "#tProvider-movie", "#tRegion-movie"):
             check(f"7) 390px 可见 {sel}", await page2.locator(sel).is_visible())
+        lbl2 = page2.locator("#tab-movie .trend-filters .tflbl")
+        check("7) 390px 平台地区标签可见", await lbl2.count() == 1 and await lbl2.is_visible(),
+              await lbl2.inner_text() if await lbl2.count() else "无")
         box = await page2.locator("#tab-movie .trend-filters").bounding_box()
         check("7) 390px 筛选行不横向溢出",
               bool(box) and box["x"] >= -1 and box["x"] + box["width"] <= 391, box)
