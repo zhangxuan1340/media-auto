@@ -387,10 +387,10 @@ class PushRecord(Base):
 class AppConfig(Base):
     """应用配置(JSON blob)—— 2026-09-26 起的配置唯一真相源。
 
-    配置文件只作「一次性导入源」: 首次启动若本表为空, 自动把
-    config/config.json(或 config.example.json)导入一行; 之后 Web「通用」页与首次
-    引导读写都在这里, 不再有并发写文件的竞态, 也不再有 JSON 语法错导致
-    load_config 静默返回 {} 的坑。
+    运行期只读写本表, 不依赖任何配置文件。首次启动若本表为空, 仅用
+    config.example.json 播种默认值(setup_done=0 → 进初始化引导); 之后 Web「通用」
+    页与首次引导的读写都在这里, 不再有并发写文件的竞态, 也不再有 JSON 语法错
+    导致 load_config 静默返回 {} 的坑。(config.json 已彻底移除, 见 2026-09-26。)
 
     key='config'        整份配置 JSON(indent=2, 与导出文件同格式)
     key='setup_done'    首次引导是否完成("1"/"0"; 从已有配置文件导入 = 1)
