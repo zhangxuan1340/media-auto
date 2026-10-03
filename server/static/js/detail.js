@@ -617,6 +617,18 @@ function _srcBadge(r){
   if(!s) return '';
   return `<span class="qsrc" title="来源: ${esc(_srcLabel(s))}">${esc(_srcLabel(s))}</span>`;
 }
+function _srcLabelFromItems(items){
+  // 按实际返回条目的来源去重汇总(失败的源不会贡献条目, 也就不该出现在"来源"里)
+  const set = new Set();
+  (items || []).forEach(r => r && r.source && set.add(r.source));
+  return set.size ? [...set].map(_srcLabel).join(' / ') : '';
+}
+function _aggWarnings(pages){
+  // 多源部分失败时后端会带 warnings(失败的源名+原因), 聚合成一句给界面提示
+  const out = [];
+  (pages || []).forEach(p => (p && p.warnings || []).forEach(w => { if (out.indexOf(w) < 0) out.push(w); }));
+  return out.join('; ');
+}
 async function searchMagnets(q, title, boxSel, limit, extra){
   limit = limit || 30;  // 默认拉 30 条(站点每页 10 条, 后端翻 3 页); 双查询并行, 首屏更快; 「加载更多」续翻
   extra = extra || {};
@@ -646,14 +658,17 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}`)));
     if(tok !== box._reqTok) return;
     const res = _magMerge(pages, limit, sort);
-    const src = _srcLabelFromPages(pages);
+    const warns = _aggWarnings(pages);
+    const src = _srcLabelFromItems(res) || _srcLabelFromPages(pages);
     const _multiSrc = new Set(res.map(r => r && r.source).filter(Boolean)).size > 1;
     if(!res.length){ box.innerHTML=`<div class="empty">${icon('search')} ${src} 没有命中</div>`; return; }
     const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
     // 窗口状态: 后端分段抓取(首屏 60 条), totalCount=已抓条数, exhausted=站点到底
     box._total = Math.max(0, ...pages.map(p => (p && p.totalCount) || 0));
     box._exhausted = pages.every(p => p && p.exhausted === true);
-    box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>` + res.map((r,i)=>`
+    box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>`
+      + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
+      + res.map((r,i)=>`
       <div class="res"><div class="info">
         <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
@@ -958,13 +973,16 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
     // 中文标题 + 英文原名 各扫一遍, 合并去重(整季包常按英文原名发布, 单查中文会漏)
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=20`)));
     const res = _magMerge(pages, 20, 'relevance');
-    const src = _srcLabelFromPages(pages);
+    const warns = _aggWarnings(pages);
+    const src = _srcLabelFromItems(res) || _srcLabelFromPages(pages);
     const _multiSrc = new Set(res.map(r => r && r.source).filter(Boolean)).size > 1;
-    if(!res.length){ box.innerHTML=`<div style="font-size:12px;color:var(--muted)">${src} 无「${esc(qs[0])}」命中</div>`; }
+    if(!res.length){ box.innerHTML=`<div style="font-size:12px;color:var(--muted)">${src} 无「${esc(qs[0])}」命中${warns?` · <span class="mag-warn" style="margin:0">部分源失败: ${esc(warns)}</span>`:''}</div>`; }
     else{
       const qTag = qs.length>1 ? ` · ${qs.length} 组查询` : '';
       const qShow = qs.join(' / ');
-      box.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${src} · ${res.length} 条${qTag} · 词: ${esc(qShow)}</div>` + res.map((r,i)=>`
+      box.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${src} · ${res.length} 条${qTag} · 词: ${esc(qShow)}</div>`
+        + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
+        + res.map((r,i)=>`
         <div class="res res-compact"><div class="info">
           <div class="n">${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
           ${_qualityTags(r.name, r)}
