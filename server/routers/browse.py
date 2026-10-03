@@ -334,8 +334,16 @@ def _in_library_series(tmdb_id) -> bool:
 # 热门(TMDB 趋势榜, 实时拉 + 短 TTL 进程内缓存, 不依赖本地同步)
 # ---------------------------------------------------------------------------
 _trending_cache: dict = {}   # {(kind, window, page): (ts, [raw], [deduped])}
-_trend_seen: dict = {}       # {(kind, window): set(去重键)} 跨页去重; 榜单刷新(第1页重新拉取)时重置
+_trend_seen: dict = {}       # {(kind, window) 或 fkey: set(去重键)} 跨页去重; 榜单刷新(第1页重新拉取)时重置
 _TRENDING_TTL = 600          # 10 分钟
+_TREND_SEEN_MAX = 200        # 去重集数量上限: 键是"每套筛选组合", 旧值只在同组合刷新时才清,
+                             # 长期运行 + 用户试多种筛选会无界累积 → 超限清最早插入的(无害)。
+def _trend_seen_get(key):
+    """取/建某组合的跨页去重集, 顺带做容量保护(见 _TREND_SEEN_MAX)。"""
+    s = _trend_seen.setdefault(key, set())
+    if len(_trend_seen) > _TREND_SEEN_MAX:
+        _trend_seen.pop(next(iter(_trend_seen)), None)
+    return s
 _TMDB_PAGE_SIZE = 20         # TMDB trending 固定每页 20 条
 
 
@@ -360,7 +368,7 @@ async def _trending_cached(cfg, kind, window, page, size):
         raw = await tmdb.trending(cfg, kind, time_window=window, page=page)
         if page == 1:  # 榜单刷新 → 重置跨页去重集
             _trend_seen.pop((kind, window), None)
-        seen = _trend_seen.setdefault((kind, window), set())
+        seen = _trend_seen_get((kind, window))
         deduped = []
         for c in raw[:size]:
             k = _trend_dedup_key(c)
@@ -403,7 +411,7 @@ async def _discover_trending_cached(cfg, kind, window, genre, country, page, siz
             filters=f)
         if page == 1:
             _trend_seen.pop(fkey, None)
-        seen = _trend_seen.setdefault(fkey, set())
+        seen = _trend_seen_get(fkey)
         deduped = []
         for c in raw[:size]:
             k = _trend_dedup_key(c)
