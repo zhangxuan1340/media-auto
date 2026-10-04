@@ -398,11 +398,11 @@ const CFG_GROUPS = [
   {title: '种子抓取规则', desc: '前排发布组整批排最前; 金标组加质量分 +20; 降权发布组减 -20 压到后段(如 BTM/俄语组无中文字幕)。详情页「质量优先」搜索与追踪自动推送都按这里配置。',
    fields: [
     {p: 'search.group_priority', label: '前排发布组(行序 = 优先级)', type: 'list',
-     desc: '每行一个组名, 大小写不敏感, 如 FRDS / Beitai / HHD; 命中要求组名与标题其余部分分开(-Beitai、[FRDS]、 HHD 都算, CHDRip 不算 CHD)'},
+     desc: '每个组名单独一行, 或用逗号隔开(换行/逗号都生效, 空行忽略), 大小写不敏感, 如 FRDS、Beitai、HHD; 命中要求组名与标题其余部分分开(-Beitai、[FRDS]、 HHD 都算, CHDRip 不算 CHD)'},
     {p: 'search.golden_groups', label: '金标自压组', type: 'list',
-     desc: '这些组的种子默认金标(自压片源必然带中文字幕+国语, 文件名不一定写明), 质量分 +20'},
+     desc: '每个组名单独一行或逗号隔开(换行/逗号都行); 这些组的种子默认金标(自压片源必然带中文字幕+国语, 文件名不一定写明), 质量分 +20'},
     {p: 'search.group_demote', label: '降权发布组', type: 'list',
-     desc: '每行一个组名, 大小写不敏感, 如 BTM / 某俄语组; 命中的种子质量分 -20(压到后段), 适合默认无中文字幕的片源; 留空 = 不降分'},
+     desc: '每个组名单独一行或逗号隔开(换行/逗号都行), 大小写不敏感, 如 BTM、某俄语组; 命中的种子质量分 -20(压到后段), 适合默认无中文字幕的片源; 留空 = 不降分'},
   ]},
   {title: 'CloudDrive2', desc: '离线下载与归位移动。hosts 按顺序尝试, 连不上自动换下一个。',
    fields: [
@@ -602,7 +602,7 @@ function _cfgApplyTo(data){
     const p = el.dataset.cfg;
     let v;
     if(el.type === 'checkbox') v = el.checked;
-    else if(el.dataset.kind === 'list') v = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+    else if(el.dataset.kind === 'list') v = el.value.split(/[\n,，]+/).map(s => s.trim()).filter(Boolean);
     else if(el.type === 'number') v = el.value === '' ? '' : Number(el.value);
     else v = el.value;
     _cfgSet(data, p, v);
