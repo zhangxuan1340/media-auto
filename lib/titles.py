@@ -44,6 +44,18 @@ def _norm(text: str) -> str:
     return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", (text or "").lower())
 
 
+def _translation_name(tr: dict) -> str:
+    """取 TMDB translation 条目的【译名】。
+
+    ⚠️ 字段因媒体类型而异(实测 2026-10-04):
+      - 电影: 译名在 data.title(如 data.title='千与千寻', data.name=None);
+      - 剧集: 译名在 data.name(如 data.name='绝命毒师', data.title=None)。
+    旧代码只读 data.name → 电影恒空 → 繁/港台译名(alt_titles)一直解析不到(100% 空根因)。
+    这里两种都读、取非空者, 电影/剧集统一兼容。"""
+    d = (tr or {}).get("data") or {}
+    return (d.get("title") or d.get("name") or "").strip()
+
+
 def pick_cn_titles(translations) -> tuple:
     """从 TMDB 的 translations 响应挑中文标题, 返回 (大陆标题, 其余中文兜底)。
 
@@ -64,7 +76,7 @@ def pick_cn_titles(translations) -> tuple:
         if not isinstance(t, dict):
             continue
         iso = (t.get("iso_639_1") or "").lower()
-        name = ((t.get("data") or {}).get("name") or "").strip()
+        name = _translation_name(t)
         if not name or not iso.startswith("zh"):
             continue
         if "-" in iso:
@@ -109,7 +121,7 @@ def collect_alt_titles(translations) -> list:
         iso = (t.get("iso_639_1") or "").lower()
         if not iso.startswith("zh"):
             continue
-        name = ((t.get("data") or {}).get("name") or "").strip()
+        name = _translation_name(t)
         if not name or name in seen:
             continue
         seen.add(name)

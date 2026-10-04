@@ -859,12 +859,26 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
                     s.commit()
             except Exception:  # noqa: BLE001
                 english_title = ""
+    # 多语言译名(繁/港台)按需回填: 存量老片 alt_titles 恒空(该列 2026-10-04 才加),
+    # 打开详情时用轻量 /translations 端点拉一次补上, 让「改标题」的繁/港台芯片能出。
+    # 与上方 english_title 同一套按需回填模式; 无中文译名的欧美片返回空, 不写库(下次再试)。
+    alt_titles = m.alt_titles or ""
+    if not alt_titles and cfg is not None:
+        try:
+            from clients.tmdb import client as _tmdb
+            alt_list = _tmdb.alt_titles_sync(cfg, kind, tmdb_id) or []
+            if alt_list:
+                alt_titles = ",".join(alt_list)
+                m.alt_titles = alt_titles
+                s.commit()
+        except Exception:  # noqa: BLE001
+            alt_titles = ""
     jf_item = _jf_item_id(s, m.kind, m.tmdb_id)
     d = {
         "tmdbId": m.tmdb_id, "kind": m.kind, "title": m.title,
         "originalTitle": m.original_title, "englishTitle": english_title, "year": m.year,
         # 磁力多标题匹配: 所有不同中文译名(繁/台/港) + 最大查询组数(系统参数, 0=全部)
-        "altTitles": [t for t in (m.alt_titles or "").split(",") if t],
+        "altTitles": [t for t in (alt_titles or "").split(",") if t],
         "maxQueryGroups": int((cfg or {}).get("search", {}).get("max_query_groups", 0) or 0),
         # 地区判定所需原始字段(与 organize 同口径): 判港台(Hk)只能靠 countries,
         # 港片 original_language 常是 cn; 详情页据此显示地区, organize 据此分类(防鼠胆龙威类错配)。

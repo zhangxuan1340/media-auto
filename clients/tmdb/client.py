@@ -871,6 +871,19 @@ def english_title_sync(cfg, kind, tmdb_id):
     return media.get("title") or media.get("name") or ""
 
 
+def alt_titles_sync(cfg, kind, tmdb_id) -> list:
+    """同步版: 所有不同的中文译名(简/繁/台/港/澳/新), 逗号分隔前的 list。
+
+    走轻量 `GET /3/{kind}/{id}/translations` 专用端点(比 detail 全量轻得多),
+    供详情页「改标题」按需回填 alt_titles 用 —— 存量老片该列是空(加列于 2026-10-04),
+    打开详情时拉一次补上, 之后走缓存。失败/无中文译名返回空 list(不抛异常)。"""
+    try:
+        data = _tmdb_get_sync(cfg, f"/3/{kind}/{tmdb_id}/translations")
+    except Exception:  # noqa: BLE001
+        return []
+    return titles.collect_alt_titles(data)
+
+
 async def english_title(cfg, kind, tmdb_id):
     """异步版英文名(?language=en 的 title/name)。供 sync_tmdb 在事件循环里调用。
     失败/不存在返回空串, 不抛异常(英文名缺失只影响磁力双查, 不应阻断主同步)。"""
