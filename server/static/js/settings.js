@@ -8,6 +8,7 @@
 let MANAGE_SUB = 'missing';   // 当前管理子页签(默认「缺失」: 它是高频入口, 且是原独立页签)
 const MANAGE_TABS = [
   ['missing',   '缺失',     'alert'],
+  ['seeds',     '种子搜索', 'magnet'],
   ['general',   '通用',     'sliders'],
   ['category',  '分类规则', 'folder'],
   ['download',  '下载',     'download'],
@@ -39,8 +40,11 @@ function switchManageSub(sub){
   body.classList.remove('tab-anim'); void body.offsetWidth; body.classList.add('tab-anim');
   // 下载子页签有自动轮询, 切走时停掉(由 downloads.js 暴露的钩子)
   if(window._dlOnSubChange) window._dlOnSubChange(sub);
+  // 切走「种子搜索」时清掉磁力搜索的当前盒子引用, 避免 loadMoreMagnets 拿到已销毁的盒子
+  if(window._magBox && window._magBox.id === 'seedBox') window._magBox = null;
   // 各子页签委托给对应模块的顶层渲染函数(它们各自渲染完整块到 #manageBody)
   if(sub==='missing') loadMissing();
+  else if(sub==='seeds') loadSeedSearch();
   else if(sub==='general') renderGeneral();
   else if(sub==='category') loadCategoryRules();
   else if(sub==='download') loadDownloads(false);
@@ -49,6 +53,39 @@ function switchManageSub(sub){
   else if(sub==='jobs') loadJobs();
   else if(sub==='browse') loadBrowse();
   else if(sub==='block') loadBlock();
+}
+
+// ---- 种子搜索: 独立磁力搜索 + 一键推送(无需进入某部作品详情页) ----
+// 直接调 detail.js 里全局的 searchMagnets/pushMagnet/pushQbit/loadMoreMagnets(它们都能指向任意
+// 结果盒 #seedBox), 复用排序/加载更多/金标/前排/去重/推送标记全部逻辑, 这里只铺输入框外壳。
+// 「不需要切换搜索引擎」: 后端 /api/search 已把「所有已启用的磁力源」并行查完按 infoHash 合并去重,
+// 前端一个框搜一次即可, 不用在各源之间来回切。
+function loadSeedSearch(){
+  const body = $('#manageBody'); if(!body) return;
+  body.innerHTML = `
+    <div class="seed-search">
+      <h3>${icon('magnet')}种子搜索</h3>
+      <p class="seed-hint">直接搜磁力并一键推送, 无需进入某部作品的详情页。结果自动合并「已启用的全部磁力源」(管理 → 通用 → 磁力搜索源)并按 infoHash 去重, 不用在搜索引擎之间来回切。</p>
+      <div class="seed-toolbar">
+        <input id="seedQ" type="text" placeholder="输入片名 / 关键词, 回车搜索" onkeydown="if(event.key==='Enter')doSeedSearch()"/>
+        <select id="seedCtype" title="内容类型: 影响 Bitmagnet 结果过滤 + 推送到 CD2/Qbit 的类型">
+          <option value="any">不限类型</option>
+          <option value="movie">电影</option>
+          <option value="tv">剧集</option>
+        </select>
+        <button class="mbtn" onclick="doSeedSearch()">${icon('search')}搜索</button>
+      </div>
+      <div id="seedBox" style="margin-top:14px"></div>
+    </div>`;
+  const q = $('#seedQ'); if(q) setTimeout(()=>q.focus(), 30);
+}
+function doSeedSearch(){
+  const qEl = $('#seedQ'); const q = ((qEl && qEl.value) || '').trim();
+  if(!q){ toast('请输入片名或关键词'); return; }
+  const cEl = $('#seedCtype'); const sel = (cEl && cEl.value) || 'any';
+  PUSH_CONTENT_TYPE = sel === 'tv' ? 'tv' : 'movie';   // 影响推送到 CD2 / Qbit 的内容类型
+  const ctype = sel === 'movie' ? 'movie' : (sel === 'tv' ? 'tv_show' : null);  // Bitmagnet 结果过滤
+  searchMagnets(q, q, '#seedBox', 30, { ctype: ctype, tmdbId: 0 });
 }
 
 // ---- 分类规则: 分类键 → 目录名 映射(现管理页可视化) ----

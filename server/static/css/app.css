@@ -198,6 +198,13 @@
   .mag-sort{margin-left:8px;font-size:12px;padding:2px 6px;border:1px solid var(--line);
     border-radius:8px;background:var(--input-bg);color:var(--text);outline:none;transition:.2s var(--ease)}
   .mag-sort:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(10,132,255,.12);background:var(--input-focus)}
+  /* 种子搜索(管理 → 种子搜索): 独立搜索框 + 类型筛选 */
+  .seed-hint{color:var(--muted);font-size:12.5px;margin:6px 0 12px;line-height:1.5}
+  .seed-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .seed-toolbar input{flex:1 1 240px;min-width:0;padding:9px 12px;border:1px solid var(--line);border-radius:10px;
+    font-size:14px;background:var(--surface);outline:none;transition:.2s var(--ease)}
+  .seed-toolbar input:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(10,132,255,.12);background:var(--input-focus)}
+  .seed-toolbar select{flex:none;font-size:16px;padding:9px 12px} /* 16px 防 iOS 聚焦放大 */
   /* 紧凑按钮(表格行内/小容器): 只缩 padding, 字号/圆角统一 */
   .mbtn.sm{padding:5px 10px;font-size:11px;border-radius:8px}
   /* ===== 按钮基类(2026-09 三版统一) ===== */

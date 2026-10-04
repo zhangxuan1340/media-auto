@@ -5,7 +5,7 @@
  *   - 静态资源(css/js/html) 网络优先 + 缓存回退, 保证改完即发、断网可用。
  * 版本递增 → 升级时清旧缓存, 避免陈旧资源。
  */
-const VERSION = 'mediaauto-v12';   // 2026-10-04: 导航「四大金刚」4 个 tab 图标从 index.html 内联拆成独立 sprite /icons/tab-icons.svg(4 个 <symbol>, 保留 currentColor 变色, 改用 <use> 引用); 2026-10-04: Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义+缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
+const VERSION = 'mediaauto-v13';   // 2026-10-04: 管理页新增「种子搜索」子页签(独立搜磁力+一键推送, 复用 detail.js 的 searchMagnets/pushMagnet, 一个框合并全部已启用源); 导航「四大金刚」4 个 tab 图标拆独立 sprite /icons/tab-icons.svg(4 个 <symbol>, 保留 currentColor 变色, 改用 <use> 引用); 2026-10-04: Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义+缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
 const STATIC_CACHE = VERSION + '-static';
 const RUNTIME_CACHE = VERSION + '-runtime';
 // 启动即预缓存的核心壳(离线也能打开登录页)
