@@ -861,6 +861,9 @@ def _detail_payload(s, kind, tmdb_id, cfg=None):
     d = {
         "tmdbId": m.tmdb_id, "kind": m.kind, "title": m.title,
         "originalTitle": m.original_title, "englishTitle": english_title, "year": m.year,
+        # 磁力多标题匹配: 所有不同中文译名(繁/台/港) + 最大查询组数(系统参数, 0=全部)
+        "altTitles": [t for t in (m.alt_titles or "").split(",") if t],
+        "maxQueryGroups": int((cfg or {}).get("search", {}).get("max_query_groups", 0) or 0),
         # 地区判定所需原始字段(与 organize 同口径): 判港台(Hk)只能靠 countries,
         # 港片 original_language 常是 cn; 详情页据此显示地区, organize 据此分类(防鼠胆龙威类错配)。
         "originalLanguage": m.original_language or "",
@@ -1072,6 +1075,9 @@ async def _pull_detail(kind: str, tmdb_id: int, cfg) -> dict:
         "tmdbId": tmdb_id, "kind": kind,
         "title": meta.get("title", ""), "originalTitle": meta.get("originalTitle", ""),
         "englishTitle": english_title, "year": meta.get("year", ""),
+        # 磁力多标题匹配: 现拉 TMDB 的 altTitles(繁/台/港) + 最大查询组数(0=全部)
+        "altTitles": meta.get("altTitles") or [],
+        "maxQueryGroups": int((cfg or {}).get("search", {}).get("max_query_groups", 0) or 0),
         "overview": meta.get("overview", ""), "poster": meta.get("poster", ""),
         "backdrop": meta.get("backdrop", ""), "vote": meta.get("vote", 0.0),
         "genres": list(meta.get("genres") or []),

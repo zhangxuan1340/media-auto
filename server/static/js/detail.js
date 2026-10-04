@@ -183,7 +183,7 @@ async function openDetailLocal(kind, tmdbId, pushHist){
 
 function renderDetailLocal(d, kind, tmdbId){
   // 供"详情→点演员→返回"定位回该详情; title/originalTitle/year 给「改标题 → 重搜磁力/重命名」用
-  _curDetail = {kind, tmdbId, title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, inLibrary: !!d.inLibrary};
+  _curDetail = {kind, tmdbId, title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, altTitles: d.altTitles||[], maxQueryGroups: d.maxQueryGroups||0, inLibrary: !!d.inLibrary};
   _detailPayload[String(tmdbId)] = d;   // 快照:「扫种子」等后续操作复用, 不再重复请求
   _ctxStack = [];                // 详情是叶子视图: 清掉上级视图上下文, 避免点演员时误用陈旧的搜索/演员上下文
   // 2026-09: 移除顶部 hero 背景横条 —— 标题/年份/评分/类型全部由正文 .dtitle 承载(桌面+移动统一, 不再占篇幅)
@@ -319,7 +319,7 @@ function renderDetailLocal(d, kind, tmdbId){
     </div>`;
   // 分集折叠: data-open 的季(在播且缺集)初始展开
   document.querySelectorAll('.seas[data-open="1"]').forEach(b=>{ b.classList.add('open'); b._loaded = true; });
-  searchMagnets(d.title, d.title, null, null, {title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, tmdbId: d.tmdbId, ctype: kind==='tv'?'tv_show':'movie'});
+  searchMagnets(d.title, d.title, null, null, {title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, altTitles: d.altTitles||[], maxQueryGroups: d.maxQueryGroups||0, tmdbId: d.tmdbId, ctype: kind==='tv'?'tv_show':'movie'});
   // NFO 更新功能: 库内作品才展示 NFO 日期 + 更新按钮, 详情渲染后异步拉取上次更新时间
   if(d.inLibrary){ loadNfoInfo(kind, tmdbId); }
 }
@@ -421,6 +421,8 @@ async function saveTitle(kind, tmdbId, btn){
       originalTitle: (_curDetail && _curDetail.originalTitle) || '',
       englishTitle: (_curDetail && _curDetail.englishTitle) || '',
       year: (_curDetail && _curDetail.year) || '',
+      altTitles: (_curDetail && _curDetail.altTitles) || [],
+      maxQueryGroups: (_curDetail && _curDetail.maxQueryGroups) || 0,
       tmdbId,
       ctype: kind==='tv'?'tv_show':'movie'});
   }catch(e){
@@ -575,22 +577,23 @@ function _magMerge(pages, cap, sort){
   }
   return out;
 }
-// 构造磁力查询组: [中文标题, 英文原标题] + 年份 + (剧集季标记 Sxx/Specials)
-// 两者相同/缺英文时自动退化为单查询, 不重复打。
-function _magQueries(title, originalTitle, year, seasonTag, englishTitle){
+// 构造磁力查询组: 用 TMDB 的【多个标题变体】各自+年份 并行查, 覆盖不同发布组/站点的命名。
+// 变体来源: 简体(title)/繁体·台·港(altTitles)/原始(originalTitle)/英文(englishTitle),
+// 去重后按 maxGroups 限制组数(0=全部, N=最多 N 个)。相同/缺失的自动合并, 不会重复打。
+// 消噪不靠砍标题, 靠后端 ctype facets 类型过滤 —— 每组都过同一道类型闸, 低噪且覆盖广。
+function _magQueries(title, originalTitle, year, seasonTag, englishTitle, altTitles, maxGroups){
   const y = year ? ' '+year : '';
   const t = seasonTag ? ' '+seasonTag : '';
-  const cn = `${title||''}${y}${t}`.trim();
-  // 英文查询源: 优先真正的英文名(TMDB ?language=en); 缺失时退而用 originalTitle。
-  // ⚠️ 中文片的 original_title 仍是中文(与 title 相同), 单靠它退化不出第二查,
-  // 只有英文名才能命中英文命名的发布组原盘。
-  let enSrc = '';
-  if(englishTitle && englishTitle!==title) enSrc = englishTitle;
-  else if(originalTitle && originalTitle!==title) enSrc = originalTitle;
-  const en = enSrc ? `${enSrc}${y}${t}`.trim() : '';
-  // 中文标题 + 英文(原名)标题两组都查, 合并去重(覆盖中文命名/英文命名的发布, 用户要求两者都要)。
-  // 消噪不靠砍查询词, 靠后端 ctype facets 类型过滤(movie/tv_show)—— 中英两组都过同一道类型闸, 低噪且全。
-  return [...new Set([cn, en].filter(Boolean))];
+  const cands = [title, ...(altTitles || []), originalTitle, englishTitle];
+  const base = [];
+  const seen = new Set();
+  for(const c of cands){
+    if(!c) continue;
+    const k = String(c).trim().toLowerCase();
+    if(k && !seen.has(k)){ seen.add(k); base.push(String(c).trim()); }
+  }
+  if(maxGroups > 0 && base.length > maxGroups) base.length = maxGroups;
+  return base.map(c => `${c}${y}${t}`.trim());
 }
 function _magSortHtml(box){
   const cur = box._sort || 'relevance';
@@ -656,7 +659,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     if(t) t.textContent = '站点较慢,仍在加载(可换「相关性」排序, 那个不抓全量)…';
   }, 8000);
   // 查询组: 中文标题一遍 + 英文(原名)标题一遍(+年份+季标记), 并行拉取合并去重
-  const qs = _magQueries(extra.title || q, extra.originalTitle, extra.year, extra.seasonTag, extra.englishTitle);
+  const qs = _magQueries(extra.title || q, extra.originalTitle, extra.year, extra.seasonTag, extra.englishTitle, extra.altTitles, extra.maxQueryGroups);
   try{
     const ct = extra.ctype ? `&ctype=${encodeURIComponent(extra.ctype)}` : '';
     const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}${ct}`)));

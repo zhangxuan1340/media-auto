@@ -127,6 +127,9 @@ class TmdbMedia(Base):
     #   - upsert_tmdb_media 每次同步都会把 title 顶回 TMDB 值 → 这里在写入后强制还原;
     #   - 目录名 / 文件名 / NFO <title> 全部读 title, 所以保存时同时写 title。
     custom_title: Mapped[str] = mapped_column(String(512), default="")
+    # 其它语言中文译名(TMDB translations 里的繁/台/港/澳/新, 逗号分隔, 供磁力多标题匹配)。
+    # 同步时从 detail().altTitles 落库; 磁力搜索用「简/繁台/繁港/原始/英文」多标题并行查, 命中更多命名。
+    alt_titles: Mapped[str] = mapped_column(Text, default="")
     # 中文标题解析是否已跑完(1 = TMDB 译名 + 豆瓣都试过, 哪怕没查到也不必再查)。
     # 豆瓣网络失败时保持 0 → 下次同步重试, 不会把"暂时查不到"固化成"永远没有"。
     title_checked: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -141,7 +141,7 @@ def upsert_tmdb_media(session, data: dict):
     if obj is None:
         obj = TmdbMedia(tmdb_id=data["tmdb_id"], kind=data["kind"])
         session.add(obj)
-    for field in ("title", "original_title", "english_title", "year", "overview", "poster", "backdrop",
+    for field in ("title", "original_title", "english_title", "alt_titles", "year", "overview", "poster", "backdrop",
                   "vote", "imdb_id", "tvdb_id", "status", "in_production",
                   "original_language", "countries", "genres", "genre_names", "cast_json",
                   "directors_json", "studios_json", "keywords_json", "certification",

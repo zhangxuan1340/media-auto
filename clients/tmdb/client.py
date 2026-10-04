@@ -805,6 +805,8 @@ async def detail(cfg, kind, tmdb_id):
         "kind": kind,
         "title": _cn_title,
         "zh_fallback": _zh_fallback,
+        # 所有不同中文译名(繁/台/港/澳/新), 供磁力多标题匹配(同步落库 alt_titles)
+        "altTitles": titles.collect_alt_titles(translations),
         "originalTitle": media.get("original_title") or media.get("original_name") or "",
         "year": _year_of(media),
         "overview": media.get("overview") or "",

@@ -21,9 +21,10 @@
     "limit": 30
   },
   "search": {
-    "_comment": "磁力搜索行为。三个源(bitmagnet / bitmagnet_next_web / jackett)各自用 enabled 开关, 可只开一个, 也可同时开多个 —— 多开时并行查所有启用的源并自动合并去重(每条带来源)。golden_groups: 这些发布组的种子【默认金标】(自压片源必然带中文字幕+国语, 但文件名不一定写明)。group_priority: 前排发布组, 顺序 = 优先级 —— 详情页「质量优先」搜索与追踪自动推送都整批排最前; 显式空数组 = 关闭(键缺失时用内置默认名单)。",
+    "_comment": "磁力搜索行为。三个源(bitmagnet / bitmagnet_next_web / jackett)各自用 enabled 开关, 可只开一个, 也可同时开多个 —— 多开时并行查所有启用的源并自动合并去重(每条带来源)。golden_groups: 这些发布组的种子【默认金标】(自压片源必然带中文字幕+国语, 但文件名不一定写明)。group_priority: 前排发布组, 顺序 = 优先级 —— 详情页「质量优先」搜索与追踪自动推送都整批排最前; 显式空数组 = 关闭(键缺失时用内置默认名单)。max_query_groups: 详情页磁力搜索最多用几个不同标题(简/繁/台/港/原始/英文)并行查 —— 0=全部标题都查(覆盖最全, 首屏略慢), N=最多取 N 个不同标题(更快)。",
     "golden_groups": [],
-    "group_priority": ["FRDS", "Beitai", "HHD", "CHD", "OurBits", "Pter", "MTeam", "TTG", "SSD", "HDChina", "DreamHD", "CHDBits", "Wiki"]
+    "group_priority": ["FRDS", "Beitai", "HHD", "CHD", "OurBits", "Pter", "MTeam", "TTG", "SSD", "HDChina", "DreamHD", "CHDBits", "Wiki"],
+    "max_query_groups": 0
   },
   "tmdb": {
     "_comment": "TMDB 官方 API(本地元数据主源)。api_key 留空=未配置, 所有 TMDB 接口优雅降级(返回空)。免费注册: themoviedb.org → 头像 → Settings → API。",

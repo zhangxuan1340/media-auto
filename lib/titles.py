@@ -90,6 +90,33 @@ def pick_cn_title(translations) -> str:
     return mainland or other
 
 
+def collect_alt_titles(translations) -> list:
+    """从 TMDB translations 收集【所有不同的中文译名】(大陆/繁/台/港/澳/新), 供磁力多标题匹配。
+
+    与 pick_cn_titles 的区别: 那里只留(大陆, 一个兜底); 这里把各 zh-* 变体都收集去重,
+    因为不同发布组/站点用不同命名(简体/繁体/港译), 磁力需多标题并行搜才能都命中。
+    顺序 = TMDB translations 原序; 空名/非中文跳过。
+    """
+    if not isinstance(translations, dict):
+        return []
+    trs = translations.get("translations") or []
+    if not isinstance(trs, list):
+        return []
+    seen, out = set(), []
+    for t in trs:
+        if not isinstance(t, dict):
+            continue
+        iso = (t.get("iso_639_1") or "").lower()
+        if not iso.startswith("zh"):
+            continue
+        name = ((t.get("data") or {}).get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 # 豆瓣联想结果的进程内短记忆(10 分钟 / 上限 512 条)。
 # 背景: 整理页预览改成只读(不写 title_checked)后, 未核对的条目每次刷新预览都会重查
 # 豆瓣 —— 记忆把重复查询挡在进程内, "每条最多查一次(由执行期落库)"的语义不变。

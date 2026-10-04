@@ -138,6 +138,8 @@ def _media_row_from_detail(meta, english_title=""):
         "title": meta.get("title", ""),
         "original_title": meta.get("originalTitle", ""),
         "english_title": english_title,
+        # 多语言中文译名(繁/台/港), 逗号分隔落库, 供磁力多标题匹配(2026-10-04)
+        "alt_titles": ",".join(meta.get("altTitles") or []),
         "year": meta.get("year", ""),
         "overview": meta.get("overview", ""),
         "poster": meta.get("poster", ""),

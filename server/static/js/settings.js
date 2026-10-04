@@ -392,6 +392,8 @@ const CFG_GROUPS = [
     {p: 'jackett.apikey', label: 'API Key', type: 'password', desc: 'Jackett 控制台 → Settings 中各 Indexer 对应的 API Key'},
     {p: 'jackett.indexer', label: 'Indexer', desc: 'all = 聚合全部已配置站(默认); 也可填具体站名或 filter 表达式'},
     {p: 'jackett.limit', label: '返回条数', type: 'number'},
+    {p: 'search.max_query_groups', label: '最多查询组数', type: 'number',
+     desc: '详情页磁力搜索最多用几个不同标题(简/繁/台/港/原始/英文)并行查。0=全部标题都查(覆盖最全, 首屏略慢); 填 N=最多取 N 个不同标题(更快)'},
   ]},
   {title: '种子抓取规则', desc: '前排发布组整批排最前: 详情页「质量优先」搜索与追踪自动推送都按这里的顺序先选; 留空 = 关闭前排。金标组则给种子加质量分 +20。',
    fields: [
