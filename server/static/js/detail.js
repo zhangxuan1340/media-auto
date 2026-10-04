@@ -319,7 +319,7 @@ function renderDetailLocal(d, kind, tmdbId){
     </div>`;
   // 分集折叠: data-open 的季(在播且缺集)初始展开
   document.querySelectorAll('.seas[data-open="1"]').forEach(b=>{ b.classList.add('open'); b._loaded = true; });
-  searchMagnets(d.title, d.title, null, null, {title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, tmdbId: d.tmdbId});
+  searchMagnets(d.title, d.title, null, null, {title: d.title, originalTitle: d.originalTitle, englishTitle: d.englishTitle, year: d.year, tmdbId: d.tmdbId, ctype: kind==='tv'?'tv_show':'movie'});
   // NFO 更新功能: 库内作品才展示 NFO 日期 + 更新按钮, 详情渲染后异步拉取上次更新时间
   if(d.inLibrary){ loadNfoInfo(kind, tmdbId); }
 }
@@ -421,7 +421,8 @@ async function saveTitle(kind, tmdbId, btn){
       originalTitle: (_curDetail && _curDetail.originalTitle) || '',
       englishTitle: (_curDetail && _curDetail.englishTitle) || '',
       year: (_curDetail && _curDetail.year) || '',
-      tmdbId});
+      tmdbId,
+      ctype: kind==='tv'?'tv_show':'movie'});
   }catch(e){
     toast('保存失败: ' + e.message);
   }finally{
@@ -582,12 +583,14 @@ function _magQueries(title, originalTitle, year, seasonTag, englishTitle){
   const cn = `${title||''}${y}${t}`.trim();
   // 英文查询源: 优先真正的英文名(TMDB ?language=en); 缺失时退而用 originalTitle。
   // ⚠️ 中文片的 original_title 仍是中文(与 title 相同), 单靠它退化不出第二查,
-  // 只有英文名才能命中英文命名的发布组原盘 —— 这是"结果只有全中文"的根因。
+  // 只有英文名才能命中英文命名的发布组原盘。
   let enSrc = '';
   if(englishTitle && englishTitle!==title) enSrc = englishTitle;
   else if(originalTitle && originalTitle!==title) enSrc = originalTitle;
   const en = enSrc ? `${enSrc}${y}${t}`.trim() : '';
-  return [...new Set([cn, en].filter(Boolean))];
+  // 相关性优化: 有英文名(与中文不同)→ 只用「英文+年份」一组查询(配合后端 ctype 过滤, 精确且低噪);
+  // 无英文名(纯中文标题)→ 回退中文查询。旧实现中英文各查一遍再合并, 英文片会把目标淹没在重复里。
+  return [...new Set([en || cn].filter(Boolean))];
 }
 function _magSortHtml(box){
   const cur = box._sort || 'relevance';
@@ -655,7 +658,8 @@ async function searchMagnets(q, title, boxSel, limit, extra){
   // 查询组: 中文标题一遍 + 英文(原名)标题一遍(+年份+季标记), 并行拉取合并去重
   const qs = _magQueries(extra.title || q, extra.originalTitle, extra.year, extra.seasonTag, extra.englishTitle);
   try{
-    const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}`)));
+    const ct = extra.ctype ? `&ctype=${encodeURIComponent(extra.ctype)}` : '';
+    const pages = await Promise.all(qs.map(x => api(`/api/search?q=${encodeURIComponent(x)}&limit=${limit}&page=1&sort=${sort}${ct}`)));
     if(tok !== box._reqTok) return;
     const res = _magMerge(pages, limit, sort);
     const warns = _aggWarnings(pages);
@@ -724,11 +728,12 @@ async function loadMoreMagnets(btn){
   try{
     const sort = box._sort || 'quality';
     const qs = box._qs || [box._q];
+    const ct = (box._extra && box._extra.ctype) ? `&ctype=${encodeURIComponent(box._extra.ctype)}` : '';
     // 每个查询用自己的 nextPage 续翻(后端 page 语义: relevance=10条/页折算offset, 排序=切片页号);
     // 已到底的查询(hasMore=false)不再发请求, 占位返回空页。
     const pages = await Promise.all(qs.map((x, i) =>
       (box._more && box._more.length===qs.length && box._more[i])
-        ? api(`/api/search?q=${encodeURIComponent(x)}&limit=${box._limit}&page=${box._pages[i]}&sort=${sort}`)
+        ? api(`/api/search?q=${encodeURIComponent(x)}&limit=${box._limit}&page=${box._pages[i]}&sort=${sort}${ct}`)
         : Promise.resolve({items:[], hasMore:false, nextPage:(box._pages && box._pages[i]) || 2})
     ));
     box._loadingMore = false;

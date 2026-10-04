@@ -46,6 +46,9 @@ _SOURCE_ORDER = ("native", "next_web", "jackett")
 # 非 relevance 需要"全局排序", 即抓一个分段窗口(带上限)排序后再切片分页, 否则只排一页没意义。
 _SORT_MODES = {"relevance", "quality", "size_desc", "size_asc", "seeders_desc"}
 
+# Bitmagnet ContentType 枚举(新版 schema 小写值), 前端按详情页类型传 movie/tv_show 消噪
+_CTYPE_WHITELIST = {"movie", "tv_show", "music", "ebook", "comic", "audiobook", "game", "software", "xxx"}
+
 # 中文字幕 / 国语 判定(单一来源: _QUALITY_RULES 与 is_golden/quality_score 共用, 避免两处漂移 ——
 # 2026-09-19 实测教训: 两份正则分开维护, 只改了一处, "国语配音+中文字幕"种子漏金标)
 # "中文字幕/中字/简繁" 都是发布组常见写法; 国配=国语配音
@@ -277,7 +280,7 @@ def _cache_put(key, items, cap=None, exhausted=None):
                         True if exhausted is None else exhausted)
 
 
-async def _load_window(source, cfg, q, need, sort, multi=False):
+async def _load_window(source, cfg, q, need, sort, multi=False, ctype=None):
     """拿一个"至少 need 条"的全局排序窗口(分段抓取), 返回 (sorted_items, exhausted)。
 
     exhausted=True 表示站点已到底(再翻也不会有新结果)。
@@ -305,7 +308,7 @@ async def _load_window(source, cfg, q, need, sort, multi=False):
             # 已到该源预算上限(如多源 next_web 100), 不再增量, 视为该源到底
             return _apply_sort(base, sort, cfg), True
         try:
-            more = await _fetch_all(source, cfg, q, target - cap0, start_offset=cap0, multi=multi)
+            more = await _fetch_all(source, cfg, q, target - cap0, start_offset=cap0, multi=multi, ctype=ctype)
         except TypeError:
             more = None
         if more is not None:
@@ -314,10 +317,10 @@ async def _load_window(source, cfg, q, need, sort, multi=False):
                           if not x.get("infoHash") or x["infoHash"].lower() not in seen]
             site_done = len(more) < (target - cap0)
         else:
-            got = await _fetch_all(source, cfg, q, target, multi=multi)
+            got = await _fetch_all(source, cfg, q, target, multi=multi, ctype=ctype)
             site_done = len(got) < target
     else:
-        got = await _fetch_all(source, cfg, q, target, multi=multi)
+        got = await _fetch_all(source, cfg, q, target, multi=multi, ctype=ctype)
         site_done = len(got) < target
     items = _apply_sort(got, sort, cfg)
     # 站点一条不剩(本页不满) → 到底; 满 target 条则认为后面还有, 下次要更多再抓
@@ -454,9 +457,9 @@ def _source_fetch_cap(source, multi):
     return 100 if source == "native" else 200
 
 
-async def _search_native(cfg, q, limit):
+async def _search_native(cfg, q, limit, ctype=None):
     from scripts import search as bm_search
-    results = await run_in_threadpool(bm_search.search, cfg, q, limit)
+    results = await run_in_threadpool(bm_search.search, cfg, q, limit, ctype)
     out = []
     for r in results:
         magnet = r.get("magnetLink") or (
@@ -517,7 +520,7 @@ async def _search_jackett(cfg, q, limit):
     return out, len(out) < limit, 1
 
 
-async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False):
+async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=None):
     """抓最多 cap 条并规整成统一 item 结构(全局排序的取数原语, 也是 track_check 的入口)。
 
     顺序抓取由 scripts/diao_search.collect 内部并行化; 返回不足 cap 条 = 站点到底。
@@ -548,7 +551,7 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False):
         return out
     else:
         from scripts import search as bm_search
-        results = await run_in_threadpool(bm_search.search, cfg, q, min(cap, 100))
+        results = await run_in_threadpool(bm_search.search, cfg, q, min(cap, 100), ctype)
         out = []
         for r in results:
             magnet = r.get("magnetLink") or (
@@ -618,13 +621,13 @@ async def api_probe(url: str = Query(..., min_length=1), kind: str = Query("rest
     return {"ok": False, "url": "", "scheme": None, "tried": tried}
 
 
-async def _one_page_relevance(source, cfg, q, limit, page):
+async def _one_page_relevance(source, cfg, q, limit, page, ctype=None):
     """单个源的 relevance 一页(引擎原序)。返回 (items, has_more, next_page)。"""
     if source == "next_web":
         return await _search_next_web(cfg, q, limit, page=page)
     if source == "jackett":
         return await _search_jackett(cfg, q, limit)
-    return await _search_native(cfg, q, limit)
+    return await _search_native(cfg, q, limit, ctype)
 
 
 def _tag_source(items, source):
@@ -662,12 +665,16 @@ def _merge_sources(per_items, sort, cfg):
 @router.get("")
 async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
                      page: int = Query(1, ge=1), sort: str = "relevance",
+                     ctype: str = Query(None),
                      cfg: dict = Depends(get_config)):
     if not q.strip():
         raise HTTPException(400, "查询词不能为空")
     limit = max(1, min(int(limit or 20), 100))
     if sort not in _SORT_MODES:
         sort = "relevance"
+    # ctype: Bitmagnet 内容类型过滤(movie/tv_show 等), 只认白名单, 其它值忽略
+    if ctype and ctype not in _CTYPE_WHITELIST:
+        ctype = None
 
     sources = _enabled_sources(cfg)
     if not sources:
@@ -681,7 +688,7 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
         async def _one_nr(src):
             try:
                 # 只抓"本页够用 + 一点余量"(首屏 60, 续翻按需 +30 递增, 上限按源)
-                window, exhausted = await _load_window(src, cfg, q, page * limit, sort, multi=multi)
+                window, exhausted = await _load_window(src, cfg, q, page * limit, sort, multi=multi, ctype=ctype)
                 _tag_source(window, src)
                 return ("ok", (src, window, exhausted))
             except Exception as e:  # noqa: BLE001  单源失败不致命, 用其它源
@@ -719,7 +726,7 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = 20,
     # ---- relevance: 各源【并行】各取一页(引擎原序) → 合并去重 ----
     async def _one_rel(src):
         try:
-            items, has_more, next_page = await _one_page_relevance(src, cfg, q, limit, page)
+            items, has_more, next_page = await _one_page_relevance(src, cfg, q, limit, page, ctype)
             _tag_source(items, src)
             return ("ok", (src, items, has_more, next_page))
         except Exception as e:  # noqa: BLE001

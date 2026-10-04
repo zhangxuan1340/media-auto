@@ -144,11 +144,15 @@ def _normalize(info_hash, name, size, seeders, leechers, magnet, content, langua
     }
 
 
-def search(config, query, limit=20):
+def search(config, query, limit=20, content_type=None):
     url = config.get('bitmagnet', {}).get('url', 'http://localhost:3333/graphql')
     kind = _detect_dialect(url)
     if kind == 'new':
-        gql, variables = QUERY_NEW, {'input': {'queryString': query, 'limit': limit}}
+        # 新版 schema 支持 facets 过滤(按 contentType 消噪); content_type 传 'movie'/'tv_show' 等
+        inp = {'queryString': query, 'limit': limit}
+        if content_type:
+            inp['facets'] = {'contentType': {'filter': content_type}}
+        gql, variables = QUERY_NEW, {'input': inp}
     elif kind == 'old':
         gql, variables = QUERY_OLD, {'q': query, 'limit': limit}
     else:
