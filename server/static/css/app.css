@@ -84,8 +84,8 @@
     padding:20px}
   .login-card{background:var(--glass-strong);backdrop-filter:blur(28px) saturate(180%);-webkit-backdrop-filter:blur(28px) saturate(180%);
     padding:38px 32px;border-radius:var(--r-l);width:340px;box-shadow:var(--shadow-l);border:1px solid var(--glass-brd)}
-  .login-card h1{margin:0 0 4px;font-size:24px;font-weight:700;letter-spacing:.3px;
-    background:linear-gradient(120deg,#0a84ff,#bf5af2);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .login-card h1{display:flex;align-items:center;gap:12px;margin:0 0 8px;font-size:23px;font-weight:700;letter-spacing:.3px;color:var(--text)}
+  .login-card .logo-mark{width:46px;height:46px}
   .login-card p{margin:0 0 22px;color:var(--muted);font-size:13px}
   .login-card input{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-s);margin-bottom:14px;font-size:15px;background:var(--surface);outline:none;transition:.2s var(--ease)}
   .login-card input:focus{border-color:var(--brand);box-shadow:0 0 0 4px rgba(10,132,255,.16);background:var(--input-focus)}
@@ -97,8 +97,10 @@
   header{display:flex;align-items:center;gap:16px;padding:12px 22px;position:sticky;top:0;z-index:30;
     background:var(--glass);backdrop-filter:blur(22px) saturate(180%);-webkit-backdrop-filter:blur(22px) saturate(180%);
     border-bottom:1px solid var(--line);box-shadow:0 1px 0 var(--header-inset) inset;transition:background .3s var(--ease)}
-  header .logo{font-weight:700;font-size:17px;letter-spacing:.2px;
-    background:linear-gradient(120deg,#0a84ff,#bf5af2);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  header .logo{display:inline-flex;align-items:center;gap:9px}
+  .logo-mark{flex:none;filter:drop-shadow(0 2px 6px rgba(10,132,255,.28))}
+  header .logo-mark{width:27px;height:27px}
+  header .logo-text{font-weight:700;font-size:17px;letter-spacing:.2px;color:var(--text)}
   header .grow{flex:1}
   header input[type=text]{padding:9px 14px;border:1px solid var(--line);border-radius:var(--r-s);width:280px;font-size:13px;background:var(--surface);outline:none;transition:.2s var(--ease)}
   header input[type=text]:focus{border-color:var(--brand);box-shadow:0 0 0 4px rgba(10,132,255,.14);background:var(--input-focus);width:320px}
