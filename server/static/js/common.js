@@ -277,10 +277,8 @@ function cardHTML(it, idx){
     it.numbersSynced === false ? '<span class="badge warn" title="TMDB 真实集号同步中, 暂不判断缺/多">集号待同步</span>' : '',
     it.inProduction ? '<span class="badge pend">在播</span>' : '',
   ].filter(Boolean).join('');
-  const alts = _altTitlesHtml(it, 2);
   return `<div class="card" style="--i:${idx%12}" onclick="openCardIdx(${idx})">
     ${poster}<div class="meta"><div class="title">${esc(it.title)}</div>
-    ${alts?`<div class="alt-titles card-alt">${alts}</div>`:''}
     <div class="sub"><span>${esc(it.year||'')}</span></div>
     <div>${badge}${vote}</div>
     ${flags?`<div class="flags">${flags}</div>`:''}</div></div>`;
