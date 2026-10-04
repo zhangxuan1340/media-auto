@@ -169,7 +169,10 @@ async function applyOne(idx, btn){
 async function applySelected(btn){
   const names = _pickedNames();
   if(!names.length){ toast('请先勾选要整理的条目'); return; }
-  if(!confirm(`执行整理 ${names.length} 个条目?\n将删除广告文件、重命名目录并移动到媒体库。`)) return;
+  // 用自定义确认弹窗而非原生 confirm: iOS 等环境原生 confirm 可能被静默吞掉 → 点了没反应
+  if(!await confirmBox({icon:'play', okText:'执行整理',
+    title:`执行整理 ${names.length} 个条目`,
+    sub:'将删除广告文件、重命名目录并移动到媒体库。'})) return;
   // limit 必须带上: 服务端会按它截断, 不传就吃默认值 → 勾多了被静默截断
   await _apply({names, limit:names.length}, btn, icon('play')+'执行选中');
 }
@@ -180,7 +183,9 @@ async function applyAll(btn){
   const n = plans.filter(p=>runSt.includes(p.status)).length;
   const moveN = plans.filter(p=>p.status==='ok'||p.status==='merge').length;
   if(!n){ toast('没有可整理的条目'); return; }
-  if(!confirm(`执行全部 ${n} 个条目(其中 ${moveN} 个改名归位,其余仅清广告)?\n将删除广告文件、重命名目录并移动到媒体库。`)) return;
+  if(!await confirmBox({icon:'play', okText:'全部执行',
+    title:`执行全部 ${n} 个条目`,
+    sub:`其中 ${moveN} 个改名归位, 其余仅清广告。将删除广告文件、重命名目录并移动到媒体库。`})) return;
   await _apply({all:true, limit:n}, btn, '▶▶ 执行全部可整理');
 }
 async function finishAll(mode){

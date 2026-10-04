@@ -46,6 +46,45 @@ function promptInput(opts={}){
   });
 }
 
+// ---- 自定义确认弹窗(替代浏览器原生 confirm) ----
+// 根因同 promptInput: 原生 confirm 在部分 iOS / 内嵌 webview 环境不可靠 —— 可能静默返回 false
+// 不弹框, 导致"点了没任何反应"(整理页「执行选中/执行全部」2026-10-04 报障)。这里复用同一套
+// 玻璃卡片样式(.prompt-bg/.prompt-card), 移动端/电脑端行为一致, 返回可靠的 Promise<boolean>。
+// 用法: const ok = await confirmBox({title:'执行整理 2 个条目', sub:'将删除广告…', okText:'执行', icon:'play'});
+//   点"确定"/回车 → true; 点"取消"/Esc/点遮罩 → false。
+function confirmBox(opts={}){
+  return new Promise(resolve=>{
+    const bg = document.createElement('div');
+    bg.className = 'prompt-bg';
+    bg.innerHTML = `
+      <div class="prompt-card" role="dialog" aria-modal="true">
+        <h4>${icon(opts.icon||'alert')}${esc(opts.title||'请确认')}</h4>
+        ${opts.sub?`<p class="sub">${esc(opts.sub)}</p>`:''}
+        <div class="btns">
+          <button class="ghost" id="confirmBoxCancel">${esc(opts.cancelText||'取消')}</button>
+          <button class="mbtn${opts.danger?' danger':''}" id="confirmBoxOk">${esc(opts.okText||'确定')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(bg);
+    let done = false;
+    const finish = (v)=>{
+      if(done) return; done = true;
+      document.removeEventListener('keydown', onKey, true);
+      bg.remove();
+      resolve(v);
+    };
+    const onKey = (e)=>{
+      if(e.key === 'Escape'){ e.stopPropagation(); finish(false); }
+      else if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+    };
+    bg.addEventListener('mousedown', e=>{ if(e.target === bg) finish(false); });
+    $('#confirmBoxOk').addEventListener('click', ()=>finish(true));
+    $('#confirmBoxCancel').addEventListener('click', ()=>finish(false));
+    document.addEventListener('keydown', onKey, true);
+    requestAnimationFrame(()=>{ try{ $('#confirmBoxOk').focus(); }catch(_){} });
+  });
+}
+
 async function loadBlock(){
   const el = $('#manageBody');
   el.innerHTML = `<h3 class="set-h">已屏蔽的作品</h3>
