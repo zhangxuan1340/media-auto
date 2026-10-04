@@ -179,6 +179,10 @@ def quality_score(name, cfg=None, size=None):
     # 两种来源: ① 文件名双命中(中文字幕+国语); ② 命中 golden_groups 的自压组名(默认金标)
     if golden_by(name, cfg) or (_ZH_SUB.search(n) and _GUOYU.search(n)):
         s += 20
+    # 降权组(2026-10-04 用户要求): BTM/俄语组等无中文字幕的片源 → -20, 与金标 +20 对称,
+    # 把这类种子压到后段(同画质下让位于带中文字幕/国语的片源)。组名见 config `search.group_demote`。
+    if demote_by(name, cfg):
+        s -= 20
     return s
 
 
@@ -241,6 +245,40 @@ def group_rank(name, cfg):
     return None
 
 
+# ---------------------------------------------------------------------------
+# 降权发布组(2026-10-04 用户要求): 某些组(如 BTM / 一批俄语组)出的片源不带中文字幕,
+# 用户希望这类组能被"降分"压到后段。与 前排/金标(加分) 对称 —— 这里做减分。
+# 配置 `search.group_demote`(每项一个组名, 大小写不敏感, 整词匹配, 同 group_rank 口径):
+#   - 键不存在 / 空      → 不降分(默认关, 老库向后兼容);
+#   - 填了组名           → 命中的种子质量分 -20。
+# ---------------------------------------------------------------------------
+def group_demote_list(cfg):
+    """降权组列表: 去空白、大小写不敏感去重(保留首次出现的写法); 默认空(不降分)。"""
+    sec = (cfg or {}).get("search") or {}
+    raw = sec.get("group_demote") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    out, seen = [], set()
+    for g in raw or []:
+        g = str(g or "").strip()
+        k = g.upper()
+        if g and k not in seen:
+            seen.add(k)
+            out.append(g)
+    return out
+
+
+def demote_by(name, cfg):
+    """种子名命中的"降权发布组"名(config `search.group_demote`, 整词+大小写不敏感); 无命中 None。"""
+    n = (name or "").upper()
+    if not n:
+        return None
+    for g in group_demote_list(cfg):
+        if _group_re(g).search(n):
+            return g
+    return None
+
+
 _SORT_CAP = 200          # 全局排序时最多拉取条数(防止热门词全量过大)
 _SORT_CACHE_TTL = 120    # 全量排序结果缓存秒数(同一查询+排序, "加载更多"不重拉)
 _WINDOW0 = 60            # 首屏窗口下限(至少抓这么多条, 否则一次只排一屏没意义)
@@ -252,7 +290,9 @@ def _rule_fingerprint(cfg):
     """排序规则指纹(前排组 + 金标组): 改了配置就换 key, 不用等 120s 缓存过期。"""
     sec = (cfg or {}).get("search") or {}
     golden = [str(g or "").strip().lower() for g in (sec.get("golden_groups") or [])]
-    return "|".join(g.lower() for g in group_priority_list(cfg)) + "#" + ",".join(golden)
+    demote = [g.lower() for g in group_demote_list(cfg)]
+    return ("|".join(g.lower() for g in group_priority_list(cfg))
+            + "#" + ",".join(golden) + "#" + ",".join(demote))
 
 
 def _sort_key(q, sort, source, cfg=None):
@@ -372,11 +412,14 @@ def _annotate_group(items, cfg):
 
 
 def _annotate_quality(items, cfg):
-    """就地回传质量分/金标/前排组: 双查询合并后前端按同规则重排, 徽章渲染。"""
+    """就地回传质量分/金标/前排组/降权: 双查询合并后前端按同规则重排, 徽章渲染。"""
     for it in items:
         it["qualityScore"] = quality_score(it.get("name"), cfg, it.get("size"))
         it["golden"] = is_golden(it.get("name"), cfg)
         it["goldenBy"] = golden_by(it.get("name"), cfg)  # 命中自压组名 → 前端标注"自压"
+        db = demote_by(it.get("name"), cfg)              # 命中降权组 → 前端"降权"徽章
+        it["demoted"] = bool(db)
+        it["demotedBy"] = db
     return _annotate_group(items, cfg)
 
 

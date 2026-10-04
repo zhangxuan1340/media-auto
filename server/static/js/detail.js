@@ -605,6 +605,11 @@ function _grpBadge(r){
   if(!r || r.groupRank == null) return '';
   return `<span class="qgrp" title="前排发布组 — 管理 → 通用 → 种子抓取规则配置(顺序 = 优先级);「质量优先」排序与追踪自动推送都先选它">前排${r.groupName?` · ${esc(r.groupName)}`:''}</span>`;
 }
+// 降权组徽章(与金标/前排对称): 命中的组在「种子抓取规则 → 降权发布组」里, 质量分 -20 排后
+function _demoteBadge(r){
+  if(!r || !r.demoted) return '';
+  return `<span class="qdemote" title="降权组 — 管理 → 通用 → 种子抓取规则 → 降权发布组(这类组默认无中文字幕, 质量分 -20 排到后段)">降权${r.demotedBy?` · ${esc(r.demotedBy)}`:''}</span>`;
+}
 // 磁力来源标签: 后端把每个源打上 source 键, 多源时一条结果可能来自不同源
 const _SRC_LABEL = {native: 'Bitmagnet', next_web: 'Bitmagnet-Next-Web', jackett: 'Jackett'};
 function _srcLabel(k){ return _SRC_LABEL[k] || k; }
@@ -678,7 +683,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
       + res.map((r,i)=>`
       <div class="res"><div class="info">
         ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
-        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
+        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
         <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
@@ -994,7 +999,7 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
         + res.map((r,i)=>`
         <div class="res res-compact"><div class="info">
           ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
-          <div class="n">${esc(r.name||'')}</div>
+          <div class="n">${_demoteBadge(r)}${esc(r.name||'')}</div>
           ${_qualityTags(r.name, r)}
           ${_pushBadge(r)}
           <div class="s"><span class="sz">${fmt(r.size)}</span>${_seedTags(r)}</div></div>

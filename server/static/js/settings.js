@@ -395,12 +395,14 @@ const CFG_GROUPS = [
     {p: 'search.max_query_groups', label: '最多查询组数', type: 'number',
      desc: '详情页磁力搜索最多用几个不同标题(简/繁/台/港/原始/英文)并行查。0=全部标题都查(覆盖最全, 首屏略慢); 填 N=最多取 N 个不同标题(更快)'},
   ]},
-  {title: '种子抓取规则', desc: '前排发布组整批排最前: 详情页「质量优先」搜索与追踪自动推送都按这里的顺序先选; 留空 = 关闭前排。金标组则给种子加质量分 +20。',
+  {title: '种子抓取规则', desc: '前排发布组整批排最前; 金标组加质量分 +20; 降权发布组减 -20 压到后段(如 BTM/俄语组无中文字幕)。详情页「质量优先」搜索与追踪自动推送都按这里配置。',
    fields: [
     {p: 'search.group_priority', label: '前排发布组(行序 = 优先级)', type: 'list',
      desc: '每行一个组名, 大小写不敏感, 如 FRDS / Beitai / HHD; 命中要求组名与标题其余部分分开(-Beitai、[FRDS]、 HHD 都算, CHDRip 不算 CHD)'},
     {p: 'search.golden_groups', label: '金标自压组', type: 'list',
      desc: '这些组的种子默认金标(自压片源必然带中文字幕+国语, 文件名不一定写明), 质量分 +20'},
+    {p: 'search.group_demote', label: '降权发布组', type: 'list',
+     desc: '每行一个组名, 大小写不敏感, 如 BTM / 某俄语组; 命中的种子质量分 -20(压到后段), 适合默认无中文字幕的片源; 留空 = 不降分'},
   ]},
   {title: 'CloudDrive2', desc: '离线下载与归位移动。hosts 按顺序尝试, 连不上自动换下一个。',
    fields: [

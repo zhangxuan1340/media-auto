@@ -235,6 +235,46 @@ def main():
     except Exception as e:  # noqa: BLE001
         check("前端标签对拍", False, str(e)[:300])
 
+    print("\n-- ⑦ 降权发布组(2026-10-04): 无中文字幕的组(如 BTM/俄语)质量分 -20 压后 --")
+    CFG_DEM = dict(CFG)
+    CFG_DEM = {"search": {**CFG["search"], "group_demote": ["BTM", "RUS"]},
+               "bitmagnet_next_web": CFG["bitmagnet_next_web"],
+               "bitmagnet": CFG["bitmagnet"]}
+    base = "Movie.2026.1080p.x265"
+    dem = "Movie.2026.1080p.BTM.x265"
+    check("BTM 组种子比同规格普通种子 -20",
+          s.quality_score(dem, CFG_DEM) - s.quality_score(base, CFG_DEM) == -20,
+          (s.quality_score(dem, CFG_DEM), s.quality_score(base, CFG_DEM)))
+    check("整词匹配: BTMX 不算 BTM", s.demote_by("Movie.BTMX.1080p", CFG_DEM) is None)
+    check("-BTM 命中 BTM", s.demote_by("Movie.2026.1080p-BTM", CFG_DEM) == "BTM")
+    check("[RUS] 命中 RUS", s.demote_by("Movie.2026.[RUS].1080p", CFG_DEM) == "RUS")
+    check("大小写不敏感(小写 btm 命中)", s.demote_by("movie.2026.btm.1080p", CFG_DEM) == "BTM")
+    check("键缺失不降(向后兼容)",
+          s.group_demote_list({}) == [] and s.demote_by("Movie.BTM.1080p", {}) is None)
+    check("显式空数组 = 不降", s.group_demote_list({"search": {"group_demote": []}}) == [])
+    check("组名列表去空白+去重(大小写不敏感)",
+          s.group_demote_list({"search": {"group_demote": [" BTM ", "btm", "RUS", ""]}})
+          == ["BTM", "RUS"])
+    check("字符串配置兼容", s.group_demote_list({"search": {"group_demote": "BTM"}}) == ["BTM"])
+    # 排序: 同规格下 BTM 压到普通种子之后(即便 BTM 种子数更多也压)
+    sitems = [
+        {"name": "Movie.2026.1080p.GOOD.x265", "size": 2 * GB, "seeders": 5},
+        {"name": "Movie.2026.1080p.BTM.x265", "size": 2 * GB, "seeders": 999},
+    ]
+    sgot = [x["name"] for x in s._apply_sort(list(sitems), "quality", CFG_DEM)]
+    check("质量优先下 BTM(种子999)压到 GOOD 之后", sgot[0] == "Movie.2026.1080p.GOOD.x265", sgot)
+    # API 回传 demoted/demotedBy
+    it = {"name": "Movie.2026.1080p.BTM"}
+    s._annotate_quality([it], CFG_DEM)
+    check("_annotate_quality 标 demoted+demotedBy", it["demoted"] is True and it["demotedBy"] == "BTM", it)
+    it2 = {"name": "Movie.2026.1080p.GOOD"}
+    s._annotate_quality([it2], CFG_DEM)
+    check("非降权组 demoted=False", it2["demoted"] is False and it2["demotedBy"] is None, it2)
+    # 指纹: 改 group_demote 要换 key(不等 120s 缓存)
+    fp1 = s._rule_fingerprint(CFG)
+    fp2 = s._rule_fingerprint(CFG_DEM)
+    check("改 group_demote 换指纹(缓存失效)", fp1 != fp2, (fp1, fp2))
+
     print("\n-- 检查结果 --")
     if FAILED:
         print(f"  {len(FAILED)} 项失败: {', '.join(FAILED)}")
