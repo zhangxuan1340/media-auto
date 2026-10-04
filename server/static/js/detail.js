@@ -588,9 +588,9 @@ function _magQueries(title, originalTitle, year, seasonTag, englishTitle){
   if(englishTitle && englishTitle!==title) enSrc = englishTitle;
   else if(originalTitle && originalTitle!==title) enSrc = originalTitle;
   const en = enSrc ? `${enSrc}${y}${t}`.trim() : '';
-  // 相关性优化: 有英文名(与中文不同)→ 只用「英文+年份」一组查询(配合后端 ctype 过滤, 精确且低噪);
-  // 无英文名(纯中文标题)→ 回退中文查询。旧实现中英文各查一遍再合并, 英文片会把目标淹没在重复里。
-  return [...new Set([en || cn].filter(Boolean))];
+  // 中文标题 + 英文(原名)标题两组都查, 合并去重(覆盖中文命名/英文命名的发布, 用户要求两者都要)。
+  // 消噪不靠砍查询词, 靠后端 ctype facets 类型过滤(movie/tv_show)—— 中英两组都过同一道类型闸, 低噪且全。
+  return [...new Set([cn, en].filter(Boolean))];
 }
 function _magSortHtml(box){
   const cur = box._sort || 'relevance';
