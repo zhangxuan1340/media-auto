@@ -677,7 +677,8 @@ async function searchMagnets(q, title, boxSel, limit, extra){
       + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
       + res.map((r,i)=>`
       <div class="res"><div class="info">
-        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
+        ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
+        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
         <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
@@ -992,7 +993,8 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
         + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
         + res.map((r,i)=>`
         <div class="res res-compact"><div class="info">
-          <div class="n">${_multiSrc?_srcBadge(r):''}${esc(r.name||'')}</div>
+          ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
+          <div class="n">${esc(r.name||'')}</div>
           ${_qualityTags(r.name, r)}
           ${_pushBadge(r)}
           <div class="s"><span class="sz">${fmt(r.size)}</span>${_seedTags(r)}</div></div>

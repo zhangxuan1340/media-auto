@@ -557,6 +557,9 @@
   .qsrc{display:inline-flex;align-items:center;flex:none;font-size:10px;font-weight:700;padding:1.5px 7px;border-radius:6px;
     background:rgba(120,120,128,.14);color:var(--muted);border:1px solid var(--line);
     margin-right:7px;letter-spacing:.3px;vertical-align:1px}
+  /* 多源合并时: 单条种子的「来源/搜索引擎」徽章单独占一行, 不再跟种子标题挤在同一行(否则长标题被压) */
+  .res-src{margin:0 0 4px;line-height:1}
+  .res-src .qsrc{margin-right:0}
   .mag-warn{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--warn,#c47d0b);
     background:rgba(196,125,11,.12);border:1px solid rgba(196,125,11,.3);border-radius:9px;
     padding:6px 10px;margin:0 0 8px;line-height:1.45}
