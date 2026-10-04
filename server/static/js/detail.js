@@ -299,6 +299,7 @@ function renderDetailLocal(d, kind, tmdbId){
           ${d.inLibrary?`<button class="act" onclick="renameToTitle('${kind}',${tmdbId}, this)">${icon('move')}按新标题重命名</button>`:''}
         </div>
         <div class="title-edit" id="titleEdit" style="display:none">
+          ${_titleChipsHtml(d)}
           <input id="titleInput" type="text" maxlength="512" placeholder="中文标题(留空 = 还原自动译名)"
                  onkeydown="if(event.key==='Enter'){event.preventDefault();saveTitle('${kind}',${tmdbId},document.getElementById('titleSaveBtn'));}"/>
           <button class="mbtn sm" id="titleSaveBtn" onclick="saveTitle('${kind}',${tmdbId}, this)">保存</button>
@@ -384,6 +385,33 @@ async function updateNfo(kind, tmdbId, btn){
 
 // ---- 标题: 手动覆盖 / 按新标题重命名 ----
 // 详情页「改标题」: 内联输入框(移动端禁用 prompt, 一律走这里), 写 tmdb_media.custom_title
+// 「改标题」快速选项: 把 TMDB 现有的各语言标题(繁/港台、英、原)做成可点选的 chip,
+// 点一下填入下方输入框(再点保存生效), 也可忽略 chip 直接在输入框手动填。
+// 只列与当前主标题「不同」的变体(相同的没必要再选)。
+function _titleChipsHtml(d){
+  const cur = String(d.title||'').trim().toLowerCase();
+  const seen = new Set([cur]);
+  const chips = [];
+  const push = (text, tag) => {
+    if(!text) return;
+    const k = String(text).trim().toLowerCase();
+    if(!k || seen.has(k)) return;
+    seen.add(k);
+    chips.push({tag, text: String(text).trim()});
+  };
+  (d.altTitles||[]).forEach(t => push(t, '繁'));   // 繁/港台/台湾
+  push(d.englishTitle, '英');                       // 英文
+  push(d.originalTitle, '原');                      // 原始
+  if(!chips.length) return '';
+  return `<div class="title-chips"><span class="chips-label">选一个:</span>${chips.map(c =>
+    `<button type="button" class="tchip" title="点击填入下方输入框, 再点保存生效" data-t="${esc(c.text)}" onclick="_fillTitle(this)"><i>${c.tag}</i>${esc(c.text)}</button>`
+  ).join('')}</div>`;
+}
+function _fillTitle(el){
+  const i = $('#titleInput'); if(!i) return;
+  i.value = el.dataset.t || '';
+  i.focus();
+}
 function toggleTitleEdit(){
   const box = $('#titleEdit'); if(!box) return;
   const open = box.style.display === 'none' || !box.style.display;
