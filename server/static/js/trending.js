@@ -81,6 +81,7 @@ function trendCard(it, i, rank){
     <button class="tpush" title="进详情搜磁力" onclick="event.stopPropagation();pushTrendMagnet(${i},this)">${icon('magnet')}<span>种子</span></button>
     ${poster}
     <div class="meta"><div class="title">${esc(it.title)}</div>
+      ${_altTitlesHtml(it, 2)?`<div class="alt-titles card-alt">${_altTitlesHtml(it, 2)}</div>`:''}
       <div class="sub"><span>${esc(it.year||'')}</span></div>
       ${(vote||flags)?`<div class="flags">${vote}${flags}</div>`:''}</div></div>`;
 }

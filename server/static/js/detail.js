@@ -273,10 +273,10 @@ function renderDetailLocal(d, kind, tmdbId){
     ['公司', (d.studios||[]).slice(0,3).join('、')],
   ].filter(p=>p&&p[1]!=null&&p[1]!=='');
   const longPairs = [
-    [d.originalTitle && d.originalTitle!==d.title ? '原名':null, d.originalTitle],
     ['导演', (d.directors||[]).map(x=>x.name).join('、')],
     ['主演', (d.cast||[]).slice(0,6).map(x=>x.name).join('、')],
   ];
+  const alts = _altTitles(d);           // 多语言变体(英文/原名/繁港台, 已去重去主标题)
   const ov = d.overview||'';
   const ovLong = ov.length>180;
   $('#mBody').innerHTML = `
@@ -284,7 +284,7 @@ function renderDetailLocal(d, kind, tmdbId){
       ${poster?`<div class="dhead-poster"><img src="${img(d.poster)}" alt=""/></div>`:''}
       <div class="dhead-info">
         <div class="dhead-top">
-          <div class="tt"><h2 class="dhead-title">${esc(d.title)}</h2></div>
+          <div class="tt"><h2 class="dhead-title">${esc(d.title)}</h2>${alts.length?`<div class="alt-titles">${alts.map(a=>`<span class="alt-t"><i>${a.tag}</i>${esc(a.text)}</span>`).join('')}</div>`:''}</div>
           ${d.vote?`<span class="dhead-score" title="TMDB 评分">${icon('star')}${d.vote}</span>`:''}
         </div>
         <div class="dhead-meta">${kind==='tv'?'剧集':'电影'}${d.year?` · ${d.year}`:''}${d.inProduction?' · <span class="badge pend">在播</span>':''} · ${libBadge(d)}</div>

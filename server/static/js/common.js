@@ -277,10 +277,43 @@ function cardHTML(it, idx){
     it.numbersSynced === false ? '<span class="badge warn" title="TMDB 真实集号同步中, 暂不判断缺/多">集号待同步</span>' : '',
     it.inProduction ? '<span class="badge pend">在播</span>' : '',
   ].filter(Boolean).join('');
+  const alts = _altTitlesHtml(it, 2);
   return `<div class="card" style="--i:${idx%12}" onclick="openCardIdx(${idx})">
     ${poster}<div class="meta"><div class="title">${esc(it.title)}</div>
+    ${alts?`<div class="alt-titles card-alt">${alts}</div>`:''}
     <div class="sub"><span>${esc(it.year||'')}</span></div>
     <div>${badge}${vote}</div>
     ${flags?`<div class="flags">${flags}</div>`:''}</div></div>`;
 }
 function openCardIdx(i){ openCard(CARD_LIST[i]); }
+// 多语言标题变体: 返回与主标题「不同」的 英文/原名/繁港台 变体, 每项带标签。
+// 顺序: 英文 → 原名 → 繁港台(altTitles, 可多个)。小写 trim 去重, 与主标题相同的丢弃。
+// max>0 时截断(列表卡用紧凑版; 详情页传 0 取全量)。
+function _altTitles(d, max){
+  const main = String(d.title||'').trim().toLowerCase();
+  const cands = [
+    [d.englishTitle, '英文'],
+    [d.originalTitle, '原名'],
+  ];
+  if (Array.isArray(d.altTitles)) {
+    for (const t of d.altTitles) cands.push([t, '繁体']);
+  } else if (d.altTitles) {
+    cands.push([d.altTitles, '繁体']);
+  }
+  const seen = new Set([main]);
+  const out = [];
+  for (const [t, tag] of cands) {
+    if (!t) continue;
+    const k = String(t).trim().toLowerCase();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push({tag, text: String(t).trim()});
+  }
+  if (max > 0 && out.length > max) out.length = max;
+  return out;
+}
+// 渲染多语言变体为带标签的 span 串(带语言标签徽章)
+function _altTitlesHtml(d, max){
+  return _altTitles(d, max).map(a =>
+    `<span class="alt-t"><i>${a.tag}</i>${esc(a.text)}</span>`).join('');
+}

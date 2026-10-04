@@ -209,6 +209,8 @@ def _norm_search_card(item, kind):
         "tmdbId": item.get("id"),
         "kind": kind,
         "title": title,
+        # 原始标题(英文/原语言, TMDB trending/discover 结果自带, 零成本) —— 前端多语言副标题用
+        "originalTitle": item.get("original_title") or item.get("original_name") or "",
         "year": (date or "")[:4],
         "overview": (item.get("overview") or "")[:240],
         "poster": _img(item.get("poster_path")),

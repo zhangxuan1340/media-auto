@@ -199,6 +199,8 @@ def _media_card(r, in_lib: bool, blocked: bool, complete: bool, extra=None):
         "kind": r.kind,
         "title": r.title,
         "originalTitle": r.original_title,
+        "englishTitle": r.english_title,
+        "altTitles": [t for t in (r.alt_titles or "").split(",") if t],
         "year": r.year,
         "overview": (r.overview or "")[:240],
         "poster": r.poster,
