@@ -57,11 +57,31 @@ async def media_title(kind: str, tmdb_id: int, body: TitleBody,
     try:
         obj = repo.get_tmdb_media_by_id(s, kind, tmdb_id)
         if obj is None:
-            raise HTTPException(404, "本地没有这个作品的缓存(先搜索/同步一次)")
+            # 本地无缓存(非库内/未同步作品, 详情走 /pull 现拉, 不落库) → 现拉 TMDB 元数据
+            # 建缓存行, 让"改标题"对任意 TMDB 作品都可用(详情显示 + 磁力搜索都用这个标题)。
+            # 安全: 库列表 / inLibrary 由 media/Jellyfin 表驱动, 建 tmdb_media 元数据行不会把
+            # 这部作品"加进库"(它没有 media 行, 仍显示为不在库), 也不触发可用性同步。
+            from scripts import sync_tmdb
+            from clients.tmdb import client as _tmdb
+            meta = None
+            try:
+                meta = await run_in_threadpool(_tmdb.detail_sync, cfg, kind, tmdb_id)
+            except Exception:  # noqa: BLE001
+                meta = None
+            if not meta:
+                # TMDB 也拉不到(或没配 api_key) → 给准确提示, 别再用误导性的"先搜索/同步"
+                raise HTTPException(404, "本地无此作品缓存, 且 TMDB 也未取到元数据, 无法保存标题")
+            try:
+                et = await run_in_threadpool(_tmdb.english_title_sync, cfg, kind, tmdb_id) or ""
+            except Exception:  # noqa: BLE001
+                et = ""
+            obj = repo.upsert_tmdb_media(s, {"kind": kind, "tmdb_id": tmdb_id,
+                                              "row": sync_tmdb._media_row_from_detail(meta, et)})
         repo.set_custom_title(s, kind, tmdb_id, new_title)
         if not new_title:
             # 清除覆盖 → 放开 title_checked, 并把 title 拨回原名(TMDB 英文/原语),
             # 否则下面的自动链路(apply_to_meta)会把"刚清掉的旧标题"当成库里已有中文直接沿用
+            obj = repo.get_tmdb_media_by_id(s, kind, tmdb_id)
             obj.title_checked = False
             obj.title = (obj.original_title or obj.english_title or "").strip() or obj.title
         s.commit()
