@@ -38,23 +38,7 @@
 <!-- 登录 -->
 <div id="login">
   <form class="login-card" id="loginForm">
-    <h1>
-      <svg class="logo-mark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <defs>
-          <linearGradient id="lgL" x1="8" y1="6" x2="42" y2="44" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#57b0ff"/><stop offset=".5" stop-color="#0a84ff"/><stop offset="1" stop-color="#bf5af2"/>
-          </linearGradient>
-          <linearGradient id="glL" x1="24" y1="3" x2="24" y2="30" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
-          </linearGradient>
-        </defs>
-        <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#lgL)"/>
-        <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#glL)"/>
-        <rect x="3.5" y="3.5" width="41" height="41" rx="12" stroke="#fff" stroke-opacity=".28"/>
-        <path d="M19.5 15.5 L33 24 L19.5 32.5 Z" fill="#fff" stroke="#fff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
-      </svg>
-      MediaAuto
-    </h1>
+    <h1><img class="logo-mark" src="/logo.svg" alt=""/>MediaAuto</h1>
     <p>影音自动化控制台 · 请登录</p>
     <div class="err" id="loginErr"></div>
     <input id="lu" type="text" placeholder="用户名" autocomplete="username" />
@@ -66,23 +50,7 @@
 <!-- 主应用 -->
 <div id="app" style="display:none">
   <header>
-    <span class="logo">
-      <svg class="logo-mark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <defs>
-          <linearGradient id="lgM" x1="8" y1="6" x2="42" y2="44" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#57b0ff"/><stop offset=".5" stop-color="#0a84ff"/><stop offset="1" stop-color="#bf5af2"/>
-          </linearGradient>
-          <linearGradient id="glM" x1="24" y1="3" x2="24" y2="30" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
-          </linearGradient>
-        </defs>
-        <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#lgM)"/>
-        <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#glM)"/>
-        <rect x="3.5" y="3.5" width="41" height="41" rx="12" stroke="#fff" stroke-opacity=".28"/>
-        <path d="M19.5 15.5 L33 24 L19.5 32.5 Z" fill="#fff" stroke="#fff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
-      </svg>
-      <span class="logo-text">MediaAuto</span>
-    </span>
+    <span class="logo"><img class="logo-mark" src="/logo.svg" alt=""/><span class="logo-text">MediaAuto</span></span>
     <span class="grow"></span>
     <input id="globSearch" type="text" placeholder="直接搜片名/剧集(回车)" onkeydown="if(event.key==='Enter')freeSearch()" />
     <button onclick="freeSearch()"><svg class="icn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>搜索</button>

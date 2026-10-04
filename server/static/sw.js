@@ -5,11 +5,11 @@
  *   - 静态资源(css/js/html) 网络优先 + 缓存回退, 保证改完即发、断网可用。
  * 版本递增 → 升级时清旧缓存, 避免陈旧资源。
  */
-const VERSION = 'mediaauto-v10';   // 2026-10-04: 重做 Logo(头部+登录: 渐变 squircle 播放图标 + 字标, 替代原来的纯渐变大字); 改 index.html/app.css 需升版本清旧 static 缓存; 2026-10-04: 详情页「改标题」繁/港台译名(alt_titles)按需回填(读错字段 data.name→data.title 已修); 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义 + 运行时缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
+const VERSION = 'mediaauto-v11';   // 2026-10-04: Logo 从 index.html 内联 SVG 拆成独立 /logo.svg(头部+登录各 <img> 引用, 消除重复与 defs id 冲突 hack, 单一来源可缓存/复用); 加进 PRECACHE(离线登录页也要); 2026-10-04: 重做 Logo(渐变 squircle 播放图标+字标); 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义+缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
 const STATIC_CACHE = VERSION + '-static';
 const RUNTIME_CACHE = VERSION + '-runtime';
 // 启动即预缓存的核心壳(离线也能打开登录页)
-const PRECACHE = ['/', '/css/app.css', '/manifest.webmanifest'];
+const PRECACHE = ['/', '/css/app.css', '/logo.svg', '/manifest.webmanifest'];
 
 // RUNTIME_CACHE 条数上限: 每个不同的 /api GET 都会被存一份(分页、搜索词都是新 key),
 // 不设上限的话缓存会随使用时间无界膨胀(磁盘 + 缓存查找都变慢)。

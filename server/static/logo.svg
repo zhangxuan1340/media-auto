@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <!-- MediaAuto 图标: 圆角方块 + 品牌渐变 + 白色播放三角 + 顶部高光 + 内描边。
+       以 <img src="/logo.svg"> 引用(独立文档上下文, 内部 id 不污染页面, 多处复用无冲突)。 -->
+  <defs>
+    <linearGradient id="lg" x1="8" y1="6" x2="42" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#57b0ff"/><stop offset=".5" stop-color="#0a84ff"/><stop offset="1" stop-color="#bf5af2"/>
+    </linearGradient>
+    <linearGradient id="gl" x1="24" y1="3" x2="24" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#lg)"/>
+  <rect x="3" y="3" width="42" height="42" rx="12.5" fill="url(#gl)"/>
+  <rect x="3.5" y="3.5" width="41" height="41" rx="12" stroke="#fff" stroke-opacity=".28"/>
+  <path d="M19.5 15.5 L33 24 L19.5 32.5 Z" fill="#fff" stroke="#fff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>
