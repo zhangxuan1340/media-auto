@@ -11,8 +11,13 @@ Jackett 是一个索引器聚合代理: 你在 Jackett 里配好一堆站点(公
 Torznab 端点:
   GET {base}/api/v2.0/indexers/{indexer}/results/torznab?apikey=<key>&t=search&q=<query>&limit=<n>
 
-  - {indexer} 默认 `all`(一次聚合 Jackett 里所有已配置站, 上限 1000 条);
-    也可填具体站名(如 `thepiratebay`)或 filter 表达式(如 `type:public+lang:cn`)。
+  - {indexer} 支持:
+      * `all`(默认)        一次聚合 Jackett 里所有已配置站
+      * 单个站名/filter 表达式(如 `thepiratebay` / `type:public+lang:cn`)
+      * **多站**(逗号分隔或 list 数组)  → 本模块在 App 侧**并行**逐个查各站,
+        按 infoHash 合并去重, 且**单站故障隔离**: 某一站超时/报错只丢它那一份,
+        不会像 `all` 那样"等最慢的那个站"把整条 Jackett 源拖到超时。
+  - jackett.timeout(默认 30 秒)= 单个索引器请求的超时上限; 多站并行时总耗时≈最慢的站(受此上限)。
   - 返回 `<rss><channel><item>...</item></channel></rss>`; 每个 item:
     <title> 名称 / <link> 或 <guid> 磁力(magnet:?...) / <size> 字节 /
     <seeders> <leechers> / <category> / <description>。
@@ -65,6 +70,34 @@ def resolve_settings(cfg, cli_base=None, cli_key=None, cli_indexer=None):
     return base, apikey, indexer, max(1, limit)
 
 
+def _resolve_indexers(cfg):
+    """把 jackett.indexer 解析成索引器列表。
+
+    - 列表(设置页 list 字段存成数组)  → 取非空项
+    - 字符串: 空 → ['all']; 含逗号 → 拆多站; 否则单值(可为 filter 表达式)
+    返回至少一个元素(解析不出就回退 all)。
+    """
+    j = (cfg or {}).get(CONFIG_KEY) or {}
+    raw = j.get("indexer")
+    if raw is None:
+        raw = DEFAULT_INDEXER
+    if isinstance(raw, (list, tuple)):
+        lst = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        s = str(raw).strip()
+        lst = [p.strip() for p in s.split(",") if p.strip()] if s else []
+    return lst or [DEFAULT_INDEXER]
+
+
+def _resolve_timeout(cfg):
+    """单个索引器请求的超时上限(秒), 默认 30。多站并行时总耗时≈最慢的站(受此上限)。"""
+    j = (cfg or {}).get(CONFIG_KEY) or {}
+    try:
+        return int(j.get("timeout") or 30)
+    except Exception:
+        return 30
+
+
 def _opener():
     # 不走系统代理: Jackett 常在内网, 被系统代理拦截会 502/连不上
     return httputil.no_proxy_opener()
@@ -106,51 +139,88 @@ def _extract_magnet(item):
     return ""
 
 
-def search(cfg, query, limit=30):
-    """按 query 搜 Jackett(Torznab), 返回统一 item 列表(与 bitmagnet 同结构)。
-
-    每个 item: {hash, name, size, seeders, leechers, magnet, indexer}。
-    只保留能取到磁力链的条目(无磁力/只有 .torrent 下载的丢弃, 我们靠磁力推 CD2)。
-    """
-    base, apikey, indexer, _lim = resolve_settings(cfg)
-    if not base:
-        raise RuntimeError("Jackett 未配置地址: 管理 → 通用 → 磁力搜索源 → Jackett 地址")
-    url = f"{base}/api/v2.0/indexers/{urllib.parse.quote(indexer, safe='')}/results/torznab"
-    params = {"apikey": apikey, "t": "search", "q": query, "limit": max(1, int(limit))}
-    url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": UA,
-                                              "Accept": "application/xml, application/json, */*"})
-    try:
-        with _opener().open(req, timeout=30) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Jackett HTTP {e.code}: {e.reason}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Jackett 请求失败: {e}")
-
-    # Torznab 是 XML; 若站点/反代误给 JSON(极少见) → 当作错误
-    head = raw[:1].lstrip()
+def _parse_torznab(raw):
+    """Torznab XML → 统一 item 列表。无磁力链的条目丢弃(无法推 CD2, 见 docstring)。"""
     try:
         root = ET.fromstring(raw)
     except ET.ParseError:
         raise RuntimeError(f"Jackett 返回不是 Torznab XML: {raw[:160]!r}")
-    items = root.findall(".//item")
     out = []
-    for it in items:
-        title = _xtag(it, "title")
+    for it in root.findall(".//item"):
         magnet = _extract_magnet(it)
         if not magnet:
-            continue   # 无磁力链的条目无法推送 CD2(见 docstring), 直接丢弃
+            continue
         size = _to_int(_xtag(it, "size"))
         out.append({
             "hash": parse_info_hash(magnet) or "",
-            "name": title,
+            "name": _xtag(it, "title"),
             "size": size if size else 0,
             "seeders": _to_int(_xtag(it, "seeders")),
             "leechers": _to_int(_xtag(it, "leechers")),
             "magnet": magnet,
             "indexer": _xtag(it, "description") or "",
         })
+    return out
+
+
+def _fetch_one(base, apikey, indexer, query, limit, timeout):
+    """查单个索引器(或 all)。HTTP/网络失败抛 RuntimeError(带索引器名, 便于多站隔离时定位)。"""
+    url = f"{base}/api/v2.0/indexers/{urllib.parse.quote(indexer, safe='')}/results/torznab"
+    params = {"apikey": apikey, "t": "search", "q": query, "limit": max(1, int(limit))}
+    url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                              "Accept": "application/xml, application/json, */*"})
+    try:
+        with _opener().open(req, timeout=timeout) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Jackett[{indexer}] HTTP {e.code}: {e.reason}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Jackett[{indexer}] 请求失败: {e}")
+    return _parse_torznab(raw)
+
+
+def search(cfg, query, limit=30):
+    """按 query 搜 Jackett(Torznab), 返回统一 item 列表(与 bitmagnet 同结构)。
+
+    每个 item: {hash, name, size, seeders, leechers, magnet, indexer}。
+    indexer 取值见模块 docstring: `all` / 单站 / 多站。多站时并行查 + 按 hash 合并去重
+    + 单站故障隔离(某站超时就丢它那一份, 不拖垮整条 Jackett 源)。
+    """
+    base, apikey, _idx, _lim = resolve_settings(cfg)
+    if not base:
+        raise RuntimeError("Jackett 未配置地址: 管理 → 通用 → 磁力搜索源 → Jackett 地址")
+    timeout = _resolve_timeout(cfg)
+    indexers = _resolve_indexers(cfg)
+
+    if len(indexers) == 1:
+        # 单站 / all: 单次请求, 失败直接抛(与原行为一致, 让上层记录该源失败)
+        return _fetch_one(base, apikey, indexers[0], query, limit, timeout)
+
+    # 多站: 并行查 + 合并去重 + 单站故障隔离
+    from concurrent.futures import ThreadPoolExecutor
+    seen = {}
+    order = []
+
+    def _worker(ix):
+        try:
+            return _fetch_one(base, apikey, ix, query, limit, timeout)
+        except Exception:  # 单站失败(超时/HTTP/解析)→ 返回空, 不拖垮整体
+            return []
+
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(indexers)))) as ex:
+        for items in ex.map(_worker, indexers):
+            for it in items:
+                key = it["hash"] or it["name"]
+                if key in seen:
+                    # 同一 hash 多站都有 → 保留 seeders 更高的那份
+                    if (it["seeders"] or 0) > (seen[key]["seeders"] or 0):
+                        seen[key] = it
+                else:
+                    seen[key] = it
+                    order.append(key)
+    out = [seen[k] for k in order]
+    out.sort(key=lambda x: (x["seeders"] or 0), reverse=True)
     return out
 
 
