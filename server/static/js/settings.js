@@ -429,6 +429,7 @@ const CFG_GROUPS = [
     {p: 'jackett.apikey', label: 'API Key', type: 'password', desc: 'Jackett 控制台 → Settings 中各 Indexer 对应的 API Key'},
     {p: 'jackett.indexer', label: '索引器(可多站)', type: 'list', desc: '每行一个站名(或用逗号隔开)。留空 = all 聚合全部已配置站; 填多个 = 只查这几站, App 并行查询 + 单站故障隔离(某站挂/超时就丢它那一份, 不会拖垮整条 Jackett 源, 也不用再为单个死站卡 40 秒)'},
     {p: 'jackett.timeout', label: '单站超时(秒)', type: 'number', desc: '每个索引器请求的超时上限; 多站并行时 Jackett 总耗时 ≈ 最慢的那个站(受此上限)'},
+    {p: 'jackett.relevance_filter', label: '过滤无关填充', type: 'checkbox', desc: '公开站在搜不到时会回退返回"最新 N 条"无关内容(会淹没真片); 此开关把不含查询词的填充结果丢掉(强烈建议保持开)'},
     {p: 'jackett.limit', label: '返回条数', type: 'number'},
     {p: 'search.max_query_groups', label: '最多查询组数', type: 'number',
      desc: '详情页磁力搜索最多用几个不同标题(简/繁/台/港/原始/英文)并行查。0=全部标题都查(覆盖最全, 首屏略慢); 填 N=最多取 N 个不同标题(更快)'},
