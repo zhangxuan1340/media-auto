@@ -5,7 +5,7 @@
  *   - 静态资源(css/js/html) 网络优先 + 缓存回退, 保证改完即发、断网可用。
  * 版本递增 → 升级时清旧缓存, 避免陈旧资源。
  */
-const VERSION = 'mediaauto-v16';   // 2026-10-05: Jackett 加"相关性过滤"去填充(公开站搜不到会回退返回最新N条无关内容, 现按查询强token过滤, 开关 jackett.relevance_filter); Jackett 支持多站并行+单站故障隔离(indexer 改多行列表, App 侧并行查各站+按 hash 合并, 某站超时只丢它自己不再拖垮整源), 新增 jackett.timeout; 2026-10-04: 整理页「执行选中/执行全部」改自定义 confirmBox 弹窗(原生 confirm 在 iOS 可能被静默吞掉→点了没反应); 管理页新增「种子搜索」子页签; 导航 4 图标拆独立 sprite /icons/tab-icons.svg(4 个 <symbol>, 保留 currentColor 变色, 改用 <use> 引用); 2026-10-04: Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义+缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
+const VERSION = 'mediaauto-v17';   // 2026-10-05: 缺失页自动刷新改"原地刷新+无进展即停"(不再整页闪"加载…", 卡住的待同步条目不再空转6分钟); Jackett 加"相关性过滤"去填充(公开站搜不到会回退返回最新N条无关内容, 现按查询强token过滤, 开关 jackett.relevance_filter); Jackett 支持多站并行+单站故障隔离(indexer 改多行列表, App 侧并行查各站+按 hash 合并, 某站超时只丢它自己不再拖垮整源), 新增 jackett.timeout; 2026-10-04: 整理页「执行选中/执行全部」改自定义 confirmBox 弹窗(原生 confirm 在 iOS 可能被静默吞掉→点了没反应); 管理页新增「种子搜索」子页签; 导航 4 图标拆独立 sprite /icons/tab-icons.svg(4 个 <symbol>, 保留 currentColor 变色, 改用 <use> 引用); 2026-10-04: Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标; 2026-10-02: 热门榜平台地区语义+缓存上限; 2026-09-21: 不再缓存 qbit 实时数据
 const STATIC_CACHE = VERSION + '-static';
 const RUNTIME_CACHE = VERSION + '-runtime';
 // 启动即预缓存的核心壳(离线也能打开登录页)

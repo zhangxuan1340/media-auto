@@ -18,23 +18,28 @@ async function loadMissing(){
       <button id="ms-tv" class="active" onclick="loadMissingKind('tv')">剧集(分集缺失)</button>
       <button id="ms-movie" onclick="loadMissingKind('movie')">电影(未拥有)</button>
     </nav><div id="missingBody"></div>`;
-  // 进入缺失页 → 自动刷新轮数重新计, 取消上一轮挂起的刷新
-  _msRefreshRounds = 0;
-  if(_msRefreshTimer){ clearTimeout(_msRefreshTimer); _msRefreshTimer = null; }
-  loadMissingKind('tv');
+  loadMissingKind('tv');   // 非 quiet → 内部重置自动刷新预算/进度基准
 }
 
-async function loadMissingKind(kind){
+async function loadMissingKind(kind, quiet=false){
   const el = $('#missingBody'); if(!el) return;
   $('#ms-tv').classList.toggle('active', kind==='tv');
   $('#ms-movie').classList.toggle('active', kind==='movie');
-  // 切页签/自动刷新 → 分页状态全清, 从第一页重铺(防旧页数据串台)
+  // 切页签/手动进入 → 重开自动刷新预算与进度基准, 取消挂起的刷新; 周期刷新(quiet)不重置
+  if(!quiet){
+    _msRefreshRounds = 0; _msLastUnknown = -1;
+    if(_msRefreshTimer){ clearTimeout(_msRefreshTimer); _msRefreshTimer = null; }
+  }
+  // 分页状态全清, 从第一页重铺(防旧页数据串台)
   MS.kind = kind; MS.offset = 0; MS.loading = false; MS.hasMore = true;
   MS.total = 0; MS.missingSum = 0; MS.unknown = 0; MS.epBanner = '';
   MS.reqId++;
   MS.list.length = 0;
   CARD_LIST = MS.list;                 // 卡片点击 → openCardIdx(i) 走同一数组
-  el.innerHTML = '<div class="empty"><span class="spin"></span>加载缺失…</div>';
+  // quiet(周期自动刷新)且已有网格 → 跳过整页"加载…"闪烁, 原地刷新(msLoadPage 首页分支会重建 #msGrid)
+  if(!quiet || !document.getElementById('msGrid')){
+    el.innerHTML = '<div class="empty"><span class="spin"></span>加载缺失…</div>';
+  }
 
   if(kind==='tv'){
     try{
@@ -144,21 +149,26 @@ window.addEventListener('scroll', ()=>{
   });
 }, {passive:true});
 
-// 集号待同步时的自动刷新: 每 15s 重拉一次(后端每次会再排一批回填), 最多 24 轮(6 分钟)
-let _msRefreshTimer = null, _msRefreshRounds = 0;
+// 集号待同步时的自动刷新: 每 15s 重拉一次(后端每次会再排一批回填), 最多 24 轮(6 分钟)。
+// 只有"待同步数在减少"(有进展)时才继续 —— 卡住不再减少就自动停, 别对补不完的条目空转 6 分钟。
+// 周期刷新走 quiet 原地刷新(不整页闪"加载…"), 消除"不停刷新"的观感。
+let _msRefreshTimer = null, _msRefreshRounds = 0, _msLastUnknown = -1;
 function _msAutoRefresh(kind){
-  if(_msRefreshTimer) return;
-  if(_msRefreshRounds >= 24) return;
+  if(_msRefreshTimer || _msRefreshRounds >= 24) return;
   _msRefreshTimer = setTimeout(()=>{
     _msRefreshTimer = null;
     // 标签页在后台 / 已切离缺失子页签 → 这一轮不发请求, 但**继续排下一轮**
     // (旧写法直接 return, 一次切走就把回填自动刷新永久停掉)
     if(document.hidden || MANAGE_SUB !== 'missing'){ _msAutoRefresh(kind); return; }
+    const now = MS.unknown;
+    if(now <= 0) return;                                       // 已补完 → 停
+    if(_msLastUnknown >= 0 && now >= _msLastUnknown) return;   // 无进展(没减少) → 停, 不再空转
     _msRefreshRounds++;
+    _msLastUnknown = now;
     const tab = document.getElementById('ms-'+kind);
     const body = document.getElementById('missingBody');
     if(!tab || !tab.classList.contains('active') || !body) return;  // 已切走/离开 → 不刷
-    loadMissingKind(kind);
+    loadMissingKind(kind, true);
   }, 15000);
 }
 // 缺失页触发分集同步: 完成后回到当前缺失页签刷新
