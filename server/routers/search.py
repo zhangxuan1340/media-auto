@@ -514,6 +514,8 @@ async def _search_native(cfg, q, limit, ctype=None):
             "seeders": r.get("seeders"),
             "leechers": r.get("leechers"),
             "magnet": magnet,
+            # 封面图: Bitmagnet 的 tmdb 元数据扩展写进 content.attributes 的海报(poster_path)
+            "image": r.get("poster") or "",
         })
     # 原生 GraphQL 不支持 page 翻页(limit 即上限)
     return out, False, 1
@@ -536,6 +538,7 @@ async def _search_next_web(cfg, q, limit, page=1):
             "seeders": None,   # Next-Web 源不提供 seeders/leechers
             "leechers": None,
             "magnet": t.get("magnet"),
+            "image": "",       # 该站 REST 接口不带封面图(只有 hash/name/size/magnet/files)
         })
     # 精确续翻页号: 实际翻到的 offset 换算回 page(去重可能少走页, 不能按返回条数猜)
     next_page = end_offset // diao_search.PAGE_SIZE + 1
@@ -559,6 +562,8 @@ async def _search_jackett(cfg, q, limit):
             "seeders": t.get("seeders"),
             "leechers": t.get("leechers"),
             "magnet": t.get("magnet"),
+            # 封面图: Jackett 的 torznab:attr coverurl(索引器提供的封面经它代理; 无封面的站为空)
+            "image": t.get("image") or "",
         })
     return out, len(out) < limit, 1
 
@@ -577,6 +582,7 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=Non
         return [{
             "infoHash": t.get("hash") or "", "name": t.get("name"), "size": t.get("size"),
             "seeders": t.get("seeders"), "leechers": t.get("leechers"), "magnet": t.get("magnet"),
+            "image": t.get("image") or "",
         } for t in items]
     if source == "next_web":
         from scripts import diao_search
@@ -590,6 +596,7 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=Non
             out.append({
                 "infoHash": t.get("hash"), "name": t.get("name"), "size": t.get("size"),
                 "seeders": None, "leechers": None, "magnet": t.get("magnet"),
+                "image": "",
             })
         return out
     else:
@@ -602,6 +609,7 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=Non
             out.append({
                 "infoHash": r.get("infoHash"), "name": r.get("name"), "size": r.get("size"),
                 "seeders": r.get("seeders"), "leechers": r.get("leechers"), "magnet": magnet,
+                "image": r.get("poster") or "",
             })
         return out
 

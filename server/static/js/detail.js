@@ -709,7 +709,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
     box.innerHTML = `<div style="color:var(--muted);font-size:12px;margin:0 0 8px" class="magHead"><span class="magHeadTxt">来源: ${src} · 本页 ${res.length} 条${_magTotal(box)}${qTag}</span>${_magSortHtml(box)}</div>`
       + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
       + res.map((r,i)=>`
-      <div class="res"><div class="info">
+      <div class="res">${_seedThumb(r)}<div class="info">
         ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
         <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
@@ -947,6 +947,39 @@ function _pushButtons(i, cd2Onclick, qbitOnclick, r){
   return cd2 + qbit;
 }
 
+// ---- 种子预览图(行内缩略图 + 点开大图弹窗) ----
+// 图源: 后端统一 item 的 image 字段 —— 原生 Bitmagnet 给 TMDB 海报(poster_path 拼成的
+// image.tmdb.org 地址), Jackett 给 torznab:attr coverurl(索引器封面), Next-Web 站没有图。
+// 没图的行不渲染缩略图(不留空位); 图裂了(onerror)也自动收起, 不留一个破图标。
+function _seedThumb(r){
+  if(!r || !r.image) return '';
+  return `<div class="res-thumb" title="点击查看预览图" data-img="${esc(r.image)}"`
+    + ` data-name="${esc((r.name||'').slice(0,140))}" onclick="previewSeedImage(this)">`
+    + `<img src="${esc(img(r.image))}" alt="预览图" loading="lazy"`
+    + ` onerror="this.parentElement.style.display='none'"></div>`;
+}
+// 大图弹窗: 点缩略图打开, 点任意处 / Esc 关闭。层级 70(高于 prompt 系弹窗 60, 低于 toast 99)。
+function previewSeedImage(el){
+  const url = (el && el.dataset && el.dataset.img) || '';
+  if(!url) return;
+  const name = (el && el.dataset && el.dataset.name) || '';
+  const bg = document.createElement('div');
+  bg.className = 'imgview-bg';
+  bg.innerHTML = `<div class="imgview-card" role="dialog" aria-modal="true" aria-label="种子预览图">`
+    + `<img src="${esc(img(url))}" alt="种子预览图">`
+    + (name ? `<p class="cap">${esc(name)}</p>` : '')
+    + `</div>`;
+  document.body.appendChild(bg);
+  const onKey = (e)=>{ if(e.key === 'Escape'){ e.stopPropagation(); close(); } };
+  const close = ()=>{
+    document.removeEventListener('keydown', onKey, true);
+    bg.remove();
+  };
+  // 点背景或图都关(预览图只需"看一眼"); 事件不会冒泡到详情弹窗(挂在 body 上, 不在 #modalBg 内)
+  bg.addEventListener('click', close);
+  document.addEventListener('keydown', onKey, true);
+}
+
 // ---- 缺失季自动扫种子: 按季构造搜索词组, 结果渲染进季行的种子列 ----
 // 用户指定(2026-09-17): 每季扫 4 组 = {剧名+年份+Sxx, 剧名+Sxx} × {中文, 英文}。
 // 带年份的那组精度高(防同名撞季), 不带年份的组召回高(发布组整季包常省略年份);
@@ -1025,7 +1058,7 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
       box.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">${src} · ${res.length} 条${qTag} · 词: ${esc(qShow)}</div>`
         + (warns ? `<div class="mag-warn">${icon('alert')} 部分源失败(已用可用的源继续): ${esc(warns)}</div>` : '')
         + res.map((r,i)=>`
-        <div class="res res-compact"><div class="info">
+        <div class="res res-compact">${_seedThumb(r)}<div class="info">
           ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
           <div class="n">${_demoteBadge(r)}${esc(r.name||'')}</div>
           ${_qualityTags(r.name, r)}

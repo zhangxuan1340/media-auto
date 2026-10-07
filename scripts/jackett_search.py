@@ -19,8 +19,11 @@ Torznab 端点:
         不会像 `all` 那样"等最慢的那个站"把整条 Jackett 源拖到超时。
   - jackett.timeout(默认 30 秒)= 单个索引器请求的超时上限; 多站并行时总耗时≈最慢的站(受此上限)。
   - 返回 `<rss><channel><item>...</item></channel></rss>`; 每个 item:
-    <title> 名称 / <link> 或 <guid> 磁力(magnet:?...) / <size> 字节 /
-    <seeders> <leechers> / <category> / <description>。
+    <title> 名称 / <size> 字节 / <enclosure> / <link> / <guid> /
+    **<torznab:attr name="...">** —— 关键字段几乎都在 torznab:attr 里:
+      seeders / peers / leechers(做种/下载数)、magneturl(带 tracker 的完整磁力)、
+      infohash、**coverurl(封面图, Jackett 自己代理)**。
+    统一规整成 {hash,name,size,seeders,leechers,magnet,indexer,image}。
 
 地址/密钥优先级: 配置的 jackett.base / jackett.apikey(命令行 --base/--key 可临时覆盖)。
 
@@ -114,13 +117,35 @@ def parse_info_hash(magnet):
 
 
 def _xtag(item, tag):
-    """取 item 下某子元素文本(兼容默认命名空间与 torznab 命名空间前缀)。"""
+    """取 item 下某**子元素**的文本(兼容默认命名空间与 torznab 命名空间前缀)。"""
     el = item.find(tag)
     if el is not None and (el.text or "").strip():
         return el.text.strip()
     for ch in item:
         if isinstance(ch.tag, str) and ch.tag.split("}")[-1] == tag and (ch.text or "").strip():
             return ch.text.strip()
+    return ""
+
+
+def _tattr(item, name):
+    """取 `<torznab:attr name="...">` 的 value(找不到返回 "")。
+
+    ⚠️ 2026-10-07 实测确认的既有缺陷: Jackett 把 seeders / peers / coverurl / magneturl
+    全放在 **torznab:attr 元素**里, 而不是独立子元素。旧实现只用 _xtag 找 `<seeders>`,
+    永远取不到 → `_to_int("")` 退化成 0 → **所有 Jackett 结果的种子上传数恒为 0**,
+    前端显示 "0↑/0↓"、"按种子数排序"对 Jackett 完全失效。此处改为优先读 attr。
+    """
+    for ch in item:
+        if isinstance(ch.tag, str) and ch.tag.split("}")[-1] == "attr" and ch.get("name") == name:
+            return (ch.get("value") or "").strip()
+    return ""
+
+
+def _enclosure_url(item):
+    """`<enclosure url="...">` 的 url(可能是 .torrent 下载地址, 也可能是磁力)。"""
+    for ch in item:
+        if isinstance(ch.tag, str) and ch.tag.split("}")[-1] == "enclosure":
+            return (ch.get("url") or "").strip()
     return ""
 
 
@@ -132,7 +157,18 @@ def _to_int(s):
 
 
 def _extract_magnet(item):
-    """磁力链: 优先 <link>/<guid> 里的 magnet:, 否则扫描所有子元素找 magnet: 开头者。"""
+    """磁力链: 优先 torznab:attr 的 magneturl / <enclosure url="magnet:">, 再退 <link>/<guid>,
+    最后扫描所有子元素文本找 `magnet:` 开头者。
+
+    ⚠️ 为什么必须先看 magneturl/enclosure: 不少站(实测 The Pirate Bay)的 <link>/<guid>
+    只给**裸磁力**(`magnet:?xt=urn:btih:xxx`, 一个 tracker 都没有), 推给 qBittorrent 后
+    只能靠 DHT 慢慢找 peer; Jackett 在 magneturl / enclosure 里给的是**带 tracker 的完整磁力**,
+    明显更可用。另外 YTS 这类站的 <link>/<guid> 是 .torrent 下载地址(不含 magnet:),
+    旧实现直接判为"无磁力"把整条丢掉 —— 现在能从 magneturl 正常取到。
+    """
+    for v in (_tattr(item, "magneturl"), _enclosure_url(item)):
+        if v.startswith("magnet:"):
+            return v
     for tag in ("link", "guid"):
         v = _xtag(item, tag)
         if v.startswith("magnet:"):
@@ -155,14 +191,29 @@ def _parse_torznab(raw):
         if not magnet:
             continue
         size = _to_int(_xtag(it, "size"))
+        # seeders/peers/leechers 优先 torznab:attr, 再退同名子元素(兼容老格式)。
+        # ⚠️ 必须先判"字段在不在"再转数字: _to_int('') 返回 0 而不是 None,
+        #    直接用它会把"字段缺失"误当成"确实是 0", 下面的 peers-seeders 推算就永远不触发。
+        s_raw = _tattr(it, "seeders") or _xtag(it, "seeders")
+        p_raw = _tattr(it, "peers") or _xtag(it, "peers")
+        l_raw = _tattr(it, "leechers") or _xtag(it, "leechers")
+        seeders = _to_int(s_raw) if s_raw else None
+        peers = _to_int(p_raw) if p_raw else None
+        leechers = _to_int(l_raw) if l_raw else None
+        if leechers is None and peers is not None and seeders is not None:
+            # Torznab 约定: peers = 总连接数(seeders + leechers) → 相减得下载者数
+            leechers = max(0, peers - seeders)
         out.append({
-            "hash": parse_info_hash(magnet) or "",
+            "hash": parse_info_hash(magnet) or _tattr(it, "infohash").lower(),
             "name": _xtag(it, "title"),
             "size": size if size else 0,
-            "seeders": _to_int(_xtag(it, "seeders")),
-            "leechers": _to_int(_xtag(it, "leechers")),
+            "seeders": seeders,
+            "leechers": leechers,
             "magnet": magnet,
             "indexer": _xtag(it, "description") or "",
+            # 封面图: Jackett 把索引器提供的封面代理到自己的 /img/<indexer>/ 下(带 apikey),
+            # 前端直接 <img src> 即可; 没有封面的站(如 TPB/rutracker)为空串。
+            "image": _tattr(it, "coverurl"),
         })
     return out
 
@@ -217,7 +268,7 @@ def _relevance_filter(items, query, cfg):
 def search(cfg, query, limit=30):
     """按 query 搜 Jackett(Torznab), 返回统一 item 列表(与 bitmagnet 同结构)。
 
-    每个 item: {hash, name, size, seeders, leechers, magnet, indexer}。
+    每个 item: {hash, name, size, seeders, leechers, magnet, indexer, image}。
     indexer 取值见模块 docstring: `all` / 单站 / 多站。多站时并行查 + 按 hash 合并去重
     + 单站故障隔离(某站超时就丢它那一份, 不拖垮整条 Jackett 源)。
     结果统一过一遍 `_relevance_filter` 去掉公开站的"最新 N 条"填充。

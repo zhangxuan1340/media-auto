@@ -15,6 +15,9 @@ media-auto / search —— Bitmagnet 磁力搜索
   - 旧版:  torrentContent(search: {queryString, limit}) { results { name size magnetLink content{...} } }
   search() 首次调用时对每个 url 发一次 introspection 判定版本(进程级缓存),
   按版本选查询与字段解析, 归一化成同一结构返回, 调用方无感知。
+  同一次 introspection 顺带判定 Content 是否支持 attributes 子字段 —— 支持才注入它取
+  TMDB 封面(poster_path/backdrop_path), 拼成 image.tmdb.org 完整地址放进 item['poster'],
+  否则(老版本)不注入, 免得整条查询报错。
 """
 import argparse
 import json
@@ -48,6 +51,7 @@ query ($q: String!, $limit: Int!) {
         releaseYear
         language
         overview
+        __ATTRS__
       }
     }
   }
@@ -71,12 +75,19 @@ query ($input: TorrentContentSearchQueryInput!) {
           releaseYear
           overview
           originalLanguage { name }
+          __ATTRS__
         }
       }
     }
   }
 }
 """
+
+# 封面图取自 content.attributes 里的 TMDB 元数据(tmdb 扩展写进来的 poster_path/backdrop_path)。
+# ⚠️ 老版本 Bitmagnet 的 Content 没有 attributes 子字段, 直接带上会整条查询报错 →
+#    由 _detect_dialect 的 introspection 顺带判定能力, 支持才把 __ATTRS__ 换成这个片段。
+_ATTRS_SEL = "attributes { source key value }"
+_TMDB_IMG = "https://image.tmdb.org/t/p/"
 
 # Bitmagnet 的 contentType 枚举 -> 我们的 content_type(大小写都覆盖)
 TYPE_MAP = {
@@ -85,6 +96,7 @@ TYPE_MAP = {
 }
 
 _dialect_cache = {}
+_caps_cache = {}          # url -> {'attrs': bool}: 该端点的 Content 是否支持 attributes 子字段
 
 
 def _no_proxy_opener():
@@ -99,11 +111,16 @@ def parse_info_hash(magnet):
 
 
 def _detect_dialect(url):
-    """判定某 Bitmagnet 端点的 GraphQL 版本('new'/'old'), 进程级缓存, 每 url 只探一次。"""
+    """判定某 Bitmagnet 端点的 GraphQL 版本('new'/'old'), 进程级缓存, 每 url 只探一次。
+
+    顺带判定 `Content.attributes` 是否存在(老版本没这个子字段, 带上会整条查询报错),
+    结果写入 `_caps_cache`, 供 search() 决定要不要注入封面图选择集。
+    """
     if url in _dialect_cache:
         return _dialect_cache[url]
     intro = ('{ q: __type(name: "Query") { fields { name args { name } } } '
-             'tc: __type(name: "TorrentContentQuery") { fields { name } } }')
+             'tc: __type(name: "TorrentContentQuery") { fields { name } } '
+             'ct: __type(name: "Content") { fields { name } } }')
     req = urllib.request.Request(
         url, data=json.dumps({'query': intro}).encode('utf-8'),
         headers={'Content-Type': 'application/json'})
@@ -116,6 +133,8 @@ def _detect_dialect(url):
         raise RuntimeError(f'Bitmagnet schema 探测失败: {e}')
     data = d.get('data') or {}
     tc_fields = {f.get('name') for f in (data.get('tc') or {}).get('fields') or []}
+    ct_fields = {f.get('name') for f in (data.get('ct') or {}).get('fields') or []}
+    _caps_cache[url] = {'attrs': 'attributes' in ct_fields}
     kind = 'unknown'
     for f in data.get('q', {}).get('fields') or []:
         if f.get('name') == 'torrentContent' and any(
@@ -128,11 +147,49 @@ def _detect_dialect(url):
     return kind
 
 
+def _has_attributes(url):
+    """该端点的 Content 是否支持 attributes 子字段。未探测过/探测失败 → False(保守不注入)。"""
+    return bool(_caps_cache.get(url, {}).get('attrs'))
+
+
+def _tmdb_img(path, size):
+    """TMDB 相对路径 → 完整 CDN 地址(`/x.jpg` + `w500` → https://image.tmdb.org/t/p/w500/x.jpg)。"""
+    if not path:
+        return ''
+    if path.startswith('http://') or path.startswith('https://'):
+        return path                     # 已是绝对地址(少见) → 原样返回
+    return _TMDB_IMG + size + (path if path.startswith('/') else '/' + path)
+
+
+def _poster_from_attrs(attrs):
+    """从 content.attributes 里取封面图(TMDB 海报优先, 没海报才退背景图); 取不到返回 ''。
+
+    Bitmagnet 的 tmdb 元数据扩展把封面写进 attributes:
+      {source:'tmdb', key:'poster_path',   value:'/ljsZTb....jpg'}
+      {source:'tmdb', key:'backdrop_path', value:'/8ZTVqv....jpg'}
+    与剧本/综艺等没被 tmdb 扩展识别的种子一致: 没有 attributes → 空串, 前端不显示缩略图。
+    """
+    poster = backdrop = ''
+    for a in attrs or []:
+        if not isinstance(a, dict) or (a.get('source') or '').lower() != 'tmdb':
+            continue
+        key = (a.get('key') or '').lower()
+        val = (a.get('value') or '').strip()
+        if not val:
+            continue
+        if key == 'poster_path' and not poster:
+            poster = val
+        elif key == 'backdrop_path' and not backdrop:
+            backdrop = val
+    return _tmdb_img(poster, 'w500') or _tmdb_img(backdrop, 'w780')
+
+
 def _normalize(info_hash, name, size, seeders, leechers, magnet, content, language):
     """把不同版本的字段归一化成统一结构(调用方与 preview_classify 都按这个读)。"""
     content = dict(content or {})
     if language and not content.get('language'):
         content['language'] = language
+    poster = _poster_from_attrs(content.pop('attributes', None))
     return {
         'infoHash': info_hash,
         'name': name,
@@ -140,6 +197,7 @@ def _normalize(info_hash, name, size, seeders, leechers, magnet, content, langua
         'seeders': seeders,
         'leechers': leechers,
         'magnetLink': magnet or (f'magnet:?xt=urn:btih:{info_hash}' if info_hash else ''),
+        'poster': poster,
         'content': content,
     }
 
@@ -147,14 +205,16 @@ def _normalize(info_hash, name, size, seeders, leechers, magnet, content, langua
 def search(config, query, limit=20, content_type=None):
     url = config.get('bitmagnet', {}).get('url', 'http://localhost:3333/graphql')
     kind = _detect_dialect(url)
+    # 只有端点支持 Content.attributes 才注入封面图选择集(否则老版本会整条查询报错)
+    attrs_sel = _ATTRS_SEL if _has_attributes(url) else ''
     if kind == 'new':
         # 新版 schema 支持 facets 过滤(按 contentType 消噪); content_type 传 'movie'/'tv_show' 等
         inp = {'queryString': query, 'limit': limit}
         if content_type:
             inp['facets'] = {'contentType': {'filter': content_type}}
-        gql, variables = QUERY_NEW, {'input': inp}
+        gql, variables = QUERY_NEW.replace('__ATTRS__', attrs_sel), {'input': inp}
     elif kind == 'old':
-        gql, variables = QUERY_OLD, {'q': query, 'limit': limit}
+        gql, variables = QUERY_OLD.replace('__ATTRS__', attrs_sel), {'q': query, 'limit': limit}
     else:
         raise RuntimeError('Bitmagnet schema 无法识别(torrentContent 结构未知), 请确认版本')
 
@@ -247,6 +307,7 @@ def main():
                 'seeders': r.get('seeders'),
                 'leechers': r.get('leechers'),
                 'magnet': magnet(r),
+                'poster': r.get('poster') or '',
                 'preview': preview_classify(config, r),
             })
         print(json.dumps(out, ensure_ascii=False, indent=2))
