@@ -1,0 +1,6 @@
+# 开发/维护期依赖(镜像构建与运行时均不需要)
+# 仅在你「重新生成 CloudDrive2 的 proto 存根」时才需要安装:
+#   python -m grpc_tools.protoc -I clients/clouddrive \
+#     --python_out=clients/clouddrive --grpc_python_out=clients/clouddrive clouddrive.proto
+#   然后把 clouddrive_pb2_grpc.py 里的 `import clouddrive_pb2` 改成带 try/except 的包内导入。
+grpcio-tools>=1.60

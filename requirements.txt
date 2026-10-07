@@ -4,8 +4,9 @@ uvicorn>=0.27
 httpx>=0.27
 sqlalchemy>=2.0
 grpcio>=1.60
-grpcio-tools>=1.60
 
+# grpcio-tools 仅用于「重新生成 proto 存根」(开发/维护期), 运行时不需要,
+# 已从运行时依赖移除以加速镜像构建; 需要时用 `pip install -r requirements-dev.txt`。
 # CloudDrive2 的 gRPC 调用是【纯 Python grpcio 原生 channel】, 无需 grpcurl 等外部二进制。
 # 消息存根由官方 proto 预生成: clients/clouddrive/clouddrive_pb2*.py。
 # proto 升级后重新生成:
