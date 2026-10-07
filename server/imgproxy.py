@@ -39,10 +39,54 @@ _CACHE_DIR = os.path.join(project_root(), "data", "img_cache")
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
 _UPSTREAM_TIMEOUT = 30
+# 静态允许前缀: TMDB 图片 CDN。
 _PROXY_PREFIXES = ("https://image.tmdb.org/", "http://image.tmdb.org/")
 _UA = "MediaAuto/1.2 (image cache)"
 # max-age 缺失/解析失败时的兜底新鲜期(秒)。TMDB 实测给 ~1 年。
 _DEFAULT_MAX_AGE = 7 * 24 * 3600
+
+# ---------------------------------------------------------------------------
+# Jackett 封面代理(2026-10 新增)
+# ---------------------------------------------------------------------------
+# Jackett 的 Torznab 结果用 <torznab:attr name="coverurl"> 给封面, 但那个地址指向
+# **Jackett 自身**(如 http://<jackett>/img/<indexer>/..), 常在内网/私有网段。浏览器
+# 直连必然裂图(跨网不可达)。故由**服务端代取**: 后端把 coverurl 改写成
+# /api/img/<token>(见 proxy_url), 前端 <img> 打同源代理, 代理再去 Jackett 取图。
+#
+# 允许前缀**从运行期配置 jackett.base 动态生成**, 绝不把内网地址写死进仓库;
+# 且带 TTL 缓存(默认 5 分钟), 避免每个图片请求都读一次配置。
+_JACKETT_TTL = 300.0
+_jackett_cache = {"ts": 0.0, "prefixes": ()}
+
+
+def _jackett_prefixes():
+    """当前生效的 Jackett 允许前缀(http/https 两种, 末尾带 /)。带 TTL 缓存。"""
+    now = time.monotonic()
+    c = _jackett_cache
+    if now - c["ts"] < _JACKETT_TTL:
+        return c["prefixes"]
+    prefixes = []
+    try:
+        from server.config import get_config  # 惰性: 避免启动期循环导入
+        base = str(((get_config() or {}).get("jackett") or {}).get("base") or "").strip().rstrip("/")
+        if base:
+            # 同主机换协议的两种写法都放行(配置存 http 但站点跳 https 之类)
+            for b in {base, base.replace("https://", "http://", 1),
+                      base.replace("http://", "https://", 1)}:
+                prefixes.append(b + "/")
+    except Exception:  # noqa: BLE001  配置不可读 → 只放行 TMDB, 不影响主流程
+        pass
+    c["ts"] = now
+    c["prefixes"] = tuple(prefixes)
+    return c["prefixes"]
+
+
+def _allowed_prefixes():
+    return _PROXY_PREFIXES + _jackett_prefixes()
+
+
+def _allowed(url: str) -> bool:
+    return any(url.startswith(p) for p in _allowed_prefixes())
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +140,17 @@ def _dec(token: str) -> str:
         return base64.urlsafe_b64decode(token + pad).decode("utf-8")
     except Exception:  # noqa: BLE001
         raise HTTPException(400, "invalid image token")
+
+
+def proxy_url(url: str) -> str:
+    """把上游图片地址编码成本地代理路径(/api/img/<token>); 空串原样返回。
+
+    供后端改写"浏览器不可直连"的图源(典型: Jackett 的 coverurl 指向内网 Jackett),
+    前端拿到的就是同源相对路径, 无需知道上游主机。
+    """
+    if not url:
+        return ""
+    return "/api/img/" + _enc(url)
 
 
 def _key(url: str):
@@ -154,17 +209,33 @@ def _parse_max_age(cache_control: str) -> int:
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
+def _out(data: bytes, ctype, tag: str, max_age=None):
+    """统一的图片响应: 带 X-ImgCache 诊断头 + Cache-Control。
+
+    显式给 Cache-Control: private 让**浏览器自己**按 max-age 缓存 —— 这样 service
+    worker 不必再替图片做一层缓存(见 sw.js 把 /api/img/ 列入 NEVER_CACHE),
+    否则几十张缩略图会把 SW 的接口缓存额度(RUNTIME_MAX)挤爆。
+    """
+    try:
+        ma = int(max_age or _DEFAULT_MAX_AGE)
+    except (TypeError, ValueError):
+        ma = _DEFAULT_MAX_AGE
+    return Response(data, media_type=ctype or "image/jpeg",
+                    headers={"X-ImgCache": tag,
+                             "Cache-Control": f"private, max-age={ma}"})
+
+
 @router.get("")
 async def img_config():
     """前端据此知道代理可用。开关本身在 /api/settings 的 image_cache 字段(可运行时切换)。"""
-    return {"enabled": True, "prefixes": list(_PROXY_PREFIXES)}
+    return {"enabled": True, "prefixes": list(_allowed_prefixes())}
 
 
 @router.get("/{token}")
 async def img(token: str):
     url = _dec(token)
-    if not any(url.startswith(p) for p in _PROXY_PREFIXES):
-        raise HTTPException(400, "仅支持代理 TMDB 图片")
+    if not _allowed(url):
+        raise HTTPException(400, "仅支持代理 TMDB / Jackett 图片")
     binp, _ = _key(url)
     meta = _read_meta(binp)
     now = time.time()
@@ -175,9 +246,7 @@ async def img(token: str):
         max_age = meta.get("max_age") or _DEFAULT_MAX_AGE
         if now - ts < max_age:
             _cache_stats.hit("image")
-            return Response(_read_bytes(binp),
-                            media_type=meta.get("ctype") or "image/jpeg",
-                            headers={"X-ImgCache": "fresh"})
+            return _out(_read_bytes(binp), meta.get("ctype"), "fresh", max_age)
 
     # ---- 2) 过期/首取: 带上 If-Modified-Since 问上游 ----
     headers = {"User-Agent": _UA}
@@ -188,9 +257,7 @@ async def img(token: str):
     except Exception as e:  # noqa: BLE001
         if os.path.exists(binp):  # 上游挂 → 降级旧缓存
             _cache_stats.hit("image")
-            return Response(_read_bytes(binp),
-                            media_type=meta.get("ctype") or "image/jpeg",
-                            headers={"X-ImgCache": "stale-fallback"})
+            return _out(_read_bytes(binp), meta.get("ctype"), "stale-fallback", meta.get("max_age"))
         raise HTTPException(502, f"上游图片不可达: {e}")
 
     if r.status_code == 304:
@@ -198,9 +265,7 @@ async def img(token: str):
         if os.path.exists(binp):
             _cache_stats.hit("image")
             _write_meta(binp, {**meta, "ts": now})
-            return Response(_read_bytes(binp),
-                            media_type=meta.get("ctype") or "image/jpeg",
-                            headers={"X-ImgCache": "304-hit"})
+            return _out(_read_bytes(binp), meta.get("ctype"), "304-hit", meta.get("max_age"))
         r = await _plain_get(url)  # 304 但本地没文件 → 兜底再拉
         if r is None:
             raise HTTPException(502, "上游 304 但本地无缓存")
@@ -209,9 +274,7 @@ async def img(token: str):
     if r.status_code != 200:
         if os.path.exists(binp):
             _cache_stats.hit("image")
-            return Response(_read_bytes(binp),
-                            media_type=meta.get("ctype") or "image/jpeg",
-                            headers={"X-ImgCache": "stale-fallback"})
+            return _out(_read_bytes(binp), meta.get("ctype"), "stale-fallback", meta.get("max_age"))
         raise HTTPException(502, f"上游 {r.status_code}")
 
     # ---- 3) 200(变了/首取) → 存新图 ----
@@ -230,6 +293,7 @@ def _store(binp: str, r: httpx.Response):
     """把刚回源拿到的图落盘 —— 只有真去上游下载了才会走到这里, 故记一次 miss。"""
     _cache_stats.miss("image")
     ctype = (r.headers.get("content-type") or "").split(";")[0].strip() or "image/jpeg"
+    max_age = _parse_max_age(r.headers.get("cache-control") or "")
     data = r.content
     tmp = binp + ".tmp"
     try:
@@ -240,8 +304,8 @@ def _store(binp: str, r: httpx.Response):
         pass
     _write_meta(binp, {
         "last_modified": r.headers.get("last-modified") or "",
-        "max_age": _parse_max_age(r.headers.get("cache-control") or ""),
+        "max_age": max_age,
         "ctype": ctype,
         "ts": time.time(),
     })
-    return Response(data, media_type=ctype, headers={"X-ImgCache": "store"})
+    return _out(data, ctype, "store", max_age)

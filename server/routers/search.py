@@ -545,6 +545,22 @@ async def _search_next_web(cfg, q, limit, page=1):
     return out, bool(more), next_page
 
 
+def _local_img(url):
+    """把"浏览器直连必裂图"的图源改写成本地图片代理路径(/api/img/<token>)。
+
+    典型是 Jackett 的 coverurl: 它指向 Jackett 自身(常在内网), 浏览器跨网不可达 →
+    统一交由服务端代取(见 server/imgproxy.py, 白名单按 jackett.base 动态放行)。
+    TMDB 的海报由前端 img() 自己改写, 不走这里。空串原样返回; 编码异常退回原地址。
+    """
+    if not url:
+        return ""
+    try:
+        from server import imgproxy
+        return imgproxy.proxy_url(url)
+    except Exception:  # noqa: BLE001
+        return url
+
+
 async def _search_jackett(cfg, q, limit):
     """Jackett(Torznab)源: 一次拿最多 limit 条(all 聚合上限 1000), 无 offset 续翻。
 
@@ -562,8 +578,9 @@ async def _search_jackett(cfg, q, limit):
             "seeders": t.get("seeders"),
             "leechers": t.get("leechers"),
             "magnet": t.get("magnet"),
-            # 封面图: Jackett 的 torznab:attr coverurl(索引器提供的封面经它代理; 无封面的站为空)
-            "image": t.get("image") or "",
+            # 封面图: Jackett 的 torznab:attr coverurl(索引器提供的封面经它代理; 无封面的站为空)。
+            # 该地址指向内网 Jackett, 改写成同源代理路径交给服务端代取。
+            "image": _local_img(t.get("image")),
         })
     return out, len(out) < limit, 1
 
@@ -582,7 +599,7 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=Non
         return [{
             "infoHash": t.get("hash") or "", "name": t.get("name"), "size": t.get("size"),
             "seeders": t.get("seeders"), "leechers": t.get("leechers"), "magnet": t.get("magnet"),
-            "image": t.get("image") or "",
+            "image": _local_img(t.get("image")),
         } for t in items]
     if source == "next_web":
         from scripts import diao_search

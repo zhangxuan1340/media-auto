@@ -5,7 +5,7 @@
  *   - 静态资源(css/js/html) 网络优先 + 缓存回退, 保证改完即发、断网可用。
  * 版本递增 → 升级时清旧缓存, 避免陈旧资源。
  */
-const VERSION = 'mediaauto-v19';   // 2026-10-07: 种子预览图弹窗深度优化(移动端) —— ① 修"跳转": 预览图现在自己压一层 history, 移动端侧滑/系统后退只关预览图, 不再把整个详情弹窗一起关掉(用户反馈的"跳转"); ② 新增右上角叉按钮(移动端 44px 触控目标), 点任意位置/点叉/Esc/侧滑四种关法; ③ 防误触: 按 pointer 位移判定, 双指缩放或拖动后松手不会误关; ④ 禁掉图片长按菜单/拖拽/选中, touch-action:pinch-zoom 允许放大看细节; ⑤ 补齐「加载更多」追加行漏掉的缩略图, 并让追加行与首屏同口径渲染(来源/金标/前排/降权/质量分徽章); 2026-10-07: 种子增加预览图 —— 磁力行左侧缩略图(有封面才显示), 点击开大图弹窗; 图源=Bitmagnet 原生源的 TMDB 海报(content.attributes.poster_path) 与 Jackett 的 torznab:attr coverurl; 同批修复 Jackett 解析: seeders/peers/leechers/coverurl/magneturl 全在 torznab:attr 里, 旧实现只找同名子元素 → 种子数恒为 0 现已修正, 磁力优先取带 tracker 的 magneturl/enclosure(TPB 的 link/guid 是裸磁力, YTS 的 link/guid 是 .torrent 地址会被整体丢弃); 2026-10-05: 缺失页自动刷新改"原地刷新+无进展即停"(不再整页闪"加载…", 卡住的待同步条目不再空转6分钟); Jackett 加"相关性过滤"去填充(公开站搜不到会回退返回最新N条无关内容, 现按查询强token过滤, 开关 jackett.relevance_filter); Jackett 支持多站并行+单站故障隔离(indexer 改多行列表, App 侧并行查各站+按 hash 合并, 某站超时只丢它自己不再拖垮整源), 新增 jackett.timeout; 2026-10-04: 整理页「执行选中/执行全部」改自定义 confirmBox 弹窗(原生 confirm 在 iOS 可能被静默吞掉→点了没反应); 管理页新增「种子搜索」子页签; 导航 4 图标拆独立 sprite /icons/tab-icons.svg; Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标
+const VERSION = 'mediaauto-v20';   // 2026-10-07: Jackett 封面改走服务端代理 —— Jackett 的 coverurl 指向内网 Jackett 自身, 浏览器跨网直连必裂图, 现由后端改写成同源 /api/img/<token> 交给服务端代取(代理白名单按配置的 jackett.base **动态放行**, 不把内网地址写死进仓库); /api/img 移出 SW 缓存、改回浏览器 HTTP 缓存(imgproxy 现回 Cache-Control: private, max-age), 免得一屏缩略图挤爆接口列表的缓存额度; 清掉恒返回 HTTP 400 的 52bt 索引器; 2026-10-07: 种子预览图弹窗深度优化(移动端) —— ① 修"跳转": 预览图现在自己压一层 history, 移动端侧滑/系统后退只关预览图, 不再把整个详情弹窗一起关掉(用户反馈的"跳转"); ② 新增右上角叉按钮(移动端 44px 触控目标), 点任意位置/点叉/Esc/侧滑四种关法; ③ 防误触: 按 pointer 位移判定, 双指缩放或拖动后松手不会误关; ④ 禁掉图片长按菜单/拖拽/选中, touch-action:pinch-zoom 允许放大看细节; ⑤ 补齐「加载更多」追加行漏掉的缩略图, 并让追加行与首屏同口径渲染(来源/金标/前排/降权/质量分徽章); 2026-10-07: 种子增加预览图 —— 磁力行左侧缩略图(有封面才显示), 点击开大图弹窗; 图源=Bitmagnet 原生源的 TMDB 海报(content.attributes.poster_path) 与 Jackett 的 torznab:attr coverurl; 同批修复 Jackett 解析: seeders/peers/leechers/coverurl/magneturl 全在 torznab:attr 里, 旧实现只找同名子元素 → 种子数恒为 0 现已修正, 磁力优先取带 tracker 的 magneturl/enclosure(TPB 的 link/guid 是裸磁力, YTS 的 link/guid 是 .torrent 地址会被整体丢弃); 2026-10-05: 缺失页自动刷新改"原地刷新+无进展即停"(不再整页闪"加载…", 卡住的待同步条目不再空转6分钟); Jackett 加"相关性过滤"去填充(公开站搜不到会回退返回最新N条无关内容, 现按查询强token过滤, 开关 jackett.relevance_filter); Jackett 支持多站并行+单站故障隔离(indexer 改多行列表, App 侧并行查各站+按 hash 合并, 某站超时只丢它自己不再拖垮整源), 新增 jackett.timeout; 2026-10-04: 整理页「执行选中/执行全部」改自定义 confirmBox 弹窗(原生 confirm 在 iOS 可能被静默吞掉→点了没反应); 管理页新增「种子搜索」子页签; 导航 4 图标拆独立 sprite /icons/tab-icons.svg; Logo 拆成独立 /logo.svg + 重做; 详情页繁/港台译名(alt_titles)读错字段 data.name→data.title 已修; 2026-10-03: 修「管理」页签图标
 const STATIC_CACHE = VERSION + '-static';
 const RUNTIME_CACHE = VERSION + '-runtime';
 // 启动即预缓存的核心壳(离线也能打开登录页)
@@ -27,10 +27,14 @@ async function trimRuntimeCache() {
   } catch (_) { /* 缓存不可用(隐私模式等)时忽略 */ }
 }
 
-// 实时状态类接口: 永不缓存(既不读也不写)。
-// 缓存它们会在断网/瞬时报错时把"上一次的进度"当成当前值显示出来 —— 对下载进度这是误导。
-// 宁可让前端拿到网络错误(它会显示错误横幅 + 自动重试), 也不要给一个看起来正常实则过期的数字。
-const NEVER_CACHE = ['/api/qbit/'];
+// 永不缓存的同源 GET(直连, 不读也不写 SW 缓存):
+//   - /api/qbit/*  实时状态类接口。缓存它们会在断网/瞬时报错时把"上一次的进度"当成
+//     当前值显示出来 —— 对下载进度这是误导。宁可让前端拿到网络错误(它会显示错误横幅
+//     + 自动重试), 也不要给一个看起来正常实则过期的数字。
+//   - /api/img/*   图片代理(封面/缩略图)。imgproxy 已回 Cache-Control: private, max-age,
+//     交回**浏览器 HTTP 缓存**即可; 一次搜索几十张缩略图, 若塞进 RUNTIME_CACHE 会把
+//     接口列表的缓存额度挤爆, 反而让离线/回退失效。
+const NEVER_CACHE = ['/api/qbit/', '/api/img/'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
