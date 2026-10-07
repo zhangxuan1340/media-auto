@@ -1040,21 +1040,40 @@
   .res-thumb:hover{transform:translateY(-1px);border-color:rgba(10,132,255,.4);box-shadow:var(--shadow-m)}
   .res-thumb img{width:100%;height:100%;object-fit:cover;display:block}
   .res-compact .res-thumb{width:32px;height:48px;border-radius:6px}
-  /* 大图弹窗: 层级 70 —— 高于输入/确认弹窗(60), 低于 toast(99); 点任意处或 Esc 关闭 */
+  /* 大图预览弹窗: 层级 70 —— 高于输入/确认弹窗(60), 低于 toast(99)。
+     关闭方式: 点任意位置(含图片本身) / 右上角叉 / Esc / 移动端侧滑(侧滑只吃预览图自己那层
+     history, 见 detail.js 的 popstate 处理 —— 不会把下面的详情弹窗一起关掉)。
+     touch-action:pinch-zoom = 允许双指放大看细节, 但禁掉单指拖动(弹窗本来也不需要滚动);
+     overscroll-behavior:contain = 阻止滚动手势穿透到底下的详情页。 */
   .imgview-bg{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;
     padding:24px;padding-top:calc(24px + var(--sat));padding-bottom:calc(24px + var(--sab));
     background:rgba(0,0,0,.62);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
-    cursor:zoom-out;animation:imgviewIn .18s var(--ease)}
+    cursor:zoom-out;touch-action:pinch-zoom;overscroll-behavior:contain;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+    animation:imgviewIn .18s var(--ease)}
+  .imgview-bg.closing{animation:imgviewOut .18s var(--ease) forwards;cursor:default}
   .imgview-card{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:100%;max-height:100%}
   .imgview-card img{max-width:min(92vw,620px);max-height:calc(88vh - 46px);object-fit:contain;
-    border-radius:16px;background:var(--modal-surface);box-shadow:0 24px 70px rgba(0,0,0,.55)}
+    border-radius:16px;background:var(--modal-surface);box-shadow:0 24px 70px rgba(0,0,0,.55);
+    -webkit-user-drag:none;user-drag:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
   .imgview-card .cap{max-width:min(92vw,620px);margin:0;color:#fff;opacity:.92;font-size:12px;line-height:1.5;
     text-align:center;word-break:break-all;
     display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  /* 右上角关闭按钮(深色玻璃底 + 白色图标): 移动端不是所有人都会想到"点任意处" */
+  .imgview-x{position:absolute;z-index:1;top:calc(10px + var(--sat));right:calc(10px + env(safe-area-inset-right,0px));
+    width:40px;height:40px;padding:0;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    border:1px solid rgba(255,255,255,.22);background:rgba(20,22,28,.55);color:#fff;cursor:pointer;
+    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transition:.16s var(--ease);
+    -webkit-tap-highlight-color:transparent}
+  .imgview-x .icn{width:20px;height:20px;stroke-width:2.4}
+  .imgview-x:hover{background:rgba(20,22,28,.8);transform:scale(1.06)}
+  .imgview-x:active{transform:scale(.92)}
   @keyframes imgviewIn{from{opacity:0}to{opacity:1}}
+  @keyframes imgviewOut{from{opacity:1}to{opacity:0}}
   @media (max-width:760px){
     .res-thumb{width:38px;height:57px}
     .res-compact .res-thumb{width:28px;height:42px}
     .imgview-bg{padding:14px;padding-top:calc(14px + var(--sat));padding-bottom:calc(14px + var(--sab))}
     .imgview-card img{max-height:calc(84vh - 46px)}
+    .imgview-x{top:calc(8px + var(--sat));width:44px;height:44px}  /* 移动端触控目标放到 44px */
   }

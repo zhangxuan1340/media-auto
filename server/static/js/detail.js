@@ -110,7 +110,15 @@ function openCardIdxP(i){
 // 不靠手动计数: popstate 后按「modal 是否开 + _navStack 是否空」决定回退目标, 天然幂等。
 let _histToken = '';         // 最近一次压栈的标记(调试用; 回退判定不依赖它)
 let _popGuard = 0;           // 侧滑防抖: iOS 快速侧滑可能连发 popstate, 250ms 内忽略重复
+// 预览图弹窗状态(见下方 previewSeedImage 段): _imgview=当前预览图, _imgSuppress=自己发起的那次后退待忽略
+let _imgview = null;
+let _imgSuppress = 0;
 window.addEventListener('popstate', ()=>{
+  // ⚠️ 预览图开着时, 侧滑/系统后退**只关预览图**, 绝不动下面的详情弹窗。
+  // 旧版预览图没挂自己的 history 层级 → 用户在移动端侧滑想关大图, 后退事件直接落到
+  // 详情弹窗上把整页关掉(= 用户反馈的"跳转")。现在预览图自己压一层, 侧滑只吃这一层。
+  if(_imgview){ _closeImgView(true); return; }
+  if(_imgSuppress){ _imgSuppress--; return; }  // 点叉/点任意处关闭时自己 history.back() 引发的那次, 忽略
   const modalOpen = $('#modalBg').classList.contains('show');
   if(!modalOpen) return;                 // 没有应用内视图 → 让浏览器正常后退(退到其他网页)
   const now = Date.now();
@@ -656,6 +664,20 @@ function _srcBadge(r){
   if(!s) return '';
   return `<span class="qsrc" title="来源: ${esc(_srcLabel(s))}">${esc(_srcLabel(s))}</span>`;
 }
+// 金标徽章: 中字∧国语(或配置的自压组)。抽成函数是为了「首屏列表」与「加载更多追加块」两份
+// 渲染代码口径一致 —— 之前追加块漏了它, 同一列表里上下两半的徽章会不一样。
+function _goldBadge(r){
+  if(!r || !r.golden) return '';
+  const t = r.goldenBy
+    ? `金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`
+    : '金标: 中文字幕+国语, 质量分 +20 排序优先';
+  return `<span class="qgold" title="${t}">★ 金标${r.goldenBy?' · 自压':''}</span>`;
+}
+// 质量分标签: 只在「质量优先」排序下显示(其他排序里这个分数不参与排位, 摆出来反而费解)
+function _qScoreTag(r, sort){
+  if(sort !== 'quality' || !r || r.qualityScore == null) return '';
+  return `<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`;
+}
 function _srcLabelFromItems(items){
   // 按实际返回条目的来源去重汇总(失败的源不会贡献条目, 也就不该出现在"来源"里)
   const set = new Set();
@@ -711,10 +733,10 @@ async function searchMagnets(q, title, boxSel, limit, extra){
       + res.map((r,i)=>`
       <div class="res">${_seedThumb(r)}<div class="info">
         ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
-        <div class="n">${r.golden?`<span class="qgold" title="${r.goldenBy?`金标: 自压组 ${esc(r.goldenBy)}, 默认带中文字幕+国语, 质量分 +20 排序优先`:'金标: 中文字幕+国语, 质量分 +20 排序优先'}">★ 金标${r.goldenBy?' · 自压':''}</span>`:''}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
+        <div class="n">${_goldBadge(r)}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
-        <div class="s">${sort==='quality'&&r.qualityScore!=null?`<span class="qscore" title="质量分: 分辨率(名字写实才给分)/HDR/H.265/字幕/国语 加分 + 体积合理性(名不副实扣分), 分高排前">质 ${r.qualityScore}</span>`:''}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
+        <div class="s">${_qScoreTag(r, sort)}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(i, `pushMagnet(${i}, this)`, `pushQbit(${i}, this)`, r)}</div></div>`).join('')
       + (pages.some(p=>p.hasMore) ? `<div style="text-align:center;margin-top:10px"><button class="ghost" id="magMore" onclick="loadMoreMagnets(this)">加载更多…</button></div>` : '');
     // 记住查询组、排序与各查询的下一页号/是否还有, 供「加载更多」按后端 nextPage 续翻后合并去重。
@@ -803,12 +825,16 @@ async function loadMoreMagnets(btn){
     }
     box._emptyStreak = 0;
     const base = box._res.length;  // 追加项的推送索引基数
+    // 与首屏列表同口径渲染(缩略图/来源徽章/金标/前排/降权/质量分都要有),
+    // 否则同一个列表点「加载更多」之后上下两半的徽章长得不一样。
+    const _multiSrc = new Set(box._res.concat(res).map(r => r && r.source).filter(Boolean)).size > 1;
     const html = res.map((r,i)=>`
-      <div class="res"><div class="info">
-        <div class="n">${_grpBadge(r)}${esc(r.name||'')}</div>
+      <div class="res">${_seedThumb(r)}<div class="info">
+        ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
+        <div class="n">${_goldBadge(r)}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
         ${_qualityTags(r.name, r)}
         ${_pushBadge(r)}
-        <div class="s"><span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
+        <div class="s">${_qScoreTag(r, sort)}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(base+i, `pushMagnet(${base+i}, this)`, `pushQbit(${base+i}, this)`, r)}</div></div>`).join('');
     btn.closest('div').insertAdjacentHTML('beforebegin', html);
     box._res = box._res.concat(res);
@@ -953,31 +979,75 @@ function _pushButtons(i, cd2Onclick, qbitOnclick, r){
 // 没图的行不渲染缩略图(不留空位); 图裂了(onerror)也自动收起, 不留一个破图标。
 function _seedThumb(r){
   if(!r || !r.image) return '';
+  // 传 event: previewSeedImage 里要 preventDefault + stopPropagation ——
+  // 移动端上点击缩略图不能冒泡到详情弹窗的关闭判定, 也不能触发任何浏览器默认导航。
   return `<div class="res-thumb" title="点击查看预览图" data-img="${esc(r.image)}"`
-    + ` data-name="${esc((r.name||'').slice(0,140))}" onclick="previewSeedImage(this)">`
-    + `<img src="${esc(img(r.image))}" alt="预览图" loading="lazy"`
+    + ` data-name="${esc((r.name||'').slice(0,140))}" onclick="previewSeedImage(event, this)">`
+    + `<img src="${esc(img(r.image))}" alt="预览图" loading="lazy" draggable="false"`
     + ` onerror="this.parentElement.style.display='none'"></div>`;
 }
-// 大图弹窗: 点缩略图打开, 点任意处 / Esc 关闭。层级 70(高于 prompt 系弹窗 60, 低于 toast 99)。
-function previewSeedImage(el){
+// 大图预览弹窗: 点缩略图打开。关闭方式 —— ① 点任意位置(含图片本身) ② 右上角叉 ③ Esc
+// ④ 移动端侧滑/系统后退(只关这一层, 不牵动详情弹窗)。层级 70(高于 prompt 系弹窗 60, 低于 toast 99)。
+// 防误触: 用 pointer 的"按下→移动"位移判定, 双指缩放/拖动后松手不会把弹窗关掉。
+function previewSeedImage(ev, el){
+  if(ev){ ev.preventDefault(); ev.stopPropagation(); }
   const url = (el && el.dataset && el.dataset.img) || '';
   if(!url) return;
+  if(_imgview) return;                                   // 已经开着一个(只可能有一个)
   const name = (el && el.dataset && el.dataset.name) || '';
   const bg = document.createElement('div');
   bg.className = 'imgview-bg';
-  bg.innerHTML = `<div class="imgview-card" role="dialog" aria-modal="true" aria-label="种子预览图">`
-    + `<img src="${esc(img(url))}" alt="种子预览图">`
+  bg.setAttribute('role', 'dialog');
+  bg.setAttribute('aria-modal', 'true');
+  bg.setAttribute('aria-label', '种子预览图');
+  bg.innerHTML = `<button type="button" class="imgview-x" aria-label="关闭预览" title="关闭">${icon('x')}</button>`
+    + `<div class="imgview-card">`
+    + `<img src="${esc(img(url))}" alt="种子预览图" draggable="false">`
     + (name ? `<p class="cap">${esc(name)}</p>` : '')
     + `</div>`;
   document.body.appendChild(bg);
-  const onKey = (e)=>{ if(e.key === 'Escape'){ e.stopPropagation(); close(); } };
-  const close = ()=>{
-    document.removeEventListener('keydown', onKey, true);
-    bg.remove();
+
+  const onKey = (e)=>{
+    if(e.key === 'Escape' || e.key === 'Esc'){ e.preventDefault(); e.stopPropagation(); _closeImgView(); }
   };
-  // 点背景或图都关(预览图只需"看一眼"); 事件不会冒泡到详情弹窗(挂在 body 上, 不在 #modalBg 内)
-  bg.addEventListener('click', close);
   document.addEventListener('keydown', onKey, true);
+  const v = { bg, onKey, pushed:false };
+  _imgview = v;
+  // 自己压一层 history: 移动端侧滑/系统后退先吃掉这一层(见文件上方 popstate 处理)
+  try{ history.pushState({ma:'imgview'}, ''); v.pushed = true; }catch(e){}
+
+  // 点任意位置关闭; 拖动/缩放后松手不算"点"(否则双指缩放收手就把弹窗关了)
+  let pd = null, moved = false;
+  const onDown = (e)=>{ pd = {x:e.clientX, y:e.clientY}; moved = false; };
+  const onMove = (e)=>{ if(pd && !moved && (Math.abs(e.clientX-pd.x) > 12 || Math.abs(e.clientY-pd.y) > 12)) moved = true; };
+  const onUp = ()=>{ pd = null; };
+  bg.addEventListener('pointerdown', onDown);
+  bg.addEventListener('pointermove', onMove);
+  bg.addEventListener('pointerup', onUp);
+  bg.addEventListener('pointercancel', onUp);
+  bg.addEventListener('click', (e)=>{
+    if(e.target.closest && e.target.closest('.imgview-x')) return;   // 叉按钮走自己的 onclick
+    if(moved){ moved = false; return; }                              // 刚才是拖动/缩放, 不关
+    _closeImgView();
+  });
+  // 叉按钮: 显式关闭入口(移动端用户不一定会想到"点任意处")
+  const xb = bg.querySelector('.imgview-x');
+  if(xb) xb.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); _closeImgView(); });
+}
+// 关闭预览图。skipBack=true 表示"这层 history 已经被侧滑/后退吃掉了", 不必也不该再退一次。
+function _closeImgView(skipBack){
+  const v = _imgview;
+  if(!v) return;
+  _imgview = null;
+  document.removeEventListener('keydown', v.onKey, true);
+  v.bg.classList.add('closing');
+  v.bg.style.pointerEvents = 'none';
+  const node = v.bg;
+  setTimeout(()=>{ if(node.parentNode) node.remove(); }, 180);   // 等淡出动画走完再摘节点
+  if(v.pushed && !skipBack){
+    _imgSuppress++;                                              // 接下来那次 popstate 是自己引发的, 忽略
+    try{ history.back(); }catch(e){ _imgSuppress--; }
+  }
 }
 
 // ---- 缺失季自动扫种子: 按季构造搜索词组, 结果渲染进季行的种子列 ----
