@@ -4,6 +4,15 @@ uvicorn>=0.27
 httpx>=0.27
 sqlalchemy>=2.0
 grpcio>=1.60
+# protobuf 是【运行时硬依赖】, 不是开发期!
+#   clients/clouddrive/clouddrive_pb2.py / _pb2_grpc.py 在运行时 import google.protobuf
+#   (descriptor / descriptor_pool / runtime_version / empty_pb2 等), 且
+#   clients/clouddrive/client.py:76 直接 `from google.protobuf.json_format import ...`。
+#   注意: grpcio 自身【不】依赖 protobuf (其 Requires 只有 typing-extensions),
+#   之前 protobuf 是经 grpcio-tools 的传递依赖装进镜像的。把 grpcio-tools 移出
+#   运行时依赖后, 必须在这里显式列出 protobuf, 否则镜像 import 直接 ModuleNotFoundError。
+#   生成文件用到 runtime_version, 需 protobuf>=5.26。
+protobuf>=5.26
 
 # grpcio-tools 仅用于「重新生成 proto 存根」(开发/维护期), 运行时不需要,
 # 已从运行时依赖移除以加速镜像构建; 需要时用 `pip install -r requirements-dev.txt`。
