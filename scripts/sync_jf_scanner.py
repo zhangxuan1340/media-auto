@@ -628,8 +628,9 @@ def run(mode="full", limit=0):
     cfg = load_config()
     if not cfg.get("jellyfin", {}).get("url"):
         raise RuntimeError("未配置 jellyfin.url / jellyfin.token(管理 → 通用 → Jellyfin)")
+    from lib.loop_clients import run_coro
     with SYNC_LOCK:                      # 见 lib/sync_guard.py
-        return asyncio.run(_run_async(cfg, mode=mode, limit=limit))
+        return run_coro(_run_async(cfg, mode=mode, limit=limit))
 
 
 def main():

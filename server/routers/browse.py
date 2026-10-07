@@ -1283,9 +1283,9 @@ async def browse_genres(kind: str = Query("movie"), cfg: dict = Depends(get_conf
     """筛选下拉: TMDB 类型列表(实时拉 TMDB, 无 key 返回空)。"""
     def _q():
         from clients.tmdb import client as tmdb
-        import asyncio
+        from lib.loop_clients import run_coro
         try:
-            m = asyncio.run(tmdb.genre_map(cfg, kind))
+            m = run_coro(tmdb.genre_map(cfg, kind))
         except Exception:  # noqa: BLE001
             m = {}
         return [{"id": int(k), "name": v} for k, v in sorted(m.items(), key=lambda x: x[1])]

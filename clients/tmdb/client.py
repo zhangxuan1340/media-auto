@@ -90,36 +90,30 @@ def _async_client(timeout=30):
     loop = asyncio.get_running_loop()
     c = _async_clients.get(loop)
     if c is None:
-        # 限制连接池: 即便临时 loop 没来得及关池, 单个孤儿客户端最多也只攒这点 fd,
-        # 不会无限增长(2026-10 Too many open files 事故的根因是池从不关)。
+        # 限制连接池: 即便某个 loop 漏了 run_coro 清理, 单池也有上限, 不会无限膨胀。
         c = httpx.AsyncClient(timeout=timeout, trust_env=False,
                                limits=httpx.Limits(max_connections=50,
                                                    max_keepalive_connections=20))
         _async_clients[loop] = c
-        _watch_loop(loop, c)
     return c
 
 
-def _watch_loop(loop, client):
-    """临时事件循环(asyncio.run / 调度器线程)关闭时, 把该 loop 专属的 httpx 连接池关掉。
+async def aclose_loop_clients():
+    """关闭并移除【当前事件循环】名下的异步客户端 —— 必须在 loop 结束前调用。
 
-    否则 keep-alive 套接字会一直 ESTABLISHED/CLOSE_WAIT 不释放 → fd 累积 →
-    ``OSError: [Errno 24] Too many open files``(2026-10 事故)。httpx 的 aclose 是
-    异步的, 用一个临时 loop 跑它; 若失败再直接关底层传输兜底。长驻的 server loop
-    全程只建一次、运行时常驻, 其回调要等进程退出关 loop 时才触发, 不影响复用。
+    由 `lib.loop_clients.run_coro` 在每个短命 loop 的 finally 里统一调用。
+    细节同 `clients/jellyfin/client.py::aclose_loop_clients`:
+    `await aclose()` 释放套接字; `pop(loop)` 打破 "client 经 transport 强引用 loop"
+    的自引用(否则 WeakKeyDictionary 表项永不回收 = 永久 fd 泄漏)。
+
+    ⚠️ 旧版 `loop.add_closed_callback` 在 Python 3.12/3.13/3.14 上都不存在, 回调
+    从没注册(被 `except: pass` 吞掉), 已弃用。
     """
-    try:
-        loop.add_closed_callback(lambda: _force_close(client))
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _force_close(client):
-    try:
-        asyncio.run(client.aclose())
-    except Exception:  # noqa: BLE001
+    loop = asyncio.get_running_loop()
+    c = _async_clients.pop(loop, None)
+    if c is not None:
         try:
-            client._transport.close()   # 兜底: 同步关底层连接池, 直接释放套接字
+            await c.aclose()
         except Exception:  # noqa: BLE001
             pass
 
@@ -295,15 +289,16 @@ def search_cards_sync(cfg, query, limit=8):
 
 
 def _run_async(coro):
-    """在任意上下文里跑一个协程: 无事件循环 → asyncio.run;
-    已有运行中循环(如测试/嵌套) → 新线程里 asyncio.run。"""
+    """在任意上下文里跑一个协程: 无事件循环 → run_coro(带客户端清理);
+    已有运行中循环(如测试/嵌套) → 新线程里 run_coro。"""
+    from lib.loop_clients import run_coro
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return run_coro(coro)
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        return ex.submit(asyncio.run, coro).result()
+        return ex.submit(run_coro, coro).result()
 
 
 def _pick_card(cards, year=None, kind=None):

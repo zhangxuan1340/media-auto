@@ -68,9 +68,9 @@ def _sync_jellyfin_items():
     这一步很轻(只按游标拉新增条目), 失败也不阻断后续扫描。
     """
     try:
-        import asyncio
+        from lib.loop_clients import run_coro
         from scripts import sync_jellyfin as sj
-        asyncio.run(sj.run(scope="items", full=False))
+        run_coro(sj.run(scope="items", full=False))
     except Exception:  # noqa: BLE001
         pass
 
@@ -109,9 +109,9 @@ def _job_availability():
 
 def _job_tmdb_sync():
     """按 Jellyfin 库增量拉取 TMDB 元数据(缺什么补什么, 不重刷未过期的)。"""
-    import asyncio
+    from lib.loop_clients import run_coro
     from scripts import sync_tmdb as s
-    return int(asyncio.run(s.run("all", full=False)) or 0)
+    return int(run_coro(s.run("all", full=False)) or 0)
 
 
 def _job_track_check():

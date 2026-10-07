@@ -70,36 +70,32 @@ def _client():
     loop = asyncio.get_running_loop()
     c = _clients.get(loop)
     if c is None:
-        # 限制连接池: 即便临时 loop 没来得及关池, 单个孤儿客户端最多也只攒这点 fd,
-        # 不会无限增长(2026-10 Too many open files 事故的根因是池从不关)。
+        # 限制连接池: 即便某个 loop 漏了 run_coro 清理, 单池也有上限, 不会无限膨胀。
         c = httpx.AsyncClient(timeout=30, trust_env=False,
                                limits=httpx.Limits(max_connections=50,
                                                    max_keepalive_connections=20))
         _clients[loop] = c
-        _watch_loop(loop, c)
     return c
 
 
-def _watch_loop(loop, client):
-    """临时事件循环(asyncio.run / 调度器线程)关闭时, 把该 loop 专属的 httpx 连接池关掉。
+async def aclose_loop_clients():
+    """关闭并移除【当前事件循环】名下的客户端 —— 必须在 loop 结束前调用。
 
-    否则 keep-alive 套接字会一直 ESTABLISHED/CLOSE_WAIT 不释放 → fd 累积 →
-    ``OSError: [Errno 24] Too many open files``(2026-10 事故)。httpx 的 aclose 是
-    异步的, 用一个临时 loop 跑它; 若失败再直接关底层传输兜底。长驻的 server loop
-    全程只建一次、运行时常驻, 其回调要等进程退出关 loop 时才触发, 不影响复用。
+    由 `lib.loop_clients.run_coro` 在每个短命 loop 的 finally 里统一调用。
+    两件事缺一不可:
+      · `await c.aclose()`   —— 关掉 keep-alive 池, 释放套接字;
+      · `_clients.pop(loop)` —— 从字典移除。key 是 loop(WeakKeyDictionary), 但
+        client 经 httpx transport 强引用 loop → 不 pop 就自引用、表项永不回收
+        (2026-10 实测: 不清理时 500 个 loop → fd +1000, GC 也降不下来)。
+
+    ⚠️ 旧版用 `loop.add_closed_callback` 注册回调, 但该方法 Python 3.12/3.13/3.14
+    都不存在(被 `except: pass` 吞掉), 回调从没生效 —— 已弃用, 改走本函数。
     """
-    try:
-        loop.add_closed_callback(lambda: _force_close(client))
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _force_close(client):
-    try:
-        asyncio.run(client.aclose())
-    except Exception:  # noqa: BLE001
+    loop = asyncio.get_running_loop()
+    c = _clients.pop(loop, None)
+    if c is not None:
         try:
-            client._transport.close()   # 兜底: 同步关底层连接池, 直接释放套接字
+            await c.aclose()
         except Exception:  # noqa: BLE001
             pass
 

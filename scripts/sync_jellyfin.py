@@ -186,7 +186,8 @@ def main():
                     help="全库比对并强制重写每一条(默认: 只写差异行)。仍不清表、不删行")
     args = ap.parse_args()
     try:
-        n = asyncio.run(run(args.scope, full=args.full))
+        from lib.loop_clients import run_coro
+        n = run_coro(run(args.scope, full=args.full))
         print(f"Jellyfin 同步完成,共 {n} 条。")
     except Exception as e:
         print(f"Jellyfin 同步失败: {e}", file=sys.stderr)

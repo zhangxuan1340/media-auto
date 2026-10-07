@@ -364,8 +364,9 @@ def main():
     ap.add_argument("--refresh-days", type=int, default=REFRESH_DAYS)
     args = ap.parse_args()
     try:
-        n = asyncio.run(run(args.scope, full=args.full, limit=args.limit,
-                            refresh_days=args.refresh_days))
+        from lib.loop_clients import run_coro
+        n = run_coro(run(args.scope, full=args.full, limit=args.limit,
+                         refresh_days=args.refresh_days))
         print(f"TMDB 同步完成, 共 {n} 条。")
     except Exception as e:  # noqa: BLE001
         print(f"TMDB 同步失败: {e}", file=sys.stderr)

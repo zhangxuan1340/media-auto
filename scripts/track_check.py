@@ -505,7 +505,8 @@ def run(cfg=None, log=print):
     if cfg is None:
         from server.config import get_config
         cfg = get_config()
-    return asyncio.run(check_async(cfg, log=log))
+    from lib.loop_clients import run_coro
+    return run_coro(check_async(cfg, log=log))
 
 
 if __name__ == "__main__":

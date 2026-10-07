@@ -62,23 +62,23 @@ def _img_client():
         c = httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT, trust_env=False, follow_redirects=True,
                                limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
         _img_clients[loop] = c
-        _watch_loop(loop, c)
     return c
 
 
-def _watch_loop(loop, client):
-    try:
-        loop.add_closed_callback(lambda: _force_close(client))
-    except Exception:  # noqa: BLE001
-        pass
+async def aclose_loop_clients():
+    """关闭并移除【当前事件循环】名下的图片代理客户端 —— 必须在 loop 结束前调用。
 
-
-def _force_close(client):
-    try:
-        asyncio.run(client.aclose())
-    except Exception:  # noqa: BLE001
+    注意: imgproxy 的图片请求跑在**常驻的 server 主 loop** 上, 那个客户端故意常驻
+    复用, 不应在此关闭; 本函数只会在短命 loop(若有)退出时被 `lib.loop_clients.run_coro`
+    调用。`await aclose()` 释放套接字; `pop(loop)` 打破自引用避免泄漏(同 jellyfin/tmdb)。
+    ⚠️ 旧版 `loop.add_closed_callback` 在 Python 3.12/3.13/3.14 上都不存在, 回调从没
+    注册(被 `except: pass` 吞掉), 已弃用。
+    """
+    loop = asyncio.get_running_loop()
+    c = _img_clients.pop(loop, None)
+    if c is not None:
         try:
-            client._transport.close()   # 兜底: 同步关底层连接池, 直接释放套接字
+            await c.aclose()
         except Exception:  # noqa: BLE001
             pass
 

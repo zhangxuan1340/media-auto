@@ -59,8 +59,9 @@ def _bg_sync(log_id: int, source: str, scope: str, coro_func):
     session = SessionLocal()
     try:
         log = session.get(SyncLog, log_id)
+        from lib.loop_clients import run_coro
         res = coro_func(scope)
-        total = asyncio.run(res) if inspect.isawaitable(res) else res
+        total = run_coro(res) if inspect.isawaitable(res) else res
         repo.log_sync_end(session, log, "success", total)
         session.commit()
     except Exception as e:  # noqa: BLE001
