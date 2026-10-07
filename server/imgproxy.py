@@ -15,11 +15,13 @@
 TMDB 同步时若某作品 poster/backdrop 变了, 调 invalidate(url) 删旧缓存, 下次访问自动拉新图
 (见 scripts/sync_tmdb.py)。
 """
+import asyncio
 import base64
 import hashlib
 import json
 import os
 import time
+import weakref
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -41,6 +43,44 @@ _PROXY_PREFIXES = ("https://image.tmdb.org/", "http://image.tmdb.org/")
 _UA = "MediaAuto/1.2 (image cache)"
 # max-age 缺失/解析失败时的兜底新鲜期(秒)。TMDB 实测给 ~1 年。
 _DEFAULT_MAX_AGE = 7 * 24 * 3600
+
+
+# ---------------------------------------------------------------------------
+# 连接复用(2026-10 Too many open files 事故修复)
+# ---------------------------------------------------------------------------
+# 旧写法每个图片请求 `async with httpx.AsyncClient(...)` —— 上游( TMDB 图片 CDN) 一旦
+# 出现 502 风暴, 高并发下瞬间开大量连接池 → fd 打满 → 连本地缓存文件都 open 不了
+# (见崩溃栈 imgproxy.py _read_bytes 的 [Errno 24])。改为按事件循环复用**单例**, 并
+# 限制连接池上限; 临时 loop 关闭时把孤儿池关掉, 不再泄漏。
+_img_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _img_client():
+    loop = asyncio.get_running_loop()
+    c = _img_clients.get(loop)
+    if c is None:
+        c = httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT, trust_env=False, follow_redirects=True,
+                               limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
+        _img_clients[loop] = c
+        _watch_loop(loop, c)
+    return c
+
+
+def _watch_loop(loop, client):
+    try:
+        loop.add_closed_callback(lambda: _force_close(client))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _force_close(client):
+    try:
+        asyncio.run(client.aclose())
+    except Exception:  # noqa: BLE001
+        try:
+            client._transport.close()   # 兜底: 同步关底层连接池, 直接释放套接字
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +184,7 @@ async def img(token: str):
     if meta.get("last_modified"):
         headers["If-Modified-Since"] = meta["last_modified"]
     try:
-        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT, trust_env=False,
-                                     follow_redirects=True) as client:
-            r = await client.get(url, headers=headers)
+        r = await _img_client().get(url, headers=headers)
     except Exception as e:  # noqa: BLE001
         if os.path.exists(binp):  # 上游挂 → 降级旧缓存
             _cache_stats.hit("image")
@@ -182,10 +220,8 @@ async def img(token: str):
 
 async def _plain_get(url: str):
     try:
-        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT, trust_env=False,
-                                     follow_redirects=True) as client:
-            r = await client.get(url, headers={"User-Agent": _UA})
-            return r if r.status_code == 200 else None
+        r = await _img_client().get(url, headers={"User-Agent": _UA})
+        return r if r.status_code == 200 else None
     except Exception:  # noqa: BLE001
         return None
 
