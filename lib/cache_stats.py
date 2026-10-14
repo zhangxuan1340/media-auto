@@ -7,11 +7,13 @@
 **统计是进程内的**(重启归零) —— hits/misses 来自内存计数器。
 键数与体积则取自真实存储, 所以重启后仍然准。
 
-MediaAuto 实际存在的两处缓存:
-  · `tmdb`  — TMDB API 元数据缓存。命中 = 没走网络(本地 tmdb_media 行 / 进程内 TTL 缓存);
-              失误 = 真的向 TMDB 发了请求。
-  · `image` — 图片本地缓存(`data/img_cache/<sha1>.bin|.meta`, 见 server/imgproxy.py)。
-              命中 = 本地有文件直接返回; 失误 = 回源拉取并落盘。
+MediaAuto 实际存在的三处缓存:
+  · `tmdb`    — TMDB API 元数据缓存。命中 = 没走网络(本地 tmdb_media 行 / 进程内 TTL 缓存);
+                失误 = 真的向 TMDB 发了请求。
+  · `image`   — 图片本地缓存(`data/img_cache/<sha1>.bin|.meta`, 见 server/imgproxy.py)。
+                命中 = 本地有文件直接返回; 失误 = 回源拉取并落盘。
+  · `preview` — 种子内容预览截图缓存(`data/whatslink_cache/<sha1>.json`, 见 lib/whatslink.py)。
+                命中 = 本地有未过期结果; 失误 = 真去 whatslink.info 问了一次。
 """
 import threading
 
@@ -19,6 +21,7 @@ import threading
 CACHES = {
     "tmdb": "The Movie Database API",
     "image": "The Movie Database (tmdb) 图片",
+    "preview": "种子内容预览(whatslink)",
 }
 
 _lock = threading.Lock()
@@ -118,6 +121,36 @@ def _img_store():
     return keys, 0, total          # 图片无独立"键体积", 记 0
 
 
+def _preview_store():
+    """内容预览缓存: 键 = .json 文件, 值体积 = 目录内所有文件字节和。
+
+    目录**问 lib.whatslink 要**(单一真相源): 之前这里自己拼 project_root()/data/whatslink_cache,
+    与实际写入位置是两处独立硬编码 —— 目录一变(或门禁换临时目录)统计就指到空地方, 页面显示 0 键。
+    """
+    import os
+    try:
+        from lib import whatslink
+        d = whatslink.cache_dir()
+    except Exception:  # noqa: BLE001
+        return 0, 0, 0
+    if not os.path.isdir(d):
+        return 0, 0, 0
+    keys = 0
+    total = 0
+    try:
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                total += os.stat(p).st_size
+            except OSError:
+                continue
+            if name.endswith(".json"):
+                keys += 1
+    except OSError:
+        return 0, 0, 0
+    return keys, 0, total
+
+
 def _flush_tmdb():
     """清空 TMDB 元数据缓存。
 
@@ -153,7 +186,32 @@ def _flush_image():
     return n
 
 
-_FLUSHERS = {"tmdb": _flush_tmdb, "image": _flush_image}
+def _flush_preview():
+    """清空种子内容预览缓存。删了不影响正确性 —— 下次点开弹窗重新问一次 whatslink 即可。
+
+    目录同样问 lib.whatslink 要(与 _preview_store 同源), 免得"清了个空目录"还报成功。
+    """
+    import os
+    try:
+        from lib import whatslink
+        d = whatslink.cache_dir()
+    except Exception:  # noqa: BLE001
+        return 0
+    if not os.path.isdir(d):
+        return 0
+    n = 0
+    for name in os.listdir(d):
+        if not name.endswith(".json"):
+            continue
+        try:
+            os.remove(os.path.join(d, name))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+_FLUSHERS = {"tmdb": _flush_tmdb, "image": _flush_image, "preview": _flush_preview}
 
 
 def flush(cache_id):
@@ -169,7 +227,7 @@ def flush(cache_id):
 def snapshot():
     """返回 {apiCaches, imageCache} 快照(前端缓存表的数据源)。"""
     rows = []
-    store = {"tmdb": _tmdb_store, "image": _img_store}
+    store = {"tmdb": _tmdb_store, "image": _img_store, "preview": _preview_store}
     for cid, name in CACHES.items():
         c = _counters(cid)
         keys, ksize, vsize = store[cid]()

@@ -22,6 +22,7 @@ from server.routers import configapi as config_router
 from server.routers import jobs as jobs_router
 from server.routers import media as media_router
 from server.routers import nfo as nfo_router
+from server.routers import preview as preview_router
 from server.routers import qbit as qbit_router
 from server.routers import search as search_router
 from server.routers import sync as sync_router
@@ -128,6 +129,7 @@ app.include_router(nfo_router.router)    # NFO 更新: 读取上次更新时间 
 app.include_router(media_router.router)  # 手动标题覆盖 + 按新标题重命名(目录/文件/NFO)
 app.include_router(track_router.router)
 app.include_router(imgproxy_router.router)  # 图片本地缓存代理 /api/img/<token>
+app.include_router(preview_router.router)   # 种子内容预览(whatslink) /api/magnet/preview
 
 
 INDEX = PROJECT_ROOT / "server" / "static" / "index.html"

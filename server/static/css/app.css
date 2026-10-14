@@ -1029,9 +1029,14 @@
   .mag-end{display:inline-block;color:var(--muted);font-size:12px;padding:6px 0}
 
   /* ===== 种子预览图(行内缩略图 + 点击看大图弹窗) =====
-     图源: Bitmagnet 原生源的 TMDB 海报(content.attributes.poster_path)
-          / Jackett 的 torznab:attr coverurl(索引器封面, Jackett 自己代理)。
-     Next-Web 站的 REST 接口不给图 → 该源结果自然没有缩略图, 不占位不留空白。
+     两类图源(见 detail.js::_seedThumb):
+       ① 列表缩略图 = **作品封面**:
+            Bitmagnet 原生源的 TMDB 海报(content.attributes.poster_path, 竖版)
+            / Jackett 的 torznab:attr coverurl(后端已改写成 /api/img 同源代理, 否则浏览器
+              直连内网 Jackett 必裂图)。
+          既没封面、也没 infoHash 的行 → 不渲染, 不留空白。
+       ② 弹窗里的「内容预览」= **种子文件的内容截屏**(横版 16:9), 来自第三方 whatslink.info,
+          **点开弹窗时才请求**(/api/magnet/preview) —— 列表渲染阶段一次都不发。
      ⚠️ 缩略图会挤占磁力行的横向空间(移动端 .res 的宽度是 A/B 调过的, 见上文),
         所以尺寸压得比较小, 移动端再收一档 —— 宁可图小一点, 也别把发布名挤成 7 行。 */
   .res-thumb{flex:none;width:44px;height:66px;border-radius:8px;overflow:hidden;cursor:zoom-in;
@@ -1039,23 +1044,47 @@
     box-shadow:var(--shadow-s);transition:.18s var(--ease)}
   .res-thumb:hover{transform:translateY(-1px);border-color:rgba(10,132,255,.4);box-shadow:var(--shadow-m)}
   .res-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  /* 无封面行的占位入口: 还是那个可点的缩略图位(点开看 whatslink 内容截屏), 不是空位 */
+  .res-thumb-ph{flex-direction:column;gap:3px;border-style:dashed;color:var(--muted)}
+  .res-thumb-ph .icn{width:16px;height:16px;opacity:.85}
+  .res-thumb-ph .ph-t{font-size:9px;line-height:1;letter-spacing:.5px}
   .res-compact .res-thumb{width:32px;height:48px;border-radius:6px}
   /* 大图预览弹窗: 层级 70 —— 高于输入/确认弹窗(60), 低于 toast(99)。
-     关闭方式: 点任意位置(含图片本身) / 右上角叉 / Esc / 移动端侧滑(侧滑只吃预览图自己那层
+     关闭方式: 点任意位置(点截图除外) / 右上角叉 / Esc / 移动端侧滑(侧滑只吃预览图自己那层
      history, 见 detail.js 的 popstate 处理 —— 不会把下面的详情弹窗一起关掉)。
-     touch-action:pinch-zoom = 允许双指放大看细节, 但禁掉单指拖动(弹窗本来也不需要滚动);
+     touch-action:pan-y pinch-zoom = 允许纵向滚动(截图多了要能滚)+ 双指放大看细节;
      overscroll-behavior:contain = 阻止滚动手势穿透到底下的详情页。 */
   .imgview-bg{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;
     padding:24px;padding-top:calc(24px + var(--sat));padding-bottom:calc(24px + var(--sab));
     background:rgba(0,0,0,.62);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
-    cursor:zoom-out;touch-action:pinch-zoom;overscroll-behavior:contain;
+    cursor:zoom-out;touch-action:pan-y pinch-zoom;overscroll-behavior:contain;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
     animation:imgviewIn .18s var(--ease)}
   .imgview-bg.closing{animation:imgviewOut .18s var(--ease) forwards;cursor:default}
-  .imgview-card{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:100%;max-height:100%}
-  .imgview-card img{max-width:min(92vw,620px);max-height:calc(88vh - 46px);object-fit:contain;
+  .imgview-card{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:100%;max-height:100%;
+    overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y pinch-zoom;padding:2px}
+  /* 主图区: 有封面就是封面; 没封面时用第一张内容截图顶上去(见 detail.js::_pickShot) */
+  .imgview-main{width:100%;max-width:min(92vw,620px);display:flex;align-items:center;justify-content:center}
+  .imgview-main img{width:100%;max-width:min(92vw,620px);max-height:calc(62vh - 46px);object-fit:contain;
     border-radius:16px;background:var(--modal-surface);box-shadow:0 24px 70px rgba(0,0,0,.55);
     -webkit-user-drag:none;user-drag:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+  .imgview-main .pv-none{width:100%;display:flex;flex-direction:column;align-items:center;gap:8px;
+    padding:44px 20px;border:1px dashed rgba(255,255,255,.25);border-radius:16px;
+    color:#fff;opacity:.72;font-size:13px}
+  .imgview-main .pv-none .icn{width:26px;height:26px}
+  /* 内容预览(whatslink 内容截屏): 横版 16:9 小图网格, 点一张换成上面的大图 */
+  .imgview-pv{width:100%;max-width:min(92vw,620px)}
+  .pv-head{display:flex;align-items:center;gap:6px;color:#fff;opacity:.85;font-size:12px;font-weight:600;margin-bottom:7px}
+  .pv-head .icn{width:14px;height:14px;flex:none}
+  .pv-body{color:#fff;opacity:.85;font-size:12px;display:flex;align-items:center;gap:8px;min-height:30px}
+  .pv-body.pv-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;min-height:0}
+  .imgview-shot{position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;cursor:zoom-in;
+    border:2px solid transparent;background:var(--modal-surface);transition:.16s var(--ease)}
+  .imgview-shot img{width:100%;height:100%;object-fit:cover;display:block;border-radius:0;
+    -webkit-user-drag:none;user-drag:none;-webkit-touch-callout:none}
+  .imgview-shot:hover{transform:translateY(-1px)}
+  .imgview-shot.on{border-color:var(--brand)}
+  .pv-empty{color:#fff;opacity:.62;font-size:12px;line-height:1.6}
   .imgview-card .cap{max-width:min(92vw,620px);margin:0;color:#fff;opacity:.92;font-size:12px;line-height:1.5;
     text-align:center;word-break:break-all;
     display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -1074,6 +1103,7 @@
     .res-thumb{width:38px;height:57px}
     .res-compact .res-thumb{width:28px;height:42px}
     .imgview-bg{padding:14px;padding-top:calc(14px + var(--sat));padding-bottom:calc(14px + var(--sab))}
-    .imgview-card img{max-height:calc(84vh - 46px)}
+    .imgview-main img{max-height:calc(52vh - 46px)}
+    .pv-body.pv-shots{grid-template-columns:repeat(2,1fr);gap:6px}
     .imgview-x{top:calc(8px + var(--sat));width:44px;height:44px}  /* 移动端触控目标放到 44px */
   }

@@ -974,35 +974,56 @@ function _pushButtons(i, cd2Onclick, qbitOnclick, r){
 }
 
 // ---- 种子预览图(行内缩略图 + 点开大图弹窗) ----
-// 图源: 后端统一 item 的 image 字段 —— 原生 Bitmagnet 给 TMDB 海报(poster_path 拼成的
-// image.tmdb.org 地址), Jackett 给 torznab:attr coverurl(索引器封面), Next-Web 站没有图。
-// 没图的行不渲染缩略图(不留空位); 图裂了(onerror)也自动收起, 不留一个破图标。
+// 图源分两类, 别混为一谈:
+//   ① 列表缩略图 = **作品封面** —— 原生 Bitmagnet 给 TMDB 海报(poster_path, 竖版),
+//      Jackett 给 torznab:attr coverurl(索引器封面, 后端已改写成 /api/img 代理路径);
+//      Next-Web 站没有封面。
+//   ② 弹窗里的「内容预览」= **种子文件的内容截屏**(横版 16:9), 来自第三方 whatslink.info,
+//      和封面没有关系 —— 它是**点开弹窗时才去取**的(见 previewSeedImage 末尾), 列表渲染时
+//      一次都不发请求: 一次搜索几十行, 逐条预取会给每行都加上 1~1.7s, 且大多数种子本来没截图。
+// 既没有封面、也没有 infoHash 的行不渲染缩略图(不留空位); 图裂了(onerror)自动收起, 不留破图标。
 function _seedThumb(r){
-  if(!r || !r.image) return '';
-  // 传 event: previewSeedImage 里要 preventDefault + stopPropagation ——
-  // 移动端上点击缩略图不能冒泡到详情弹窗的关闭判定, 也不能触发任何浏览器默认导航。
-  return `<div class="res-thumb" title="点击查看预览图" data-img="${esc(r.image)}"`
-    + ` data-name="${esc((r.name||'').slice(0,140))}" onclick="previewSeedImage(event, this)">`
-    + `<img src="${esc(img(r.image))}" alt="预览图" loading="lazy" draggable="false"`
-    + ` onerror="this.parentElement.style.display='none'"></div>`;
+  if(!r) return '';
+  const hash = r.infoHash || '';
+  const attrs = `data-img="${esc(r.image||'')}" data-hash="${esc(hash)}"`
+    + ` data-name="${esc((r.name||'').slice(0,140))}" onclick="previewSeedImage(event, this)"`;
+  if(r.image){
+    return `<div class="res-thumb" title="点击查看预览图" ${attrs}>`
+      + `<img src="${esc(img(r.image))}" alt="预览图" loading="lazy" draggable="false"`
+      + ` onerror="this.parentElement.style.display='none'"></div>`;
+  }
+  if(!hash) return '';
+  // 无封面但有 infoHash: 给个占位入口 —— 否则这类行(Next-Web 整源、无封面的 Jackett 站)
+  // 根本点不开, 用户就永远看不到内容预览。
+  return `<div class="res-thumb res-thumb-ph" title="点开看内容预览(截屏)" ${attrs}>`
+    + `${icon('image')}<span class="ph-t">预览</span></div>`;
 }
 // 大图预览弹窗: 点缩略图打开。关闭方式 —— ① 点任意位置(含图片本身) ② 右上角叉 ③ Esc
 // ④ 移动端侧滑/系统后退(只关这一层, 不牵动详情弹窗)。层级 70(高于 prompt 系弹窗 60, 低于 toast 99)。
 // 防误触: 用 pointer 的"按下→移动"位移判定, 双指缩放/拖动后松手不会把弹窗关掉。
 function previewSeedImage(ev, el){
   if(ev){ ev.preventDefault(); ev.stopPropagation(); }
-  const url = (el && el.dataset && el.dataset.img) || '';
-  if(!url) return;
+  if(!el || !el.dataset) return;
+  const url = el.dataset.img || '';
+  const hash = el.dataset.hash || '';
+  if(!url && !hash) return;                              // 没图也没 hash → 没得看
   if(_imgview) return;                                   // 已经开着一个(只可能有一个)
-  const name = (el && el.dataset && el.dataset.name) || '';
+  const name = el.dataset.name || '';
   const bg = document.createElement('div');
   bg.className = 'imgview-bg';
   bg.setAttribute('role', 'dialog');
   bg.setAttribute('aria-modal', 'true');
-  bg.setAttribute('aria-label', '种子预览图');
+  bg.setAttribute('aria-label', '种子预览');
   bg.innerHTML = `<button type="button" class="imgview-x" aria-label="关闭预览" title="关闭">${icon('x')}</button>`
     + `<div class="imgview-card">`
-    + `<img src="${esc(img(url))}" alt="种子预览图" draggable="false">`
+    + `<div class="imgview-main">`
+    +   (url ? `<img src="${esc(img(url))}" alt="种子预览图" draggable="false">`
+            : `<div class="pv-none">${icon('image')}<span>该资源没有封面图</span></div>`)
+    + `</div>`
+    + (hash ? `<div class="imgview-pv">`
+              + `<div class="pv-head">${icon('film')}内容预览</div>`
+              + `<div class="pv-body"><span class="spin"></span><span>正在获取内容预览…</span></div>`
+              + `</div>` : '')
     + (name ? `<p class="cap">${esc(name)}</p>` : '')
     + `</div>`;
   document.body.appendChild(bg);
@@ -1016,7 +1037,8 @@ function previewSeedImage(ev, el){
   // 自己压一层 history: 移动端侧滑/系统后退先吃掉这一层(见文件上方 popstate 处理)
   try{ history.pushState({ma:'imgview'}, ''); v.pushed = true; }catch(e){}
 
-  // 点任意位置关闭; 拖动/缩放后松手不算"点"(否则双指缩放收手就把弹窗关了)
+  // 点任意位置关闭; 拖动/缩放后松手不算"点"(否则双指缩放收手就把弹窗关了);
+  // 点内容预览的某张截图 = 把它换成主图(不关弹窗)。
   let pd = null, moved = false;
   const onDown = (e)=>{ pd = {x:e.clientX, y:e.clientY}; moved = false; };
   const onMove = (e)=>{ if(pd && !moved && (Math.abs(e.clientX-pd.x) > 12 || Math.abs(e.clientY-pd.y) > 12)) moved = true; };
@@ -1027,12 +1049,54 @@ function previewSeedImage(ev, el){
   bg.addEventListener('pointercancel', onUp);
   bg.addEventListener('click', (e)=>{
     if(e.target.closest && e.target.closest('.imgview-x')) return;   // 叉按钮走自己的 onclick
+    const shot = e.target.closest && e.target.closest('.imgview-shot');
+    if(shot){ _pickShot(shot, bg); return; }                          // 换主图, 不关
     if(moved){ moved = false; return; }                              // 刚才是拖动/缩放, 不关
     _closeImgView();
   });
   // 叉按钮: 显式关闭入口(移动端用户不一定会想到"点任意处")
   const xb = bg.querySelector('.imgview-x');
   if(xb) xb.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); _closeImgView(); });
+
+  // ⚠️ 内容预览**到这里才开始请求**("点开才取"); 上面列表渲染阶段一次都不发。
+  if(hash) _loadMagnetPreview(v, hash);
+}
+// 把某张内容预览截图换成弹窗主图(并高亮它)
+function _pickShot(shot, bg){
+  const src = shot && shot.getAttribute ? shot.getAttribute('data-src') : '';
+  if(!src) return;
+  const main = bg.querySelector('.imgview-main');
+  if(!main) return;
+  main.innerHTML = `<img src="${esc(src)}" alt="内容预览" draggable="false">`;
+  bg.querySelectorAll('.imgview-shot').forEach(s => s.classList.toggle('on', s === shot));
+}
+// 取内容预览(whatslink 内容截屏)。只有弹窗还开着才写 DOM —— 用户可能早就关了。
+async function _loadMagnetPreview(v, hash){
+  const body = v.bg.querySelector('.pv-body');
+  if(!body) return;
+  let d = null;
+  try{
+    d = await api(`/api/magnet/preview?hash=${encodeURIComponent(hash)}`);
+  }catch(e){ d = null; }
+  if(!v.bg.isConnected) return;                      // 弹窗已关 → 结果丢弃, 不碰 DOM
+  const shots = (d && d.screenshots) || [];
+  if(!shots.length){
+    const why = !d ? '获取失败, 稍后再试'
+      : (d.reason === 'upstream_error' ? '预览服务暂时不可用, 稍后再试'
+      : '这个种子没有可用的内容截图(通常是没有视频文件)');
+    body.classList.remove('pv-shots');
+    body.innerHTML = `<span class="pv-empty">${esc(why)}</span>`;
+    return;
+  }
+  body.classList.add('pv-shots');
+  body.innerHTML = shots.map((u,i)=>
+    `<div class="imgview-shot${i===0?' on':''}" data-src="${esc(u)}" role="button" tabindex="0"`
+    + ` title="点击看这张大图"><img src="${esc(img(u))}" alt="内容预览 ${i+1}" loading="lazy" draggable="false"></div>`
+  ).join('');
+  // 没有封面图时用第一张截图顶上去当主图, 免得弹窗主体是一片空白
+  if(!v.bg.querySelector('.imgview-main img')) _pickShot(body.querySelector('.imgview-shot'), v.bg);
+  const head = v.bg.querySelector('.pv-head');
+  if(head) head.innerHTML = `${icon('film')}内容预览 · ${shots.length} 张`;
 }
 // 关闭预览图。skipBack=true 表示"这层 history 已经被侧滑/后退吃掉了", 不必也不该再退一次。
 function _closeImgView(skipBack){

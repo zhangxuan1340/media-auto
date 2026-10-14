@@ -34,6 +34,7 @@ _CLIENT_MODULES = (
     "clients.jellyfin.client",
     "clients.tmdb.client",
     "server.imgproxy",
+    "lib.whatslink",
 )
 
 
