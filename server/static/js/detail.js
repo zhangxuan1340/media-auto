@@ -617,8 +617,15 @@ function _magMerge(pages, cap, sort){
 // 变体来源: 简体(title)/繁体·台·港(altTitles)/原始(originalTitle)/英文(englishTitle),
 // 去重后按 maxGroups 限制组数(0=全部, N=最多 N 个)。相同/缺失的自动合并, 不会重复打。
 // 消噪不靠砍标题, 靠后端 ctype facets 类型过滤 —— 每组都过同一道类型闸, 低噪且覆盖广。
+// ⚠️ 中文标题 + 剧集【不能拼年份】(2026-10-14 实测): 中文组(高清剧集网/高清影视之家/mkvchina…)
+//    的剧集命名格式是 【站点】中文名[全N集][简繁英字幕].English.Name.Sxx.画质-组,
+//    里面**根本不写年份**。拼上年份等于 0 命中:
+//      魔女嘉莉 2026 S01 → 0 条(两源都是 0)
+//      魔女嘉莉 S01      → 3 条, 全是中文组资源(2160p 杜比视界 55.7G / 2160p 43.2G / 1080p 26.7G)
+//    中文组电影则相反 —— 名字里带年份(.Carrie.1976.), 所以电影仍保留年份(顺便挡同名老片)。
+//    季扫描那条路径(_seasonSeedQueries)本来就同时发带/不带年份两组, 不受此影响。
+const _CJK_RE = /[\u3400-\u9fff]/;   // 中日韩统一表意文字(简繁日共用)
 function _magQueries(title, originalTitle, year, seasonTag, englishTitle, altTitles, maxGroups){
-  const y = year ? ' '+year : '';
   const t = seasonTag ? ' '+seasonTag : '';
   const cands = [title, ...(altTitles || []), originalTitle, englishTitle];
   const base = [];
@@ -629,7 +636,11 @@ function _magQueries(title, originalTitle, year, seasonTag, englishTitle, altTit
     if(k && !seen.has(k)){ seen.add(k); base.push(String(c).trim()); }
   }
   if(maxGroups > 0 && base.length > maxGroups) base.length = maxGroups;
-  return base.map(c => `${c}${y}${t}`.trim());
+  return base.map(c => {
+    const dropYear = !!seasonTag && _CJK_RE.test(c);   // 中文组剧集不写年份 → 拼了必 0 命中
+    const y = (!dropYear && year) ? ' '+year : '';
+    return `${c}${y}${t}`.trim();
+  });
 }
 function _magSortHtml(box){
   const cur = box._sort || 'relevance';

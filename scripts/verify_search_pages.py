@@ -233,6 +233,38 @@ def main():
               "toast('加载失败: ' + e.message)" in js)
         css = (ROOT / "server" / "static" / "css" / "app.css").read_text("utf-8")
         check("到底文案有样式(.mag-end)", ".mag-end" in css)
+
+        # ---------- ④ 查询组构造: 中文组剧集不拼年份 ----------
+        # 报障(2026-10-14): 《魔女嘉莉(2026)》详情页里, 中文发布组(高清剧集网)的
+        # 2160p 中文资源一条都不显示。实测根因 —— 中文组的剧集命名【不写年份】:
+        #     【高清剧集网发布 www.PTHDTV.com】魔女嘉莉[全8集][简繁英字幕].Carrie.S01.2160p...
+        # 而 _magQueries 一律拼 `<标题> <年份> <Sxx>`, 两源都 0 命中:
+        #     魔女嘉莉 2026 S01 → 0 条   /   魔女嘉莉 S01 → 3 条(全是中文组资源)
+        # 中文组【电影】名字里带年份(.Carrie.1976.), 所以电影仍保留年份(顺便挡同名老片)。
+        print("\n-- ④ 磁力查询组(中文组剧集不拼年份) --")
+        try:
+            funcs = _extract_js(js, "const _CJK_RE", "function _magQueries")
+            cases = [
+                (["魔女嘉莉", "Carrie", "2026", "S01", "Carrie", [], 0],
+                 ["魔女嘉莉 S01", "Carrie 2026 S01"], "中文剧集丢年份, 英文组保留"),
+                (["魔女嘉莉", "Carrie", "2026", "", "Carrie", [], 0],
+                 ["魔女嘉莉 2026", "Carrie 2026"], "中文【电影】仍带年份"),
+                (["Some Show", "Some Show", "2026", "S02", "", "", 0],
+                 ["Some Show 2026 S02"], "拉丁标题剧集不受影响"),
+                (["Carrie", "Carrie", "2026", "S01", "Carrie", ["魔女嘉莉"], 0],
+                 ["Carrie 2026 S01", "魔女嘉莉 S01"], "altTitles 里的中文也丢年份"),
+                (["魔女嘉莉", "Carrie", "2026", "Specials", "", "", 0],
+                 ["魔女嘉莉 Specials", "Carrie 2026 Specials"], "特典季同样按中文丢年份"),
+            ]
+            got = _run_mag_queries(funcs, cases)
+            for (args, want, label), g in zip(cases, got):
+                check(f"查询组 · {label}", g == want, f"{g} != {want}")
+        except Exception as e:  # noqa: BLE001
+            check("查询组 · 抽取并执行 _magQueries", False, f"{type(e).__name__}: {e}")
+
+        # 季扫描那条路径本来就同时发带/不带年份两组, 别被这次修改带坏
+        check("季扫描仍同时发「带年份」与「不带年份」两组",
+              "push(title, true);" in js and "push(title, false);" in js)
     finally:
         D.search = real_search
 
@@ -242,6 +274,47 @@ def main():
         return 1
     print("  全部通过")
     return 0
+
+
+def _extract_js(js, start_marker, func_marker):
+    """从 detail.js 源码里抠出 [_CJK_RE 常量 ... _magQueries 函数体], 供 Node 直接执行。
+
+    detail.js 是 classic script(全局作用域, 依赖 DOM/其它全局函数), 整体没法在 Node 里跑;
+    只抽这一段纯函数出来执行, 才能对"到底会发出哪些查询词"做真实断言, 而不是只 grep 源码。
+    """
+    i = js.index(start_marker)
+    j = js.index(func_marker)
+    k = js.index("{", j)
+    depth = 0
+    for p in range(k, len(js)):
+        ch = js[p]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return js[i:p + 1]
+    raise AssertionError("未找到 _magQueries 函数体(花括号不配平)")
+
+
+def _run_mag_queries(funcs, cases):
+    """把抽出的函数丢给 node 执行, 返回每个用例的实际结果(JSON 往返)。"""
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+    node = shutil.which("node") or "/opt/homebrew/bin/node"
+    payload = _json.dumps([c[0] for c in cases], ensure_ascii=False)
+    script = (funcs + "\n"
+              f"const CASES = {payload};\n"
+              "console.log(JSON.stringify(CASES.map(a => _magQueries.apply(null, a))));\n")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "mag.js"
+        f.write_text(script, "utf-8")
+        out = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        raise RuntimeError(f"node 执行失败: {out.stderr.strip()[:300]}")
+    return _json.loads(out.stdout.strip())
 
 
 if __name__ == "__main__":
