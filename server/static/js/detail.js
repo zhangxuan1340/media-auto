@@ -734,7 +734,7 @@ async function searchMagnets(q, title, boxSel, limit, extra){
       <div class="res">${_seedThumb(r)}<div class="info">
         ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
         <div class="n">${_goldBadge(r)}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
-        ${_qualityTags(r.name, r)}
+        ${_qualityTags(_oname(r), r)}
         ${_pushBadge(r)}
         <div class="s">${_qScoreTag(r, sort)}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(i, `pushMagnet(${i}, this)`, `pushQbit(${i}, this)`, r)}</div></div>`).join('')
@@ -832,7 +832,7 @@ async function loadMoreMagnets(btn){
       <div class="res">${_seedThumb(r)}<div class="info">
         ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
         <div class="n">${_goldBadge(r)}${_grpBadge(r)}${_demoteBadge(r)}${esc(r.name||'')}</div>
-        ${_qualityTags(r.name, r)}
+        ${_qualityTags(_oname(r), r)}
         ${_pushBadge(r)}
         <div class="s">${_qScoreTag(r, sort)}<span class="sz">${icon('box')}${fmt(r.size)}</span>${_seedTags(r)}</div>
       </div><div class="res-btns">${_pushButtons(base+i, `pushMagnet(${base+i}, this)`, `pushQbit(${base+i}, this)`, r)}</div></div>`).join('');
@@ -913,6 +913,11 @@ async function pushSeasonQbit(tmdbId, btn, i, season){
 }
 
 function fmt(b){ if(b==null) return '—'; b=+b; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(1)+' '+u[i]; }
+// 解析画质 / 判分数用的名字: **原始发布名优先**。
+// ⚠️ native 源一旦把条目匹配到 TMDB, 就把 name 换成规范化短名(`Carrie (2026) S01E07`),
+// 里头没有 2160p/H265/HDR —— 拿它解析画质会一个标签都出不来(后端质量分同理, 见 _qname)。
+// 列表展示仍用 name(短名更好认), 只有"要看画质"的地方换成这个。
+function _oname(r){ return (r && (r.torrentName || r.name)) || ''; }
 // 从磁力/资源名提取质量徽章(分辨率/编码/HDR/发布组), 让种子列表一眼分优劣。
 // 返回徽章 HTML 串(无特征时返回空)。
 function _qualityTags(name, r){
@@ -1195,7 +1200,7 @@ async function scanSeasonSeads(tmdbId, season, btn, silent){
         <div class="res res-compact">${_seedThumb(r)}<div class="info">
           ${_multiSrc?`<div class="res-src">${_srcBadge(r)}</div>`:''}
           <div class="n">${_demoteBadge(r)}${esc(r.name||'')}</div>
-          ${_qualityTags(r.name, r)}
+          ${_qualityTags(_oname(r), r)}
           ${_pushBadge(r)}
           <div class="s"><span class="sz">${fmt(r.size)}</span>${_seedTags(r)}</div></div>
           <div class="res-btns">${_pushButtons(i, `pushSeasonMagnet(${tmdbId},this,${i},'${season}')`, `pushSeasonQbit(${tmdbId},this,${i},'${season}')`, r)}</div></div>`).join('');

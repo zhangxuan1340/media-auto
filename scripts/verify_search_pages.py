@@ -26,6 +26,10 @@ sys.path.insert(0, str(ROOT))
 FAILED = []
 LATENCY = 0.25          # 打桩站点单页往返耗时(模拟真实 2~3.5s, 这里缩到 0.25s 便于断言)
 TOTAL = 64              # 语料条数(6 页满 + 第 7 页 4 条)
+# ⚠️ 查询词必须真的出现在语料标题里: 2026-10-14 起三源都挂了「相关性闸门」
+# (lib/title_relevance), 查 `test` 而语料叫 `Movie.2024...` 会被整批过滤成 0 条。
+# 用 `movie` 与语料 `Movie.2024.1080p.WEB-xxx` 对齐 —— 翻页语义与闸门一起被覆盖。
+QUERY = "movie"
 
 
 def check(name, cond, detail=""):
@@ -150,7 +154,7 @@ def main():
             app.dependency_overrides[get_config] = lambda: cfg
             client = TestClient(app)
 
-            r1 = client.get("/api/search?q=test&sort=quality&limit=30").json()
+            r1 = client.get("/api/search?q=movie&sort=quality&limit=30").json()
             check("首屏只抓一个窗口(<=60 条), 不是 _SORT_CAP=200",
                   site.caps and site.caps[0] <= s._WINDOW0, site.caps)
             check("首屏 30 条 + totalCount=窗口条数",
@@ -160,13 +164,13 @@ def main():
                   r1["hasMore"] is True and r1.get("exhausted") is False, r1.get("exhausted"))
 
             n_calls = site.calls
-            r2 = client.get("/api/search?q=test&sort=quality&limit=30&page=2").json()
+            r2 = client.get("/api/search?q=movie&sort=quality&limit=30&page=2").json()
             check("第 2 页直接吃缓存(不发新抓取)", site.calls == n_calls,
                   f"{n_calls} -> {site.calls}")
             check("第 2 页拿到 30..59 的 30 条", len(r2["items"]) == 30, len(r2["items"]))
             check("第 2 页 hasMore=True(窗口没到底)", r2["hasMore"] is True, r2["hasMore"])
 
-            r3 = client.get("/api/search?q=test&sort=quality&limit=30&page=3").json()
+            r3 = client.get("/api/search?q=movie&sort=quality&limit=30&page=3").json()
             # 增量续抓: 第 3 页要 90 条, 首屏窗口只有 60 → 必须再发一次抓取(增量补 target-cap0),
             # 而不是直接吃 60 条的旧缓存。用调用次数增长来验证(不耦合"单个更大 cap"的旧回退写法)。
             check("第 3 页需要 90 条 → 触发增量抓取撑大窗口", site.calls > n_calls,
@@ -176,13 +180,13 @@ def main():
                   (r3.get("exhausted"), r3["hasMore"]))
             check("第 3 页只回剩下的 4 条", len(r3["items"]) == 4, len(r3["items"]))
             check("第 4 页空 + 不再有更多",
-                  client.get("/api/search?q=test&sort=quality&limit=30&page=4").json()
+                  client.get("/api/search?q=movie&sort=quality&limit=30&page=4").json()
                   .get("hasMore") is False)
 
             # 换排序 → 换缓存 key(规则指纹进 key 的老行为不回归)
             s._sort_cache.clear()
             site.caps.clear()
-            rs = client.get("/api/search?q=test&sort=size_desc&limit=30").json()
+            rs = client.get("/api/search?q=movie&sort=size_desc&limit=30").json()
             check("size_desc 也走分段窗口", site.caps == [s._WINDOW0], site.caps)
             check("size_desc 按大小降序",
                   all((rs["items"][i]["size"] or 0) >= (rs["items"][i + 1]["size"] or 0)
@@ -192,7 +196,7 @@ def main():
             # 相关性: 不拉窗口, 按页直取, nextPage = 实际 offset 换算
             s._sort_cache.clear()
             site.caps.clear()
-            rr = client.get("/api/search?q=test&sort=relevance&limit=30").json()
+            rr = client.get("/api/search?q=movie&sort=relevance&limit=30").json()
             check("relevance 不进分段窗口(不调 _fetch_all)", site.caps == [], site.caps)
             check("relevance 首页 30 条 + nextPage=4(站点每页 10)",
                   len(rr["items"]) == 30 and rr["nextPage"] == 4,
@@ -200,12 +204,12 @@ def main():
 
             # 缓存窗口过期(TTL)后重新抓 → cap 会随需要的页数增长
             s._sort_cache.clear()
-            client.get("/api/search?q=test&sort=quality&limit=30")   # 重新灌一份窗口缓存
-            key = s._sort_key("test", "quality", "next_web", cfg)
+            client.get("/api/search?q=movie&sort=quality&limit=30")   # 重新灌一份窗口缓存
+            key = s._sort_key("movie", "quality", "next_web", cfg)
             ts, items, cap, ex = s._sort_cache[key]
             s._sort_cache[key] = (ts - (s._SORT_CACHE_TTL + 1), items, cap, ex)
             site.caps.clear()
-            client.get("/api/search?q=test&sort=quality&limit=30&page=3")
+            client.get("/api/search?q=movie&sort=quality&limit=30&page=3")
             check("缓存过期后重新抓(且按需增长)", site.caps and site.caps[0] > s._WINDOW0,
                   site.caps)
         finally:

@@ -68,7 +68,7 @@ query ($input: TorrentContentSearchQueryInput!) {
         title
         seeders
         leechers
-        torrent { size magnetUri }
+        torrent { __TNAME__ size magnetUri }
         content {
           type
           title
@@ -120,7 +120,8 @@ def _detect_dialect(url):
         return _dialect_cache[url]
     intro = ('{ q: __type(name: "Query") { fields { name args { name } } } '
              'tc: __type(name: "TorrentContentQuery") { fields { name } } '
-             'ct: __type(name: "Content") { fields { name } } }')
+             'ct: __type(name: "Content") { fields { name } } '
+             'tr: __type(name: "Torrent") { fields { name } } }')
     req = urllib.request.Request(
         url, data=json.dumps({'query': intro}).encode('utf-8'),
         headers={'Content-Type': 'application/json'})
@@ -134,7 +135,8 @@ def _detect_dialect(url):
     data = d.get('data') or {}
     tc_fields = {f.get('name') for f in (data.get('tc') or {}).get('fields') or []}
     ct_fields = {f.get('name') for f in (data.get('ct') or {}).get('fields') or []}
-    _caps_cache[url] = {'attrs': 'attributes' in ct_fields}
+    tr_fields = {f.get('name') for f in (data.get('tr') or {}).get('fields') or []}
+    _caps_cache[url] = {'attrs': 'attributes' in ct_fields, 'tname': 'name' in tr_fields}
     kind = 'unknown'
     for f in data.get('q', {}).get('fields') or []:
         if f.get('name') == 'torrentContent' and any(
@@ -150,6 +152,17 @@ def _detect_dialect(url):
 def _has_attributes(url):
     """该端点的 Content 是否支持 attributes 子字段。未探测过/探测失败 → False(保守不注入)。"""
     return bool(_caps_cache.get(url, {}).get('attrs'))
+
+
+def _has_torrent_name(url):
+    """该端点的 Torrent 是否支持 name(原始发布名)。
+
+    ⚠️ 这个字段比看上去重要: Bitmagnet 一旦把条目匹配到 TMDB, 就会把
+    `torrentContent.title` 换成规范化短名(`Carrie (2026) S01E07`) —— 那里既没有
+    年份也没有画质标记。做相关性判定(挡同名不同年)和算质量分(分辨 HDR/H.265)
+    都只能靠这个原始发布名。老版本没有该字段时保守不带, 否则整条查询会报错。
+    """
+    return bool(_caps_cache.get(url, {}).get('tname'))
 
 
 def _tmdb_img(path, size):
@@ -184,7 +197,8 @@ def _poster_from_attrs(attrs):
     return _tmdb_img(poster, 'w500') or _tmdb_img(backdrop, 'w780')
 
 
-def _normalize(info_hash, name, size, seeders, leechers, magnet, content, language):
+def _normalize(info_hash, name, size, seeders, leechers, magnet, content, language,
+               torrent_name=''):
     """把不同版本的字段归一化成统一结构(调用方与 preview_classify 都按这个读)。"""
     content = dict(content or {})
     if language and not content.get('language'):
@@ -193,6 +207,10 @@ def _normalize(info_hash, name, size, seeders, leechers, magnet, content, langua
     return {
         'infoHash': info_hash,
         'name': name,
+        # 原始发布名(Bitmagnet 的 Torrent.name)。相关性判定与质量分都应按它来 ——
+        # name 在条目匹配到 TMDB 后会被换成规范化短名, 既没年份也没画质标记。
+        # 取不到(old schema / 老版本)时退化为 name, 语义与旧版一致。
+        'torrentName': torrent_name or name or '',
         'size': size,
         'seeders': seeders,
         'leechers': leechers,
@@ -207,12 +225,15 @@ def search(config, query, limit=20, content_type=None):
     kind = _detect_dialect(url)
     # 只有端点支持 Content.attributes 才注入封面图选择集(否则老版本会整条查询报错)
     attrs_sel = _ATTRS_SEL if _has_attributes(url) else ''
+    # 原始发布名: 端点支持 Torrent.name 才带上(老版本没有该字段, 带上会整条查询报错)
+    tname_sel = 'name' if _has_torrent_name(url) else ''
     if kind == 'new':
         # 新版 schema 支持 facets 过滤(按 contentType 消噪); content_type 传 'movie'/'tv_show' 等
         inp = {'queryString': query, 'limit': limit}
         if content_type:
             inp['facets'] = {'contentType': {'filter': content_type}}
-        gql, variables = QUERY_NEW.replace('__ATTRS__', attrs_sel), {'input': inp}
+        gql = QUERY_NEW.replace('__ATTRS__', attrs_sel).replace('__TNAME__', tname_sel)
+        variables = {'input': inp}
     elif kind == 'old':
         gql, variables = QUERY_OLD.replace('__ATTRS__', attrs_sel), {'q': query, 'limit': limit}
     else:
@@ -246,7 +267,8 @@ def search(config, query, limit=20, content_type=None):
             lang = (c.get('originalLanguage') or {}).get('name') or ''
             out.append(_normalize(
                 it.get('infoHash'), it.get('title'), t.get('size'),
-                it.get('seeders'), it.get('leechers'), t.get('magnetUri'), c, lang))
+                it.get('seeders'), it.get('leechers'), t.get('magnetUri'), c, lang,
+                torrent_name=t.get('name')))
     else:
         results = (raw.get('torrentContent') or {}).get('results') or []
         for r in results:

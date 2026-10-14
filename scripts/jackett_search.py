@@ -48,6 +48,7 @@ import xml.etree.ElementTree as ET
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 from lib import httputil  # noqa: E402
+from lib import title_relevance  # noqa: E402
 try:
     from lib.config import load_config
 except Exception:  # 兜底:脱离项目目录时仍可跑
@@ -60,8 +61,8 @@ UA = os.environ.get("JACKETT_UA", "media-auto/1.0")
 _HASH_RE = re.compile(r"urn:btih:([0-9a-fA-F]{32,40})", re.I)
 # 相关性过滤用的 token(治 Jackett 公开站"搜不到→回退返回最新 N 条"的填充):
 #   拉丁实词 ≥4 字符(排除 man/ice/the 等高频短词 + 年份等纯数字); CJK 连续段 ≥2。
-_ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
-_CJK_TOKEN_RE = re.compile(r"[\u3400-\u9fff]{2,}")
+# 查询词"强 token"的解析已统一到 lib/title_relevance.py —— 三源(carrier 模糊索引 /
+# 全文检索 / 公开站填充)需要用同一套判定, 见该模块 docstring。
 
 
 def resolve_settings(cfg, cli_base=None, cli_key=None, cli_indexer=None):
@@ -235,34 +236,25 @@ def _fetch_one(base, apikey, indexer, query, limit, timeout):
     return _parse_torznab(raw)
 
 
-def _strong_tokens(query):
-    """查询词的"强" token: 拉丁实词(≥4 字符, 排除 man/ice/the 等高频短词) + 剔除年份等纯数字;
-    外加 CJK 连续段(≥2)。返回 (ascii_set, cjk_set)。"""
-    ascii_toks = {w.lower() for w in _ASCII_TOKEN_RE.findall(query or "")
-                  if len(w) >= 4 and not w.isdigit()}
-    cjk_toks = {w for w in _CJK_TOKEN_RE.findall(query or "")}
-    return ascii_toks, cjk_toks
-
-
 def _relevance_filter(items, query, cfg):
-    """Jackett 公开站在**搜不到**时会回退返回"最新 N 条"填充(与查询无关), 会把真结果淹没。
-    这里对每条做门槛: 标题不含查询任何强 token 的, 判为填充丢弃; 含的(真片)保留。
+    """丢"填充" / 丢"同名不同年" —— 与 native / next_web 同一套判定(见 lib/title_relevance.py)。
+
+    Jackett 侧的特别之处: 公开站在**搜不到**时会回退返回"最新 N 条"(与查询完全无关),
+    所以这道闸在这里要同时治两件事: ① 标题不命中; ② 年份与目标冲突。
+
+    ⚠️ 旧实现是**子串**匹配(`t in name`), 于是 `carrie` 会命中 `carriers` / `carried` /
+    `carriera` —— Next-Web 的噪声正是这个成因。现统一为**字母边界 + 年份闸**。
+    取名字同样"原始发布名优先", 与 router 的 `_qname` 同口径。
+
     - 开关 `jackett.relevance_filter`(默认开, 关则原样返回)。
-    - 查询解析不出任何强 token(极短词等) → 保守放行全部, 避免误删。
-    只作用于 Jackett 源 —— Bitmagnet 是正经搜索索引, 返回本就相关, 不做此过滤。
+    - 查询解析不出任何强 token → 保守放行全部, 避免误删。
     """
     j = (cfg or {}).get(CONFIG_KEY) or {}
     if not j.get("relevance_filter", True):
         return items
-    ascii_toks, cjk_toks = _strong_tokens(query)
-    if not ascii_toks and not cjk_toks:
-        return items
-    kept = []
-    for it in items:
-        name = (it.get("name") or "").lower()
-        if any(t in name for t in ascii_toks) or any(t in name for t in cjk_toks):
-            kept.append(it)
-    return kept
+    return title_relevance.filter_by_query(
+        items, query,
+        name_of=lambda it: (it.get("torrentName") or it.get("name") or ""))
 
 
 def search(cfg, query, limit=30):

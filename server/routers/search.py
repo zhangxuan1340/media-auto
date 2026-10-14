@@ -369,6 +369,41 @@ async def _load_window(source, cfg, q, need, sort, multi=False, ctype=None):
     return items, exhausted
 
 
+def _qname(it):
+    """判定 / 算分用的名字: **原始发布名优先**。
+
+    ⚠️ 为什么不能直接用 name: native 源一旦把条目匹配到 TMDB, 就把 name 换成
+    规范化短名(`Carrie (2026) S01E08`) —— 里头既没有年份(年份闸失效)也没有
+    2160p/H265/HDR 这类画质标记(质量分恒 0, 于是"最准的那条源"反而被排到最末)。
+    next_web / jackett 的 name 本来就是发布名, torrentName 与它同值, 行为不变。
+    """
+    if not it:
+        return ""
+    return it.get("torrentName") or it.get("name") or ""
+
+
+def _relevance_on(cfg, source):
+    """该源的相关性闸门是否开启(默认开)。按源分开, 便于单独关掉某一源排错。"""
+    sec = (cfg or {}).get(_SOURCE_CFG_KEY.get(source, "")) or {}
+    return bool(sec.get("relevance_filter", True))
+
+
+def _gate(items, q, cfg, source):
+    """相关性闸门: 丢掉「标题不命中」或「年份与目标冲突」的条目。
+
+    规则与动机见 `lib/title_relevance.py` —— 三条源的检索语义都不保证相关性:
+    next_web 站是 pg_trgm 模糊索引, 会把 `Carriers`/`Carried`/`Carriera` 当成 `carrie`;
+    native 不带类型 facets 时同样会把"只命中年份"的条目带回来。
+    开关: `bitmagnet.relevance_filter` / `bitmagnet_next_web.relevance_filter`(默认开)。
+    Jackett 不走这里 —— 它在 `scripts/jackett_search.py` 里有自己那道
+    (还得顺带治公开站的"最新 N 条"填充)。
+    """
+    if not items or not _relevance_on(cfg, source):
+        return items
+    from lib import title_relevance
+    return title_relevance.filter_by_query(items, q, name_of=_qname)
+
+
 def _apply_sort(items, sort, cfg=None):
     """就地排序(全局)。relevance 不动; 缺失值的排到末尾, 不报错。"""
     if sort == "quality":
@@ -376,8 +411,8 @@ def _apply_sort(items, sort, cfg=None):
         # 质量分降序 → 同分按大小降序(同分辨率里大文件=更高码率/Remux 更优)
         # → 再同分按 seeders(Next-Web 源无 seeders → 缺失排末尾, 同值保持原序)
         items.sort(key=lambda r: (
-            _group_rank_key(r.get("name"), cfg),
-            quality_score(r.get("name"), cfg, r.get("size")),
+            _group_rank_key(_qname(r), cfg),
+            quality_score(_qname(r), cfg, r.get("size")),
             r.get("size") or 0,
             r.get("seeders") is not None, r.get("seeders") or 0,
         ), reverse=True)
@@ -405,7 +440,7 @@ def _annotate_group(items, cfg):
     供前端「前排」徽章与双查询合并后的同规则重排使用。"""
     names = group_priority_list(cfg)
     for it in items:
-        pr = group_rank(it.get("name"), cfg)
+        pr = group_rank(_qname(it), cfg)
         it["groupRank"] = pr
         it["groupName"] = names[pr] if pr is not None else None
     return items
@@ -414,10 +449,11 @@ def _annotate_group(items, cfg):
 def _annotate_quality(items, cfg):
     """就地回传质量分/金标/前排组/降权: 双查询合并后前端按同规则重排, 徽章渲染。"""
     for it in items:
-        it["qualityScore"] = quality_score(it.get("name"), cfg, it.get("size"))
-        it["golden"] = is_golden(it.get("name"), cfg)
-        it["goldenBy"] = golden_by(it.get("name"), cfg)  # 命中自压组名 → 前端标注"自压"
-        db = demote_by(it.get("name"), cfg)              # 命中降权组 → 前端"降权"徽章
+        nm = _qname(it)                                  # 原始发布名优先(见 _qname)
+        it["qualityScore"] = quality_score(nm, cfg, it.get("size"))
+        it["golden"] = is_golden(nm, cfg)
+        it["goldenBy"] = golden_by(nm, cfg)               # 命中自压组名 → 前端标注"自压"
+        db = demote_by(nm, cfg)                           # 命中降权组 → 前端"降权"徽章
         it["demoted"] = bool(db)
         it["demotedBy"] = db
     return _annotate_group(items, cfg)
@@ -433,7 +469,7 @@ def _annotate_suspect(items):
     让"名字吹 4K、体积几十 MB"的种子一眼看出来, 而不是被质量分抬到前面。
     """
     for it in items:
-        it["sizeSuspect"] = _size_adjust(resolution(it.get("name")), it.get("size")) <= _SIZE_SUSPECT_AT
+        it["sizeSuspect"] = _size_adjust(resolution(_qname(it)), it.get("size")) <= _SIZE_SUSPECT_AT
     return items
 
 
@@ -503,22 +539,54 @@ def _source_fetch_cap(source, multi):
 async def _search_native(cfg, q, limit, ctype=None):
     from scripts import search as bm_search
     results = await run_in_threadpool(bm_search.search, cfg, q, limit, ctype)
-    out = []
-    for r in results:
-        magnet = r.get("magnetLink") or (
-            f"magnet:?xt=urn:btih:{r['infoHash']}" if r.get("infoHash") else "")
-        out.append({
-            "infoHash": r.get("infoHash"),
-            "name": r.get("name"),
-            "size": r.get("size"),
-            "seeders": r.get("seeders"),
-            "leechers": r.get("leechers"),
-            "magnet": magnet,
-            # 封面图: Bitmagnet 的 tmdb 元数据扩展写进 content.attributes 的海报(poster_path)
-            "image": r.get("poster") or "",
-        })
+    out = _gate([_native_item(r) for r in results], q, cfg, "native")
     # 原生 GraphQL 不支持 page 翻页(limit 即上限)
     return out, False, 1
+
+
+def _native_item(r):
+    """native 一条结果 → 统一 item(两个取数路径共用, 避免口径漂移)。
+
+    除展示用的 name 之外还带上:
+      · torrentName —— 原始发布名。相关性判定与质量分都按它算(见 `_qname`)。
+      · content* —— Bitmagnet 已经匹配好的 TMDB 元数据。旧实现只取了海报图片,
+        把 title / releaseYear / type 全扔了 —— 那是现成的最强过滤依据。
+    """
+    magnet = r.get("magnetLink") or (
+        f"magnet:?xt=urn:btih:{r['infoHash']}" if r.get("infoHash") else "")
+    c = r.get("content") or {}
+    return {
+        "infoHash": r.get("infoHash"),
+        "name": r.get("name"),
+        "size": r.get("size"),
+        "seeders": r.get("seeders"),
+        "leechers": r.get("leechers"),
+        "magnet": magnet,
+        # 封面图: Bitmagnet 的 tmdb 元数据扩展写进 content.attributes 的海报(poster_path)
+        "image": r.get("poster") or "",
+        "torrentName": r.get("torrentName") or r.get("name") or "",
+        "contentTitle": c.get("title") or "",
+        "contentYear": c.get("releaseYear"),
+        "contentType": c.get("type") or "",
+    }
+
+
+def _next_web_item(t):
+    """next_web 一条结果 → 统一 item。
+
+    该站 REST 接口只有 hash/name/size/magnet/files, name 本身就是原始发布名 →
+    torrentName 与它同值, 判定与算分口径就和 native 对齐了。
+    """
+    return {
+        "infoHash": t.get("hash"),
+        "name": t.get("name"),
+        "size": t.get("size"),
+        "seeders": None,   # Next-Web 源不提供 seeders/leechers
+        "leechers": None,
+        "magnet": t.get("magnet"),
+        "image": "",       # 该站 REST 接口不带封面图
+        "torrentName": t.get("name") or "",
+    }
 
 
 async def _search_next_web(cfg, q, limit, page=1):
@@ -529,17 +597,7 @@ async def _search_next_web(cfg, q, limit, page=1):
     start_offset = max(0, page - 1) * diao_search.PAGE_SIZE
     items, _total, _kw, more, end_offset = await run_in_threadpool(
         diao_search.collect, base, q, max(1, limit), start_offset=start_offset)
-    out = []
-    for t in items:
-        out.append({
-            "infoHash": t.get("hash"),
-            "name": t.get("name"),
-            "size": t.get("size"),
-            "seeders": None,   # Next-Web 源不提供 seeders/leechers
-            "leechers": None,
-            "magnet": t.get("magnet"),
-            "image": "",       # 该站 REST 接口不带封面图(只有 hash/name/size/magnet/files)
-        })
+    out = _gate([_next_web_item(t) for t in items], q, cfg, "next_web")
     # 精确续翻页号: 实际翻到的 offset 换算回 page(去重可能少走页, 不能按返回条数猜)
     next_page = end_offset // diao_search.PAGE_SIZE + 1
     return out, bool(more), next_page
@@ -609,26 +667,11 @@ async def _fetch_all(source, cfg, q, cap, start_offset=0, multi=False, ctype=Non
             diao_search.collect, base, q, min(cap, _source_fetch_cap("next_web", multi)),
             start_offset=max(0, start_offset))
         out = []
-        for t in items:
-            out.append({
-                "infoHash": t.get("hash"), "name": t.get("name"), "size": t.get("size"),
-                "seeders": None, "leechers": None, "magnet": t.get("magnet"),
-                "image": "",
-            })
-        return out
+        return _gate([_next_web_item(t) for t in items], q, cfg, "next_web")
     else:
         from scripts import search as bm_search
         results = await run_in_threadpool(bm_search.search, cfg, q, min(cap, 100), ctype)
-        out = []
-        for r in results:
-            magnet = r.get("magnetLink") or (
-                f"magnet:?xt=urn:btih:{r['infoHash']}" if r.get("infoHash") else "")
-            out.append({
-                "infoHash": r.get("infoHash"), "name": r.get("name"), "size": r.get("size"),
-                "seeders": r.get("seeders"), "leechers": r.get("leechers"), "magnet": magnet,
-                "image": r.get("poster") or "",
-            })
-        return out
+        return _gate([_native_item(r) for r in results], q, cfg, "native")
 
 
 # ---------------------------------------------------------------------------
